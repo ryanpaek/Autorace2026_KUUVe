@@ -59,6 +59,11 @@ DEFAULT_PARAMS = {
     # M1 신호등
     'stop_on_green_arrival': True,  # 도착 때 녹색이어도 일단 서고 녹색 확인 후 출발 (안전 기본값)
     'green_go_delay_sec': 0.3,
+    # 도면 경로 지도 (track_route.yaml). mission_node가 points를 넣어 준다.
+    # route_s가 들어오면 위의 *_len_mm 거리 대신 도면 위치로 구간을 넘긴다.
+    'route_points': {},
+    'route_slow_before_mm': 300.0,   # 서행 선 이만큼 앞에서 표지를 못 봐도 서행 시작
+    'route_island_margin_mm': 300.0, # 섬 끝 이만큼 앞에서 M7 -> M2
 }
 
 
@@ -97,6 +102,7 @@ class Inputs:
     obstacle: dict = field(default_factory=dict)  # /obstacle/state
     parking: dict = field(default_factory=dict)   # /parking/state
     start: bool = False
+    route_s: Optional[float] = None            # 도면 경로상 위치 (route.RouteTracker). 없으면 거리 기준
 
 
 @dataclass
@@ -121,6 +127,7 @@ class StopApproach:
         self.key = key           # 기본: 바로 뒤에 횡단보도 막대가 있는 가로선만 정지선으로 봄
         self.seen_d = None       # 마지막으로 본 정지선 거리 (앞바퀴 기준)
         self.seen_at = None      # 그때의 누적 주행 거리
+        self.route_line_s = None  # 도면상 정지선 s. 카메라가 선을 못 볼 때만 쓰는 예비값
 
     def remaining(self, inp: Inputs) -> Optional[float]:
         # 미션 시작선도 흰 가로선이라, 횡단보도 막대가 뒤따르는 선만 쓴다.
@@ -133,6 +140,8 @@ class StopApproach:
             if self.seen_d is None or abs(d - self._predicted(inp)) < 150.0:
                 self.seen_d, self.seen_at = d, inp.dist_mm
         if self.seen_d is None:
+            if self.route_line_s is not None and inp.route_s is not None:
+                return self.route_line_s - inp.route_s
             return None
         travelled = inp.dist_mm - self.seen_at
         if travelled > self.seen_d + self.lost_ok_mm:
@@ -210,10 +219,26 @@ class MissionFSM:
         lines = inp.lane.get('crosswalk_lines_mm') or []
         return bool(lines) and lines[0] <= self.p['arm_on_crosswalk_mm']
 
-    def _arm_stop(self, inp: Inputs) -> None:
+    def _arm_stop(self, inp: Inputs, line: Optional[str] = None) -> None:
         self._sub('approach', inp)
         self.stop = StopApproach(self.p['stop_target_mm'], self.p['stop_brake_mm'],
                                  self.p['stop_lost_ok_mm'])
+        self.stop.route_line_s = self._rp(line) if line else None
+
+    def _rp(self, name: str) -> Optional[float]:
+        return (self.p.get('route_points') or {}).get(name)
+
+    def _past(self, inp: Inputs, name: str, offset: float = 0.0) -> Optional[bool]:
+        """도면 경로 위치 기준: name 지점 + offset을 지났나. 경로 정보가 없으면 None."""
+        s0 = self._rp(name)
+        if inp.route_s is None or s0 is None:
+            return None
+        return inp.route_s >= s0 + offset
+
+    def _stop_near(self, inp: Inputs, line: str) -> bool:
+        cam = self._crosswalk_near(inp)
+        r = self._past(inp, line, -self.p['arm_on_crosswalk_mm'])
+        return cam or bool(r)
 
     # --- 메인 ---------------------------------------------------------------
     def step(self, inp: Inputs) -> Command:
@@ -240,25 +265,30 @@ class MissionFSM:
     def _s_M5_BUMP(self, inp):
         """서행 표지(또는 방지턱 표지)를 보면 bump_slow_mm 동안 서행."""
         if self.sub == '':
-            if self._vote(inp, 'slow', 'bump'):
+            near = self._past(inp, 'm5_slow_line', -self.p['route_slow_before_mm'])
+            if self._vote(inp, 'slow', 'bump') or near:
                 self._sub('slow', inp)
             else:
                 return Command('lane', self._lane(self.p['base_speed']))
         _, d = self._since(inp, sub=True)
-        if d >= self.p['bump_slow_mm']:
+        if d >= self.p['bump_slow_mm'] or self._past(inp, 'm6_zigzag_line', -1500.0):
             self._next(inp, f'bump passed {d:.0f}mm')
             return Command('lane', self._lane(self.p['base_speed']))
         return Command('lane', self._lane(self.p['slow_speed']))
 
     def _s_M6_ZIGZAG(self, inp):
-        """TODO 진입 판단: 지금은 거리 기준. 지그재그 시작선(흰 가로선)을 보는 방식으로 바꿀 것."""
+        """지그재그: 도면 경로가 있으면 시작선·끝 위치로, 없으면 거리로 판단."""
         if self.sub == '':
-            _, d = self._since(inp)
-            if d < self.p['zigzag_start_mm']:
+            at = self._past(inp, 'm6_zigzag_line', -50.0)
+            if at is None:
+                _, d = self._since(inp)
+                at = d >= self.p['zigzag_start_mm']
+            if not at:
                 return Command('lane', self._lane(self.p['base_speed']))
             self._sub('zigzag', inp)
         _, dz = self._since(inp, sub=True)
-        if dz >= self.p['zigzag_len_mm']:
+        end = self._past(inp, 'm6_zigzag_end')
+        if (dz >= self.p['zigzag_len_mm']) if end is None else end:
             self._next(inp, f'zigzag done {dz:.0f}mm')
             return Command('lane', self._lane(self.p['base_speed']))
         return Command('lane', self._lane(self.p['slow_speed'], 'zigzag',
@@ -268,8 +298,8 @@ class MissionFSM:
         """보행자 표지 -> 정지선 ±5cm 정지 -> 3초 이상 대기 -> 15초 안에 출발."""
         p = self.p
         if self.sub == '':
-            if self._vote(inp, 'pedestrian') or self._crosswalk_near(inp):
-                self._arm_stop(inp)
+            if self._vote(inp, 'pedestrian') or self._stop_near(inp, 'm3_stop_line'):
+                self._arm_stop(inp, 'm3_stop_line')
             else:
                 return Command('lane', self._lane(p['base_speed']))
         if self.sub == 'approach':
@@ -282,7 +312,7 @@ class MissionFSM:
                 return Command('stop', self._lane(0.0))
             self._sub('go', inp)
         _, d = self._since(inp, sub=True)
-        if d >= p['leave_mm']:
+        if d >= p['leave_mm'] and self._past(inp, 'm3_crosswalk_end') is not False:
             self._next(inp, 'left crosswalk')
         return Command('lane', self._lane(p['base_speed']))
 
@@ -302,8 +332,9 @@ class MissionFSM:
         self._remember_fork(inp)
         _, d = self._since(inp)
         done = inp.obstacle.get('m7_done', False)
-        if done or d >= self.p['m7_len_mm']:
-            self._next(inp, 'obstacle zone done' if done else f'm7 distance {d:.0f}mm')
+        end = self._past(inp, 'm7_island_tip', -self.p['route_island_margin_mm'])
+        if done or ((d >= self.p['m7_len_mm']) if end is None else end):
+            self._next(inp, 'obstacle zone done' if done else f'm7 end at {d:.0f}mm')
         src = 'obstacle' if self.p['obstacle_source_ready'] else 'lane'
         return Command(src, self._lane(self.p['approach_speed']))
 
@@ -319,7 +350,8 @@ class MissionFSM:
             self._sub('branch', inp)
         mode = 'left_only' if self.fork_choice == 'A' else 'right_only'
         _, db = self._since(inp, sub=True)
-        if db >= self.p['fork_len_mm']:
+        end = self._past(inp, 'm2_merge_end')
+        if (db >= self.p['fork_len_mm']) if end is None else end:
             self._next(inp, f'fork {self.fork_choice} done')
             return Command('lane', self._lane(self.p['base_speed']))
         return Command('lane', self._lane(self.p['approach_speed'], mode))
@@ -327,8 +359,9 @@ class MissionFSM:
     def _s_M8_CONES(self, inp):
         _, d = self._since(inp)
         done = inp.obstacle.get('cones_done', False)
-        if done or d >= self.p['cones_len_mm']:
-            self._next(inp, 'cones done' if done else f'cones distance {d:.0f}mm')
+        end = self._past(inp, 'm8_end_line', 100.0)
+        if done or ((d >= self.p['cones_len_mm']) if end is None else end):
+            self._next(inp, 'cones done' if done else f'cones end at {d:.0f}mm')
         src = 'obstacle' if self.p['obstacle_source_ready'] else 'lane'
         return Command(src, self._lane(self.p['slow_speed']))
 
@@ -338,8 +371,8 @@ class MissionFSM:
         red = self._vote(inp, 'red', 'yellow')
         green = self._vote(inp, 'green')
         if self.sub == '':
-            if red or green or self._crosswalk_near(inp):
-                self._arm_stop(inp)
+            if red or green or self._stop_near(inp, 'm1_stop_line'):
+                self._arm_stop(inp, 'm1_stop_line')
             else:
                 return Command('lane', self._lane(p['base_speed']))
         if self.sub == 'approach':

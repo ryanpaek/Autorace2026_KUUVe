@@ -1,0 +1,43 @@
+# 트랙 경로 지도 (2026Track 도면 10/20, DXF에서 추출). 단위 mm.
+# 좌표: 도면 좌하단이 (0, 0), x 오른쪽(동쪽) +, y 위쪽(북쪽) +. 트랙 전체 10000 x 6000.
+# s: 경로 중심선을 따라 잰 거리 (앞바퀴 기준). s=0은 출발 체커 중앙.
+# 경로는 각 차로의 중심선이다. 코너는 안쪽 경계 R600 + 차로 반폭 250 = R850.
+# 갈림길(A/B)은 가운데 차로 중심선으로 근사한다 (A/B로 돌아가면 실제 거리가 조금 길다).
+#   -> 다음 흰 선(라바콘 시작선)에서 s를 다시 맞추므로 누적되지 않는다.
+
+start_xy: [1010, 5580]
+
+segments:
+  - {type: line, to: [8730, 5580]}                                   # 상단 바깥 차로 (동쪽)
+  - {type: arc, center: [8730, 4730], radius: 850, start_deg: 90, end_deg: 0}     # 우상단 코너
+  - {type: line, to: [9580, 1790]}                                   # 우측 (남쪽): 지그재그·횡단보도
+  - {type: arc, center: [8730, 1790], radius: 850, start_deg: 0, end_deg: -90}    # 우하단 코너
+  - {type: line, to: [1570, 940]}                                    # 하단 (서쪽): 3차선·갈림길
+  - {type: arc, center: [1570, 1790], radius: 850, start_deg: -90, end_deg: -180} # 좌하단 코너
+  - {type: line, to: [720, 3990]}                                    # 좌측 (북쪽): 라바콘
+  - {type: arc, center: [1570, 3990], radius: 850, start_deg: 180, end_deg: 90}   # 좌상단 코너
+  - {type: line, to: [8130, 4840]}                                   # 안쪽 상단 (동쪽): 신호등·주차
+
+# 흰 가로선. xy = 선의 중앙, 진행 방향에서 먼저 만나는 가장자리 기준.
+# width = 진행 방향 두께. lane 노드의 stoplines_mm(앞바퀴 -> 선의 가까운 가장자리)과 맞춘다.
+landmarks:
+  - {name: m5_slow_line,      xy: [2520, 5580], width: 40}   # 서행 표지 노면 선 (방지턱 위치는 도면에 없음)
+  - {name: m6_zigzag_line,    xy: [9580, 4493], width: 40}   # 지그재그 시작선
+  - {name: m3_stop_line,      xy: [9580, 2510], width: 30}   # 보행자 횡단보도 정지선
+  - {name: m3_crosswalk_end,  xy: [9580, 1970], width: 30}   # 횡단보도 끝선
+  - {name: m7_start_line,     xy: [8652, 940],  width: 40}   # 3차선 시작선
+  - {name: m8_start_line,     xy: [720, 1820],  width: 40}   # 라바콘 구간 시작선
+  - {name: m8_end_line,       xy: [720, 3920],  width: 40}   # 라바콘 구간 끝선
+  - {name: m1_pre_line,       xy: [2283, 4840], width: 40}   # 신호등 앞 마름모 시작선
+  - {name: m1_stop_line,      xy: [3203, 4840], width: 30}   # 신호등 횡단보도 정지선
+  - {name: m1_crosswalk_end,  xy: [3743, 4840], width: 30}   # 횡단보도 끝선
+  - {name: m4_pre_line,       xy: [5610, 4840], width: 40}   # 주차 구역 앞 선
+
+# 구간 경계 (s로 바꿀 점). 미션 FSM이 상태 전환에 쓴다.
+points:
+  m6_zigzag_end:   [9580, 2776]    # 지그재그 시작선 + 1677 (규정)
+  m7_island_tip:   [4268, 940]     # 섬 오른쪽 끝 = 갈림길 시작
+  m2_merge_end:    [1969, 940]     # 왼쪽 합류 테이퍼 끝
+  m4_parking_from: [6110, 4840]    # 주차칸 시작 (진행 방향 오른쪽, 3칸 x 2줄)
+  m4_parking_to:   [7650, 4840]
+  lane_end:        [8130, 4840]

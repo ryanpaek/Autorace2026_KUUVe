@@ -55,6 +55,10 @@ mission_node:
     fork_len_mm: 2300.0                    # 도면 기준, 모의맵 실측으로 확인
     fork_default: A
     stop_on_green_arrival: true
+    # 도면 경로 지도 (route_file은 launch가 config/track_route.yaml로 넣어 줌)
+    route_gate_mm: 250.0                   # 흰 선을 도면 선으로 인정하는 오차 (달린 거리만큼 넓어짐)
+    route_gain: 0.6
+    odom_scale: 1.0                        # TODO 실측: 직선 3m 주행 -> 실제 거리 / /odom 거리
 
 obstacle_node:
   ros__parameters:

@@ -48,7 +48,20 @@ source install/setup.bash
 | `/obstacle/state` | String(JSON) | obstacle_node → mission_node |
 | `/mission/state` | String(JSON) | mission_node → 모두 |
 | `/mission/start` / `/mission/estop` / `/mission/set_state` | Empty / Bool / String | 사람 → mission_node |
+| `/route/set_s` | Float32 | 사람 → mission_node: 경로 위치 s(mm) 직접 지정 (연습용) |
+| `/limo/ack_cmd` | AckermannDrive | ackermann_bridge → LIMO 애커만 드라이버 (`/cmd_vel`을 변환) |
 | `/lane/debug/compressed`, `/perception/debug/compressed` | CompressedImage | 디버그 화면 (rqt_image_view, Foxglove) |
+
+## 도면 경로 지도 (track_route.yaml)
+
+라이다 지도 대신 도면(2026Track DXF)에서 뽑은 차로 중심선과 흰 가로선 위치를 `autorace_bringup/config/track_route.yaml`에 저장해 두었다.
+mission_node가 오도메트리로 경로상 위치 `s`(mm, 출발 체커 = 0)를 늘리고, 차선 노드가 흰 가로선을 보면(`stoplines_mm`) 도면의 그 선 위치로 `s`를 다시 맞춘다.
+미션 구간 전환(지그재그 시작·끝, 3차선 끝, 갈림길 합류, 라바콘 끝)과 정지선 예비 거리를 이 `s`로 판단한다. 좌우 위치는 차선 인식이 맡는다.
+
+- 현재 위치 보기: `ros2 topic echo /mission/state` → `"route": {"s_mm", "next", "next_in_mm", "last_fix"}`
+- 미션 하나만 연습: `/mission/set_state`로 상태를 바꾸면 `s`도 그 미션 시작점으로 맞춰진다. 차를 그 자리에 놓을 것.
+- 끄기: `ros2 launch autorace_bringup autorace.launch.py route_file:=''` (예전 거리 기준으로 동작)
+- 실측할 것: `odom_scale` (직선 3 m를 줄자로 재고 /odom 거리와 비교)
 
 ## 규약
 

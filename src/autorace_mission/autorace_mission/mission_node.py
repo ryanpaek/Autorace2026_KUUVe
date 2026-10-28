@@ -9,7 +9,12 @@
   odom_topic (nav_msgs/Odometry) -> 누적 주행 거리, imu_topic (sensor_msgs/Imu) -> yaw
   /mission/start (std_msgs/Empty)       출발
   /mission/estop (std_msgs/Bool)        true면 즉시 정지 (false로 해제)
-  /mission/set_state (std_msgs/String)  연습용: 원하는 상태로 점프
+  /mission/set_state (std_msgs/String)  연습용: 원하는 상태로 점프 (경로 위치 s도 그 미션 시작점으로)
+  /route/set_s (std_msgs/Float32)       연습용: 경로 위치 s(mm)를 직접 지정
+
+도면 경로 지도: route_file 파라미터에 track_route.yaml 경로를 주면 켜진다.
+  오도메트리 + 흰 가로선(/lane/status stoplines_mm)으로 경로상 위치 s를 추정해
+  미션 구간 전환을 도면 위치로 한다. /mission/state의 "route"에 s와 다음 선이 나온다.
 발행
   /cmd_vel (geometry_msgs/Twist), /lane/config (String JSON), /mission/state (String JSON)
 
@@ -28,9 +33,22 @@ from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Imu
-from std_msgs.msg import Bool, Empty, String
+from std_msgs.msg import Bool, Empty, Float32, String
 
 from autorace_mission.fsm import DEFAULT_PARAMS, Inputs, MissionFSM
+from autorace_mission.route import RouteMap, RouteTracker
+
+# /mission/set_state로 점프할 때 차를 놓는 곳 (도면 경로 지점 + 오프셋 mm)
+STATE_START_POINT = {
+    'M5_BUMP': (None, 0.0),
+    'M6_ZIGZAG': ('m6_zigzag_line', -1500.0),
+    'M3_PEDESTRIAN': ('m6_zigzag_end', 0.0),
+    'M7_OBSTACLE': ('m7_start_line', -300.0),
+    'M2_FORK': ('m7_island_tip', -300.0),
+    'M8_CONES': ('m8_start_line', -500.0),
+    'M1_TRAFFIC': ('m1_pre_line', -500.0),
+    'M4_PARKING': ('m4_pre_line', -300.0),
+}
 
 SOURCES = ('lane', 'obstacle', 'parking')
 
@@ -44,15 +62,37 @@ class MissionNode(Node):
         super().__init__('mission_node')
         dyn = ParameterDescriptor(dynamic_typing=True)
         for k, v in DEFAULT_PARAMS.items():
-            self.declare_parameter(k, v, dyn)
+            if not isinstance(v, dict):              # route_points는 yaml 파일에서 읽는다
+                self.declare_parameter(k, v, dyn)
         self.declare_parameter('tick_hz', 20.0)
         self.declare_parameter('odom_topic', '/odom')
         self.declare_parameter('imu_topic', '/imu')
         self.declare_parameter('max_speed', 0.45)          # m/s 상한 (안전)
         self.declare_parameter('max_yaw_rate', 2.0)        # rad/s 상한
         self.declare_parameter('source_timeout_sec', 0.3)  # 행동 노드 명령이 이보다 오래되면 정지
+        self.declare_parameter('route_file', '')            # track_route.yaml. 비우면 거리 기준
+        self.declare_parameter('route_gate_mm', 250.0)
+        self.declare_parameter('route_gain', 0.6)
+        self.declare_parameter('odom_scale', 1.0)           # 실측: 실제 거리 / 오도메트리 거리
 
-        params = {k: self.get_parameter(k).value for k in DEFAULT_PARAMS}
+        params = {k: self.get_parameter(k).value for k in DEFAULT_PARAMS
+                  if not isinstance(DEFAULT_PARAMS[k], dict)}
+        self.route = None
+        self.tracker = None
+        self.route_active = False
+        path = self.get_parameter('route_file').value
+        if path:
+            try:
+                self.route = RouteMap.from_yaml(path)
+                self.tracker = RouteTracker(self.route,
+                                            gate_mm=self.get_parameter('route_gate_mm').value,
+                                            gain=self.get_parameter('route_gain').value,
+                                            odom_scale=self.get_parameter('odom_scale').value)
+                params['route_points'] = self.route.points
+                self.get_logger().info(f'route map: {path} ({self.route.length / 1000:.1f} m, '
+                                       f'{len(self.route.landmarks)} lines)')
+            except Exception as e:      # 지도 파일이 깨져도 거리 기준으로 달린다
+                self.get_logger().error(f'route map load failed ({path}): {e} -> 거리 기준')
         self.fsm = MissionFSM(params)
         self.get_logger().info(f'mission start state: {self.fsm.state}')
 
@@ -62,6 +102,7 @@ class MissionNode(Node):
         self.det = {}
         self.new_det = False
         self.lane = {}
+        self.new_lane = False
         self.obstacle = {}
         self.parking = {}
         self.start_flag = False
@@ -72,7 +113,7 @@ class MissionNode(Node):
         self._last_state = None
 
         self.create_subscription(String, '/perception/detections', self._on_det, 10)
-        self.create_subscription(String, '/lane/status', self._json_cb('lane'), 10)
+        self.create_subscription(String, '/lane/status', self._on_lane, 10)
         self.create_subscription(String, '/obstacle/state', self._json_cb('obstacle'), 10)
         self.create_subscription(String, '/parking/state', self._json_cb('parking'), 10)
         self.create_subscription(Odometry, self.get_parameter('odom_topic').value,
@@ -84,6 +125,7 @@ class MissionNode(Node):
         self.create_subscription(Empty, '/mission/start', self._on_start, 10)
         self.create_subscription(Bool, '/mission/estop', self._on_estop, 10)
         self.create_subscription(String, '/mission/set_state', self._on_set_state, 10)
+        self.create_subscription(Float32, '/route/set_s', self._on_set_s, 10)
 
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.cfg_pub = self.create_publisher(String, '/lane/config', 10)
@@ -98,6 +140,23 @@ class MissionNode(Node):
             except json.JSONDecodeError:
                 pass
         return cb
+
+    def _on_lane(self, msg):
+        try:
+            self.lane = json.loads(msg.data)
+            self.new_lane = True
+        except json.JSONDecodeError:
+            pass
+
+    def _route_reset(self, s: float, why: str):
+        if self.tracker is None:
+            return
+        self.tracker.reset(s, self.dist_mm)
+        self.route_active = True
+        self.get_logger().info(f'route s = {s:.0f} mm ({why})')
+
+    def _on_set_s(self, msg):
+        self._route_reset(float(msg.data), 'manual')
 
     def _twist_cb(self, source):
         def cb(msg):
@@ -127,6 +186,8 @@ class MissionNode(Node):
 
     def _on_start(self, _msg):
         self.start_flag = True
+        if self.fsm.state == 'WAIT_START':
+            self._route_reset(0.0, 'start line')
 
     def _on_estop(self, msg):
         self.estop = bool(msg.data)
@@ -136,14 +197,23 @@ class MissionNode(Node):
         try:
             self.fsm._goto(msg.data.strip(), self._inputs(), 'manual')
             self.get_logger().info(f'state set to {self.fsm.state}')
+            if self.route is not None and self.fsm.state in STATE_START_POINT:
+                name, off = STATE_START_POINT[self.fsm.state]
+                base = self.route.points.get(name, 0.0) if name else 0.0
+                self._route_reset(base + off, f'{self.fsm.state} start point')
         except ValueError as e:
             self.get_logger().error(str(e))
 
     def _inputs(self) -> Inputs:
+        route_s = None
+        if self.route_active:
+            lines = self.lane.get('stoplines_mm') if self.new_lane else None
+            route_s = self.tracker.update(self.dist_mm, lines)
+            self.new_lane = False
         return Inputs(t=time.monotonic(), dist_mm=self.dist_mm, yaw=self.yaw,
                       detections=dict(self.det), new_detection_frame=self.new_det,
                       lane=self.lane, obstacle=self.obstacle, parking=self.parking,
-                      start=self.start_flag)
+                      start=self.start_flag, route_s=route_s)
 
     # --- 틱 -----------------------------------------------------------------
     def _tick(self):
@@ -169,7 +239,8 @@ class MissionNode(Node):
 
         state = {'state': self.fsm.state, 'sub': self.fsm.sub, 'source': cmd.source,
                  'fork_choice': self.fsm.fork_choice, 'dist_mm': round(self.dist_mm),
-                 'estop': self.estop, 'note': cmd.note}
+                 'estop': self.estop, 'note': cmd.note,
+                 'route': self.tracker.state() if self.route_active else None}
         self.state_pub.publish(String(data=json.dumps(state)))
         if (self.fsm.state, self.fsm.sub) != self._last_state:
             self.get_logger().info(f'[{self.fsm.state}/{self.fsm.sub}] {self.fsm.log[-1]}')
