@@ -1,0 +1,14 @@
+# colcon
+build/
+install/
+log/
+# python
+__pycache__/
+*.pyc
+.pytest_cache/
+# 데이터·학습 결과 (용량 큼: 레포에 넣지 말 것)
+runs/
+*.pt
+bags/
+lane_dataset/
+autorace_images/

@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>autorace_bringup</name>
+  <version>0.1.0</version>
+  <description>실행 파일(launch), 파라미터, 캘리브레이션 yaml, 점검 스크립트</description>
+  <!-- TODO: 팀 정보로 바꿀 것 -->
+  <maintainer email="team@example.com">Autorace 2026 Team</maintainer>
+  <license>TODO</license>
+
+  <exec_depend>autorace_lane</exec_depend>
+  <exec_depend>autorace_mission</exec_depend>
+  <exec_depend>autorace_obstacle</exec_depend>
+  <exec_depend>autorace_perception</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

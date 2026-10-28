@@ -1,0 +1,76 @@
+# Autorace 2026 파라미터. 숫자는 소수점까지 쓸 것 (0.3, 650.0).
+# 실행 중 바꾸기: ros2 param set /lane_node lookahead_mm 600.0
+# TODO 표시는 실측해서 채울 값이다.
+
+lane_node:
+  ros__parameters:
+    image_topic: /camera/color/image_raw   # TODO 첫날 ros2 topic list로 확인
+    imu_topic: /imu
+    require_calibration: true              # BEV yaml이 calibrated:false면 정지 명령만
+    base_speed: 0.30
+    min_speed: 0.08                        # TODO 실측: 이보다 느리면 차가 안 움직이는 속도
+    publish_debug: true
+    debug_every: 3
+    lane_mask_source: hsv                  # 학습한 분할 모델을 쓰려면 model
+    seg_model_path: ''                     # 예: /home/agilex/models/lane_seg.onnx
+    seg_threshold: 0.5
+    lane_color: both                       # TODO 트랙 실물: 가장자리가 노랑이면 yellow
+    white_v_min: 180
+    white_s_max: 60
+    yellow_h_min: 15
+    yellow_h_max: 40
+    yellow_s_min: 80
+    yellow_v_min: 80
+    lane_width_mm: 530.0                   # TODO 실측: 좌우 차선 중심 사이
+    lookahead_mm: 650.0
+    kappa_max: 2.5
+    kappa_alpha: 0.5
+    kappa_rate_max: 0.6
+    lost_hold_frames: 30
+    yaw_kp: 1.5
+    curve_slowdown: 0.3
+
+mission_node:
+  ros__parameters:
+    start_state: WAIT_START                # LANE_ONLY, M3_PEDESTRIAN 등으로 바꿔 미션만 연습
+    odom_topic: /odom                      # TODO 드라이버에 따라 /wheel/odom
+    imu_topic: /imu
+    tick_hz: 20.0
+    max_speed: 0.45
+    base_speed: 0.30
+    slow_speed: 0.13
+    approach_speed: 0.18
+    det_conf: 0.5
+    bump_slow_mm: 1200.0                   # TODO 실측
+    zigzag_start_mm: 1500.0                # TODO 실측
+    zigzag_width_mm: 570.0
+    stop_brake_mm: 30.0                    # TODO 실측
+    ped_wait_sec: 3.5
+    obstacle_source_ready: false           # obstacle 노드 완성 후 true
+    m7_len_mm: 5500.0                      # TODO 실측
+    cones_len_mm: 2300.0                   # TODO 실측
+    fork_len_mm: 1800.0                    # TODO 실측
+    fork_default: A
+    stop_on_green_arrival: true
+
+obstacle_node:
+  ros__parameters:
+    scan_topic: /scan
+    laser_x_mm: 100.0                      # TODO 실측
+    laser_yaw: 0.0                         # TODO 확인
+    lane_centers_y: [500.0, 0.0, -500.0]
+    lane_half_width: 230.0
+    cone_speed: 0.13
+
+detector_node:
+  ros__parameters:
+    image_topic: /camera/color/image_raw
+    model_path: ''                         # 학습 후 .onnx 또는 .pt 경로
+    input_size: 320
+    conf_threshold: 0.5
+    infer_hz: 10.0
+
+parking_node:
+  ros__parameters:
+    odom_topic: /odom
+    enabled: false                         # 주차 계획을 채운 뒤 true

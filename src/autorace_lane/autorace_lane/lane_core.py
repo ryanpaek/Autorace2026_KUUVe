@@ -1,0 +1,769 @@
+"""차선 인식 + Pure Pursuit 핵심 로직 (ROS 의존성 없음).
+
+D-Racer(ryanpaek/D-Racer-Kit, release/v1.0.0)의 lane_following_node.py BEV 경로에서
+검증된 아이디어를 LIMO Pro + Autorace 2026 트랙에 맞게 간추려 옮긴 초안이다.
+실차 검증 전이므로 파라미터 기본값은 출발점일 뿐이다.
+
+D-Racer에서 옮긴 것
+  - 미터 단위 BEV 그리드 + 차량 중심 열(vehicle_col) 기준 절대 좌/우 판정
+  - 하단 밴드 열 히스토그램 -> 측별 후보 최대 3개 -> 폭 게이트 + 연속성 점수로 쌍 선택
+  - 한쪽만 보일 때 국소 기울기에 수직으로 반폭 외삽
+  - 행별 중점 중앙선 -> 잔차 기반 2-pass 로버스트 피팅 -> 곡률
+  - Pure Pursuit, 중앙 점프 게이트(코스팅), 차선을 놓치면 잠시 버티다 정지
+
+바꾼 것
+  - 고정 열 창 대신 슬라이딩 윈도우로 차선을 위로 추적한다 (트랙 곡률 R600이 좁아서)
+  - 차로 폭을 구간별로 바꿀 수 있다 (일반 ~530mm, 지그재그 ~570mm, 3차선 500mm)
+  - 가로로 긴 흰 선(정지선·시작선)을 차선 마스크에서 빼고, 정지선 거리로 따로 보고한다
+  - 출력은 조향값이 아니라 곡률 kappa(1/m)다. ROS Twist로는 angular.z = v * kappa
+  - 차선을 놓치면 IMU yaw로 헤딩을 붙잡는다 (D-Racer는 IMU가 없어 마지막 조향을 재생했음)
+
+좌표 규약
+  - BEV 그리드: 행 0 = 가장 먼 곳, 행 bev_h-1 = 가장 가까운 곳, 열은 오른쪽으로 증가
+  - 내부 차량 좌표: x_mm = 오른쪽 +, y_mm = 전방 +, 원점 = 제어 기준점
+    (애커만 모드면 뒤차축 중심, 사륜 차동 모드면 차체 중심)
+  - 밖으로 내보내는 값(kappa, offset, heading)은 ROS 규약: 왼쪽이 + (angular.z와 같은 부호)
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import asdict, dataclass, field, fields
+from typing import List, Optional, Tuple
+
+import cv2
+import numpy as np
+import yaml
+
+
+def wrap_angle(a: float) -> float:
+    """각도를 [-pi, pi)로 감는다."""
+    return (a + math.pi) % (2.0 * math.pi) - math.pi
+
+
+# ---------------------------------------------------------------------------
+# BEV 캘리브레이션
+# ---------------------------------------------------------------------------
+@dataclass
+class BevConfig:
+    """카메라 이미지 -> 미터 단위 탑뷰(BEV) 그리드 변환 정보."""
+
+    H: np.ndarray                       # 카메라 이미지 px -> BEV 그리드 px (3x3)
+    image_width: int = 640              # 이 크기로 리사이즈한 뒤 변환한다
+    image_height: int = 480
+    bev_w: int = 400
+    bev_h: int = 400
+    mm_per_px_x: float = 4.0
+    mm_per_px_y: float = 4.0
+    vehicle_col: float = 200.0          # 차량 중심선이 지나는 BEV 열
+    ref_to_bev_bottom_mm: float = 300.0  # 제어 기준점 -> BEV 맨 아래 행까지 전방 거리
+    ref_to_front_axle_mm: float = 200.0  # 제어 기준점 -> 앞차축 (뒤차축 기준이면 휠베이스)
+    calibrated: bool = False
+
+    _KEYS = ('image_width', 'image_height', 'bev_w', 'bev_h', 'mm_per_px_x',
+             'mm_per_px_y', 'vehicle_col', 'ref_to_bev_bottom_mm',
+             'ref_to_front_axle_mm')
+
+    # --- 생성 ---------------------------------------------------------------
+    @classmethod
+    def from_rectangle(cls, img_pts, rect_w_mm: float, rect_l_mm: float,
+                       near_edge_mm: float, image_size: Tuple[int, int],
+                       lateral_offset_mm: float = 0.0, bev_w: int = 400,
+                       bev_h: int = 400, mm_per_px: float = 4.0,
+                       ref_to_bev_bottom_mm: Optional[float] = None,
+                       ref_to_front_axle_mm: float = 200.0) -> 'BevConfig':
+        """바닥에 놓은 직사각형의 이미지 꼭짓점 4개로 호모그래피를 만든다.
+
+        img_pts 순서: 가까운-왼쪽, 가까운-오른쪽, 먼-오른쪽, 먼-왼쪽 (이미지 px)
+        rect_w_mm: 좌우 폭, rect_l_mm: 전후 길이
+        near_edge_mm: 제어 기준점 -> 직사각형의 가까운 변까지 전방 거리
+        lateral_offset_mm: 직사각형 중심이 차량 중심선보다 오른쪽이면 +
+        ref_to_bev_bottom_mm: BEV 맨 아래 행의 전방 거리. 생략하면 가까운 변 - 150mm
+        """
+        if ref_to_bev_bottom_mm is None:
+            ref_to_bev_bottom_mm = max(0.0, near_edge_mm - 150.0)
+        vc = bev_w / 2.0
+
+        def to_grid(x_mm, y_mm):
+            return [vc + x_mm / mm_per_px,
+                    (bev_h - 1) - (y_mm - ref_to_bev_bottom_mm) / mm_per_px]
+
+        hw, cx = rect_w_mm / 2.0, lateral_offset_mm
+        dst = np.float32([
+            to_grid(cx - hw, near_edge_mm),
+            to_grid(cx + hw, near_edge_mm),
+            to_grid(cx + hw, near_edge_mm + rect_l_mm),
+            to_grid(cx - hw, near_edge_mm + rect_l_mm),
+        ])
+        H = cv2.getPerspectiveTransform(np.float32(img_pts), dst)
+        return cls(H=H.astype(np.float64), image_width=int(image_size[0]),
+                   image_height=int(image_size[1]), bev_w=int(bev_w),
+                   bev_h=int(bev_h), mm_per_px_x=float(mm_per_px),
+                   mm_per_px_y=float(mm_per_px), vehicle_col=float(vc),
+                   ref_to_bev_bottom_mm=float(ref_to_bev_bottom_mm),
+                   ref_to_front_axle_mm=float(ref_to_front_axle_mm),
+                   calibrated=True)
+
+    @classmethod
+    def from_yaml(cls, path: str) -> 'BevConfig':
+        with open(path, 'r', encoding='utf-8') as f:
+            d = yaml.safe_load(f)['bev']
+        H = np.array(d['homography'], dtype=np.float64).reshape(3, 3)
+        kw = {k: d[k] for k in cls._KEYS if k in d}
+        for k in ('image_width', 'image_height', 'bev_w', 'bev_h'):
+            if k in kw:
+                kw[k] = int(kw[k])
+        return cls(H=H, calibrated=bool(d.get('calibrated', False)), **kw)
+
+    def to_dict(self) -> dict:
+        d = {k: getattr(self, k) for k in self._KEYS}
+        d['homography'] = [float(v) for v in np.asarray(self.H).ravel()]
+        d['calibrated'] = bool(self.calibrated)
+        return d
+
+    def to_yaml(self, path: str, note: str = '') -> None:
+        out = {'bev': self.to_dict()}
+        if note:
+            out['bev']['note'] = note
+        with open(path, 'w', encoding='utf-8') as f:
+            yaml.safe_dump(out, f, allow_unicode=True, sort_keys=False)
+
+    # --- 변환 ---------------------------------------------------------------
+    def warp(self, img: np.ndarray) -> np.ndarray:
+        return cv2.warpPerspective(img, self.H, (self.bev_w, self.bev_h),
+                                   flags=cv2.INTER_NEAREST)
+
+    def row_to_y_mm(self, row):
+        """BEV 행 -> 제어 기준점에서의 전방 거리(mm)."""
+        return self.ref_to_bev_bottom_mm + ((self.bev_h - 1) - row) * self.mm_per_px_y
+
+    def y_mm_to_row(self, y_mm):
+        return (self.bev_h - 1) - (y_mm - self.ref_to_bev_bottom_mm) / self.mm_per_px_y
+
+    def col_to_x_mm(self, col):
+        """BEV 열 -> 차량 중심선에서의 횡거리(mm, 오른쪽 +)."""
+        return (col - self.vehicle_col) * self.mm_per_px_x
+
+
+# ---------------------------------------------------------------------------
+# 파라미터
+# ---------------------------------------------------------------------------
+@dataclass
+class LaneParams:
+    """차선 노드 파라미터. 전부 ROS 파라미터로 노출된다 (lane_node.py)."""
+
+    # 색 마스크 (OpenCV HSV: H 0~179). 트랙 실물 색을 보고 lane_color를 정할 것
+    lane_color: str = 'both'          # 'white' | 'yellow' | 'both'
+    white_v_min: int = 180
+    white_s_max: int = 60
+    yellow_h_min: int = 15
+    yellow_h_max: int = 40
+    yellow_s_min: int = 80
+    yellow_v_min: int = 80
+    # 마스크 전처리
+    suppress_transverse: bool = True  # 가로로 긴 선(정지선·시작선)을 차선 마스크에서 제거
+    max_run_mm: float = 150.0         # 이보다 긴 가로 연속 화소는 차선이 아니라고 본다
+    dilate_px: int = 1
+    # 차선 쌍 찾기
+    lane_width_mm: float = 530.0      # 좌우 차선 중심 사이 거리. 미션이 구간별로 바꾼다
+    hist_band_mm: float = 600.0       # 히스토그램에 쓰는 하단 밴드 높이
+    min_peak: int = 20                # 후보 열이 밴드 안에서 가져야 할 최소 화소 수
+    pair_min_ratio: float = 0.6       # 쌍 폭 하한 (예상 폭 대비). 노면 마름모와 짝을 막음
+    pair_max_ratio: float = 1.35
+    continuity_lambda: float = 3.0    # 쌍 점수 = |폭-예상| + lambda*|중점-직전 중점|
+    side_deadband_mm: float = 40.0    # 한쪽 선이 중심 근처일 때 좌/우 판정 유지 폭
+    # 슬라이딩 윈도우
+    n_windows: int = 16
+    window_margin_mm: float = 100.0
+    window_min_pix: int = 8
+    window_max_miss: int = 4
+    # 중앙선 / Pure Pursuit
+    fit_order: int = 2                # 지그재그 구간은 1
+    min_points: int = 4               # 중앙선 최소 점 수 (윈도우 단위)
+    lookahead_mm: float = 650.0       # 제어 기준점에서 목표점까지 전방 거리
+    target_offset_mm: float = 0.0     # 차로 중심에서 옆으로 비켜 갈 거리 (왼쪽 +). 3차선 변경용
+    kappa_max: float = 2.5            # 1/m. 애커만 최대 조향(안쪽 바퀴 28도) 근처
+    # 시간 필터 / 게이트
+    kappa_alpha: float = 0.5          # 곡률 명령 EMA (1.0 = 필터 없음)
+    kappa_rate_max: float = 0.6       # 프레임당 곡률 변화 한계 (1/m)
+    jump_max_mm: float = 120.0        # 목표점 횡위치가 한 프레임에 이보다 튀면 버린다
+    jump_max_frames: int = 6          # 이만큼 연속으로 튀면 새 값을 받아들인다
+    lost_hold_frames: int = 30        # 차선을 놓친 뒤 버티는 프레임 수 (30fps면 1초)
+    lost_decay: float = 0.95          # IMU가 없을 때 마지막 곡률의 프레임당 감쇠
+    # 헤딩 유지 (IMU)
+    yaw_kp: float = 1.5               # 헤딩 오차 1 rad당 요레이트 명령 (rad/s)
+    # 정지선
+    stopline_fill: float = 0.6        # 차로 안쪽 폭 중 흰 화소 비율이 이 이상이면 가로선
+    stopline_min_mm: float = 8.0
+    stopline_max_mm: float = 80.0
+    crosswalk_look_mm: float = 150.0  # 가로선 바로 뒤 이 거리 안에서 횡단보도 막대를 찾는다
+    bar_fill_min: float = 0.15
+    bar_fill_max: float = 0.75
+    bar_min_segments: int = 2
+    bar_row_ratio: float = 0.3
+    # 속도
+    curve_slowdown: float = 0.3       # |kappa| = kappa_max일 때 속도를 30% 줄인다
+
+    @classmethod
+    def from_dict(cls, d: dict) -> 'LaneParams':
+        names = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in d.items() if k in names})
+
+    def as_dict(self) -> dict:
+        return asdict(self)
+
+
+MODES = ('normal', 'zigzag', 'left_only', 'right_only', 'heading')
+
+
+# ---------------------------------------------------------------------------
+# 출력 / 중간 결과
+# ---------------------------------------------------------------------------
+@dataclass
+class Detection:
+    status: str                         # 'BOTH' | 'L' | 'R' | 'NONE'
+    left_x0: Optional[float] = None     # 하단 밴드에서 찾은 시작 열 (BEV px)
+    right_x0: Optional[float] = None
+    expected_w_px: float = 0.0
+
+
+@dataclass
+class Centerline:
+    pts_mm: np.ndarray                  # (n, 2) [x 오른쪽+, y 전방+], 가까운 -> 먼 순
+    coeffs: np.ndarray                  # x(y) 다항식 계수 (np.polyval 순서)
+    y_near: float
+    y_far: float
+
+
+@dataclass
+class LaneOutput:
+    kappa: float = 0.0                  # 최종 명령 곡률 (1/m, 왼쪽 +). angular.z = v*kappa
+    speed_scale: float = 1.0            # 곡선 감속 배율. 0이면 정지
+    status: str = 'NONE'                # 'BOTH' | 'L' | 'R' | 'NONE'
+    source: str = 'lane'                # 'lane' | 'coast' | 'hold' | 'heading' | 'stop'
+    offset_mm: Optional[float] = None   # 가장 가까운 행에서 차로 중심의 횡위치 (왼쪽 +)
+    heading_rad: Optional[float] = None  # 차로 방향 (왼쪽 +)
+    path_kappa: Optional[float] = None  # 중앙선 피팅 곡률 (왼쪽 +, 1/m)
+    target_mm: Optional[Tuple[float, float]] = None  # PP 목표점 (x 오른쪽+, y 전방+)
+    low_conf: bool = False              # 중앙선이 lookahead까지 안 닿음
+    stoplines_mm: List[float] = field(default_factory=list)  # 앞바퀴 -> 모든 흰 가로선 (가까운 순)
+    crosswalk_lines_mm: List[float] = field(default_factory=list)  # 그중 횡단보도 막대가 뒤따르는 선
+    debug: dict = field(default_factory=dict)
+
+    def status_dict(self) -> dict:
+        d = {k: getattr(self, k) for k in (
+            'kappa', 'speed_scale', 'status', 'source', 'offset_mm',
+            'heading_rad', 'path_kappa', 'low_conf', 'stoplines_mm',
+            'crosswalk_lines_mm')}
+        d['target_mm'] = list(self.target_mm) if self.target_mm else None
+        return d
+
+
+# ---------------------------------------------------------------------------
+# 마스크
+# ---------------------------------------------------------------------------
+def color_masks(bgr: np.ndarray, p: LaneParams) -> Tuple[np.ndarray, np.ndarray]:
+    """(차선 마스크, 흰색 마스크)를 돌려준다. 흰색 마스크는 정지선 검출용."""
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    white = cv2.inRange(hsv, np.array([0, 0, p.white_v_min], np.uint8),
+                        np.array([179, p.white_s_max, 255], np.uint8))
+    yellow = cv2.inRange(hsv, np.array([p.yellow_h_min, p.yellow_s_min,
+                                        p.yellow_v_min], np.uint8),
+                         np.array([p.yellow_h_max, 255, 255], np.uint8))
+    if p.lane_color == 'white':
+        lane = white
+    elif p.lane_color == 'yellow':
+        lane = yellow
+    else:
+        lane = cv2.bitwise_or(white, yellow)
+    return lane, white
+
+
+def remove_transverse(bev_mask: np.ndarray, max_run_px: float) -> np.ndarray:
+    """가로로 max_run_px 이상 이어진 화소(정지선 등)를 지운다."""
+    k = max(3, int(round(max_run_px)))
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k, 1))
+    long_runs = cv2.morphologyEx(bev_mask, cv2.MORPH_OPEN, kernel)
+    return cv2.subtract(bev_mask, long_runs)
+
+
+# ---------------------------------------------------------------------------
+# 차선 쌍 찾기 (하단 밴드 히스토그램)
+# ---------------------------------------------------------------------------
+def _side_candidates(col_sum: np.ndarray, lo: int, hi: int, min_peak: int,
+                     suppress_px: int, k: int = 3) -> List[Tuple[float, int]]:
+    """[lo, hi) 열에서 강한 순으로 후보를 최대 k개 고른다 (주변 suppress_px는 억제)."""
+    seg = col_sum[lo:hi].astype(np.int64, copy=True)
+    out = []
+    for _ in range(k):
+        if seg.size == 0:
+            break
+        i = int(np.argmax(seg))
+        pk = int(seg[i])
+        if pk < min_peak:
+            break
+        out.append((float(lo + i), pk))
+        seg[max(0, i - suppress_px): i + suppress_px + 1] = 0
+    return out
+
+
+def detect_lanes(bev: np.ndarray, cfg: BevConfig, p: LaneParams, mode: str,
+                 mid_ema: Optional[float], last_side: Optional[str]) -> Detection:
+    h, w = bev.shape[:2]
+    exp_w = p.lane_width_mm / cfg.mm_per_px_x
+    band_rows = int(min(h, max(10, round(p.hist_band_mm / cfg.mm_per_px_y))))
+    col_sum = (bev[h - band_rows:] > 0).sum(axis=0)
+    vc = cfg.vehicle_col
+    vci = int(round(min(max(vc, 1.0), w - 1.0)))
+    suppress = max(2, int(round(p.window_margin_mm / cfg.mm_per_px_x)))
+    det = Detection(status='NONE', expected_w_px=exp_w)
+
+    if mode in ('left_only', 'right_only'):
+        # 갈림길: 한쪽 경계만 따라간다. 중심선을 조금 넘어온 선까지 허용.
+        if mode == 'left_only':
+            cands = _side_candidates(col_sum, 0, min(w, vci + suppress),
+                                     p.min_peak, suppress)
+            expect = vc - exp_w / 2.0
+        else:
+            cands = _side_candidates(col_sum, max(0, vci - suppress), w,
+                                     p.min_peak, suppress)
+            expect = vc + exp_w / 2.0
+        if cands:
+            x = min(cands, key=lambda c: abs(c[0] - expect))[0]
+            if mode == 'left_only':
+                det.left_x0, det.status = x, 'L'
+            else:
+                det.right_x0, det.status = x, 'R'
+        return det
+
+    left_c = _side_candidates(col_sum, 0, vci, p.min_peak, suppress)
+    right_c = _side_candidates(col_sum, vci, w, p.min_peak, suppress)
+
+    best, best_score = None, None
+    for lx, _ in left_c:
+        for rx, _ in right_c:
+            pw = rx - lx
+            if pw < p.pair_min_ratio * exp_w or pw > p.pair_max_ratio * exp_w:
+                continue
+            score = abs(pw - exp_w)
+            if mid_ema is not None and p.continuity_lambda > 0.0:
+                score += p.continuity_lambda * abs((lx + rx) / 2.0 - mid_ema)
+            if best is None or score < best_score:
+                best, best_score = (lx, rx), score
+    if best is not None:
+        det.left_x0, det.right_x0 = best
+        det.status = 'BOTH'
+        return det
+
+    # 쌍이 없으면 가장 강한 선 하나. 좌/우는 차량 중심선 기준 절대 판정.
+    singles = left_c[:1] + right_c[:1]
+    if not singles:
+        return det
+    x, _ = max(singles, key=lambda c: c[1])
+    side = 'L' if x < vc else 'R'
+    dead = p.side_deadband_mm / cfg.mm_per_px_x
+    if abs(x - vc) <= dead and last_side in ('L', 'R'):
+        side = last_side          # 선 위에 걸쳐 있을 때는 직전 판정을 유지
+    if side == 'L':
+        det.left_x0, det.status = x, 'L'
+    else:
+        det.right_x0, det.status = x, 'R'
+    return det
+
+
+# ---------------------------------------------------------------------------
+# 슬라이딩 윈도우 추적
+# ---------------------------------------------------------------------------
+def track_line(bev: np.ndarray, x0: float, cfg: BevConfig,
+               p: LaneParams) -> np.ndarray:
+    """x0에서 시작해 아래 -> 위로 한 선을 따라간다. (n, 2) [col, row] 배열 (윈도우별 무게중심).
+
+    놓친 윈도우는 직전 이동량(관성)으로 건너뛰고, window_max_miss번 넘게 놓치면 멈춘다.
+    출력 배열의 i번째 행은 윈도우 i(아래부터)에 대응하며, 못 찾은 윈도우는 NaN이다.
+    """
+    h, w = bev.shape[:2]
+    n = max(2, int(p.n_windows))
+    win_h = h / n
+    margin = max(2, int(round(p.window_margin_mm / cfg.mm_per_px_x)))
+    out = np.full((n, 2), np.nan)
+    x, shift, miss = float(x0), 0.0, 0
+    last_x = None
+    for i in range(n):
+        y_hi = int(round(h - i * win_h))
+        y_lo = int(round(h - (i + 1) * win_h))
+        lo, hi = int(max(0, x - margin)), int(min(w, x + margin + 1))
+        if hi - lo < 2:
+            break
+        ys, xs = np.nonzero(bev[y_lo:y_hi, lo:hi])
+        if xs.size >= p.window_min_pix:
+            x_new = lo + float(xs.mean())
+            out[i] = (x_new, y_lo + float(ys.mean()))
+            if last_x is not None:
+                shift = float(np.clip(x_new - last_x, -margin / 2.0, margin / 2.0))
+            last_x = x_new
+            x = x_new + shift
+            miss = 0
+        else:
+            miss += 1
+            if miss > p.window_max_miss:
+                break
+            x += shift
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 중앙선
+# ---------------------------------------------------------------------------
+def _local_slope_mm(track: np.ndarray, cfg: BevConfig) -> np.ndarray:
+    """윈도우별 차선 기울기 dx_mm/dy_mm (전방으로 갈수록 오른쪽이면 +)."""
+    out = np.zeros(len(track))
+    ok = ~np.isnan(track[:, 0])
+    idx = np.nonzero(ok)[0]
+    if idx.size >= 2:
+        x = track[idx, 0] * cfg.mm_per_px_x
+        y = cfg.row_to_y_mm(track[idx, 1])
+        out[idx] = np.clip(np.gradient(x, y), -2.0, 2.0)
+    return out
+
+
+def _robust_polyfit(y: np.ndarray, x: np.ndarray, order: int) -> Optional[np.ndarray]:
+    """잔차가 큰 점을 한 번 걸러내고 다시 맞춘다 (D-Racer 2-pass 방식)."""
+    order = int(max(1, min(order, len(y) - 1)))
+    coeffs = None
+    fy, fx = y, x
+    for _ in range(2):
+        try:
+            cand = np.polyfit(fy, fx, order)
+        except (np.linalg.LinAlgError, ValueError):
+            break
+        if not np.all(np.isfinite(cand)):
+            break
+        coeffs = cand
+        resid = np.abs(fx - np.polyval(coeffs, fy))
+        cut = max(4.0 * float(np.median(resid)), 15.0)
+        keep = resid <= cut
+        if keep.all() or keep.sum() < order + 2:
+            break
+        fy, fx = fy[keep], fx[keep]
+    return coeffs
+
+
+def build_centerline(left: Optional[np.ndarray], right: Optional[np.ndarray],
+                     det: Detection, cfg: BevConfig, p: LaneParams,
+                     fit_order: int) -> Optional[Centerline]:
+    """좌/우 추적 결과로 중앙선을 만든다 (윈도우 단위)."""
+    exp_w = det.expected_w_px
+    half_mm = p.lane_width_mm / 2.0
+    rows, xs = [], []
+    n = len(left) if left is not None else len(right)
+    sl = _local_slope_mm(left, cfg) if left is not None else None
+    sr = _local_slope_mm(right, cfg) if right is not None else None
+    for i in range(n):
+        okl = left is not None and not np.isnan(left[i, 0])
+        okr = right is not None and not np.isnan(right[i, 0])
+        if okl and okr:
+            pw = right[i, 0] - left[i, 0]
+            if p.pair_min_ratio * exp_w <= pw <= p.pair_max_ratio * exp_w:
+                xs.append((left[i, 0] + right[i, 0]) / 2.0)
+                rows.append((left[i, 1] + right[i, 1]) / 2.0)
+                continue
+            # 폭이 이상하면 이 행은 한쪽만 믿는다 (시작 쪽 = 상태가 정한 쪽)
+            okl, okr = (det.status != 'R'), (det.status == 'R')
+        if okl:
+            off = half_mm * math.sqrt(1.0 + sl[i] ** 2) / cfg.mm_per_px_x
+            xs.append(left[i, 0] + off)
+            rows.append(left[i, 1])
+        elif okr:
+            off = half_mm * math.sqrt(1.0 + sr[i] ** 2) / cfg.mm_per_px_x
+            xs.append(right[i, 0] - off)
+            rows.append(right[i, 1])
+    if len(xs) < max(2, p.min_points):
+        return None
+    x_mm = cfg.col_to_x_mm(np.asarray(xs))
+    y_mm = cfg.row_to_y_mm(np.asarray(rows))
+    order = np.argsort(y_mm)
+    x_mm, y_mm = x_mm[order], y_mm[order]
+    coeffs = _robust_polyfit(y_mm, x_mm, fit_order)
+    if coeffs is None:
+        return None
+    pts = np.stack([np.polyval(coeffs, y_mm), y_mm], axis=1)
+    return Centerline(pts_mm=pts, coeffs=coeffs, y_near=float(y_mm[0]),
+                      y_far=float(y_mm[-1]))
+
+
+def pure_pursuit(cl: Centerline, lookahead_mm: float,
+                 offset_right_mm: float = 0.0) -> Tuple[float, Tuple[float, float], bool]:
+    """목표점 = 중앙선 다항식을 전방 lookahead_mm에서 평가한 점 (+ 옆으로 offset).
+
+    반환: (kappa_right [1/m, 오른쪽 +], 목표점(x, y) mm, low_conf)
+    기준점(원점)에서 목표점을 지나는 원의 곡률 = 2x / (x^2 + y^2).
+    """
+    y_t = float(lookahead_mm)
+    low_conf = y_t > cl.y_far + 1e-6
+    if low_conf:
+        y_t = cl.y_far          # 중앙선이 짧으면 가장 먼 점까지만
+    x_t = float(np.polyval(cl.coeffs, y_t)) + offset_right_mm
+    d2 = x_t * x_t + y_t * y_t
+    if d2 < 1.0:
+        return 0.0, (x_t, y_t), True
+    return 2000.0 * x_t / d2, (x_t, y_t), low_conf
+
+
+def path_geometry(cl: Centerline, y_eval: float) -> Tuple[float, float]:
+    """(곡률 [1/m, 오른쪽 +], 헤딩 [rad, 오른쪽 +]) at y_eval."""
+    d1 = np.polyder(cl.coeffs, 1)
+    d2 = np.polyder(cl.coeffs, 2) if len(cl.coeffs) > 2 else np.array([0.0])
+    xp = float(np.polyval(d1, y_eval))
+    xpp = float(np.polyval(d2, y_eval))
+    kappa = 1000.0 * xpp / (1.0 + xp * xp) ** 1.5
+    return kappa, math.atan(xp)
+
+
+# ---------------------------------------------------------------------------
+# 정지선
+# ---------------------------------------------------------------------------
+def detect_stoplines(bev_white: np.ndarray, center_col: float, cfg: BevConfig,
+                     p: LaneParams) -> List[Tuple[float, bool]]:
+    """차로 안쪽을 가로지르는 흰 띠를 찾는다.
+
+    반환: [(앞바퀴 -> 띠의 가까운 가장자리 거리 mm, 바로 뒤에 횡단보도 막대가 있는지), ...]
+    가까운 순. 미션 시작선과 정지선은 둘 다 흰 가로선이라, 횡단보도 막대가 뒤따르는지로
+    정지선을 가린다. 카메라가 못 보는 가까운 구간(BEV 맨 아래 행보다 가까운 곳)은
+    미션 쪽에서 오도메트리로 이어 받아야 한다.
+    """
+    h, w = bev_white.shape[:2]
+    half = 0.35 * p.lane_width_mm / cfg.mm_per_px_x
+    c0 = int(max(0, round(center_col - half)))
+    c1 = int(min(w, round(center_col + half)))
+    if c1 - c0 < 5:
+        return []
+    band = bev_white[:, c0:c1] > 0
+    fill = band.mean(axis=1)
+    # 행마다 흰 구간(막대) 개수
+    edges = np.diff(np.pad(band.astype(np.int8), ((0, 0), (1, 1))), axis=1)
+    segments = (edges == 1).sum(axis=1)
+    on = fill >= p.stopline_fill
+    look = max(3, int(round(p.crosswalk_look_mm / cfg.mm_per_px_y)))
+    out = []
+    r = h - 1
+    while r >= 0:
+        if on[r]:
+            r_end = r
+            while r_end - 1 >= 0 and on[r_end - 1]:
+                r_end -= 1
+            thick = (r - r_end + 1) * cfg.mm_per_px_y
+            if p.stopline_min_mm <= thick <= p.stopline_max_mm:
+                y_near_edge = cfg.row_to_y_mm(r + 0.5)
+                r0 = max(0, r_end - look)
+                f, s = fill[r0:r_end], segments[r0:r_end]
+                bar_rows = int(np.sum((f >= p.bar_fill_min) & (f <= p.bar_fill_max)
+                                      & (s >= p.bar_min_segments)))
+                bars = bar_rows >= max(3, p.bar_row_ratio * max(1, r_end - r0))
+                out.append((float(y_near_edge - cfg.ref_to_front_axle_mm), bool(bars)))
+            r = r_end - 1
+        else:
+            r -= 1
+    return sorted(out)
+
+
+# ---------------------------------------------------------------------------
+# 상태를 가진 추종기
+# ---------------------------------------------------------------------------
+class LaneFollower:
+    """프레임마다 process()를 부르면 곡률 명령(LaneOutput)을 돌려준다."""
+
+    def __init__(self, cfg: BevConfig, params: Optional[LaneParams] = None,
+                 mask_fn=None):
+        """mask_fn(bgr) -> (차선 마스크, 흰색 마스크). None이면 HSV(color_masks).
+
+        딥러닝 분할 모델을 쓸 때는 seg_infer.SegMasker를 넘긴다. 이후 단계(BEV, 쌍 선택,
+        중앙선, 정지선, Pure Pursuit)는 마스크 출처와 상관없이 똑같다.
+        """
+        self.cfg = cfg
+        self.p = params or LaneParams()
+        self.mask_fn = mask_fn
+        self.mode = 'normal'
+        self.fit_order_override: Optional[int] = None
+        self.yaw_ref: Optional[float] = None
+        self.reset()
+
+    # --- 상태 ---------------------------------------------------------------
+    def reset(self) -> None:
+        self.mid_ema = None
+        self.last_side = None
+        self.prev_target_x = None
+        self.reject_count = 0
+        self.lost_frames = 0
+        self.kappa_cmd = 0.0
+        self.last_good_kappa = 0.0
+        self.hold_yaw_ref = None
+        self._last_offset = 0.0
+
+    def set_mode(self, mode: str, yaw: Optional[float] = None,
+                 yaw_ref: Optional[float] = None,
+                 fit_order: Optional[int] = None) -> None:
+        """미션이 구간에 맞춰 모드를 바꾼다. 모드가 바뀌면 시간 상태를 초기화한다."""
+        if mode not in MODES:
+            raise ValueError(f'unknown lane mode: {mode}')
+        if mode != self.mode:
+            self.mode = mode
+            self.reset()
+        self.fit_order_override = fit_order
+        if mode == 'heading':
+            self.yaw_ref = yaw_ref if yaw_ref is not None else yaw
+
+    # --- 메인 ---------------------------------------------------------------
+    def process(self, bgr: np.ndarray, yaw: Optional[float] = None,
+                speed: float = 0.3) -> LaneOutput:
+        cfg, p = self.cfg, self.p
+        if bgr.shape[1] != cfg.image_width or bgr.shape[0] != cfg.image_height:
+            bgr = cv2.resize(bgr, (cfg.image_width, cfg.image_height),
+                             interpolation=cv2.INTER_AREA)
+        lane, white = self.mask_fn(bgr) if self.mask_fn is not None else color_masks(bgr, p)
+        bev_lane = cfg.warp(lane)
+        bev_white = cfg.warp(white)
+        return self.process_bev(bev_lane, bev_white, yaw=yaw, speed=speed)
+
+    def process_bev(self, bev_lane: np.ndarray, bev_white: Optional[np.ndarray] = None,
+                    yaw: Optional[float] = None, speed: float = 0.3) -> LaneOutput:
+        cfg, p = self.cfg, self.p
+        if p.dilate_px > 0:
+            k = 2 * int(p.dilate_px) + 1
+            bev_lane = cv2.dilate(bev_lane, np.ones((k, k), np.uint8))
+        if p.suppress_transverse:
+            bev_lane = remove_transverse(bev_lane, p.max_run_mm / cfg.mm_per_px_x)
+
+        out = LaneOutput()
+        out.debug['bev'] = bev_lane
+        det = detect_lanes(bev_lane, cfg, p, self.mode, self.mid_ema, self.last_side)
+        out.status = det.status
+
+        left = track_line(bev_lane, det.left_x0, cfg, p) if det.left_x0 is not None else None
+        right = track_line(bev_lane, det.right_x0, cfg, p) if det.right_x0 is not None else None
+        out.debug['left'], out.debug['right'] = left, right
+
+        fit_order = self.fit_order_override or (1 if self.mode == 'zigzag' else p.fit_order)
+        cl = None
+        if det.status != 'NONE':
+            cl = build_centerline(left, right, det, cfg, p, fit_order)
+        out.debug['centerline'] = cl
+
+        # 연속성 상태 갱신
+        if det.status == 'BOTH':
+            mid = (det.left_x0 + det.right_x0) / 2.0
+            self.mid_ema = mid if self.mid_ema is None else 0.3 * mid + 0.7 * self.mid_ema
+            self.last_side = None
+        elif det.status in ('L', 'R'):
+            self.last_side = det.status
+        else:
+            self.mid_ema, self.last_side = None, None
+
+        kappa_raw, source = None, 'lane'
+        if cl is not None:
+            k_path, psi = path_geometry(cl, cl.y_near)
+            out.path_kappa = -k_path
+            out.heading_rad = -psi
+            out.offset_mm = -float(np.polyval(cl.coeffs, cl.y_near))
+            if p.target_offset_mm != self._last_offset:
+                self.prev_target_x = None      # 의도한 비켜 가기는 점프 게이트에 안 걸리게
+                self._last_offset = p.target_offset_mm
+            k_r, tgt, low = pure_pursuit(cl, p.lookahead_mm, -p.target_offset_mm)
+            out.target_mm, out.low_conf = tgt, low
+            # 중앙 점프 게이트: 목표점 횡위치가 갑자기 튀면 그 프레임은 버린다
+            if (self.prev_target_x is not None
+                    and abs(tgt[0] - self.prev_target_x) > p.jump_max_mm
+                    and self.reject_count < p.jump_max_frames):
+                self.reject_count += 1
+                source = 'coast'
+            else:
+                self.reject_count = 0
+                self.prev_target_x = tgt[0]
+                kappa_raw = -k_r
+                self.lost_frames = 0
+                self.last_good_kappa = kappa_raw
+                if yaw is not None:
+                    # 차로 방향(월드 yaw)을 기억해 두었다가 놓치면 그 방향을 붙잡는다
+                    self.hold_yaw_ref = wrap_angle(yaw + out.heading_rad)
+
+        if self.mode == 'heading' and yaw is not None and self.yaw_ref is not None:
+            kappa_raw, source = self._heading_kappa(yaw, self.yaw_ref, speed), 'heading'
+        elif source == 'coast':
+            kappa_raw = self.kappa_cmd
+        elif kappa_raw is None:
+            # 차선을 놓침
+            self.lost_frames += 1
+            if self.lost_frames > p.lost_hold_frames:
+                source, kappa_raw = 'stop', 0.0
+                out.speed_scale = 0.0
+            elif yaw is not None and self.hold_yaw_ref is not None:
+                source = 'hold'
+                kappa_raw = self._heading_kappa(yaw, self.hold_yaw_ref, speed)
+            else:
+                source = 'hold'
+                kappa_raw = self.last_good_kappa * (p.lost_decay ** self.lost_frames)
+        out.source = source
+
+        # 곡률 명령 필터: EMA -> 변화율 제한 -> 클램프
+        k_f = p.kappa_alpha * kappa_raw + (1.0 - p.kappa_alpha) * self.kappa_cmd
+        k_f = self.kappa_cmd + float(np.clip(k_f - self.kappa_cmd,
+                                             -p.kappa_rate_max, p.kappa_rate_max))
+        self.kappa_cmd = float(np.clip(k_f, -p.kappa_max, p.kappa_max))
+        out.kappa = self.kappa_cmd
+        if source != 'stop':
+            out.speed_scale = 1.0 - p.curve_slowdown * min(1.0, abs(out.kappa) / p.kappa_max)
+
+        # 정지선 (흰색 마스크 기준, 차로 안쪽만)
+        if bev_white is not None:
+            center_col = cfg.vehicle_col
+            if cl is not None:
+                center_col = cfg.vehicle_col + float(np.polyval(cl.coeffs, cl.y_near)) / cfg.mm_per_px_x
+            lines = detect_stoplines(bev_white, center_col, cfg, p)
+            out.stoplines_mm = [d for d, _ in lines]
+            out.crosswalk_lines_mm = [d for d, bars in lines if bars]
+        return out
+
+    def _heading_kappa(self, yaw: float, yaw_ref: float, speed: float) -> float:
+        """yaw_ref를 향하도록 하는 곡률 (왼쪽 +). omega = -kp*err, kappa = omega/v."""
+        err = wrap_angle(yaw - yaw_ref)
+        omega = -self.p.yaw_kp * err
+        return omega / max(abs(speed), 0.05)
+
+
+# ---------------------------------------------------------------------------
+# 디버그 그림
+# ---------------------------------------------------------------------------
+def draw_debug(out: LaneOutput, cfg: BevConfig) -> np.ndarray:
+    """BEV 위에 추적 결과를 그린 BGR 이미지."""
+    bev = out.debug.get('bev')
+    if bev is None:
+        bev = np.zeros((cfg.bev_h, cfg.bev_w), np.uint8)
+    img = cv2.cvtColor((bev > 0).astype(np.uint8) * 90, cv2.COLOR_GRAY2BGR)
+    for key, color in (('left', (255, 120, 0)), ('right', (0, 120, 255))):
+        tr = out.debug.get(key)
+        if tr is None:
+            continue
+        for c, r in tr:
+            if not np.isnan(c):
+                cv2.circle(img, (int(c), int(r)), 4, color, -1)
+    cl = out.debug.get('centerline')
+    if cl is not None:
+        ys = np.linspace(cl.y_near, cl.y_far, 30)
+        pts = [(int(cfg.vehicle_col + np.polyval(cl.coeffs, y) / cfg.mm_per_px_x),
+                int(cfg.y_mm_to_row(y))) for y in ys]
+        cv2.polylines(img, [np.array(pts, np.int32)], False, (0, 220, 0), 2)
+    if out.target_mm is not None:
+        tx = int(cfg.vehicle_col + out.target_mm[0] / cfg.mm_per_px_x)
+        ty = int(cfg.y_mm_to_row(out.target_mm[1]))
+        cv2.circle(img, (tx, ty), 7, (255, 0, 255), 2)
+    for d in out.stoplines_mm:
+        row = int(cfg.y_mm_to_row(d + cfg.ref_to_front_axle_mm))
+        thick = 3 if d in out.crosswalk_lines_mm else 1
+        cv2.line(img, (0, row), (cfg.bev_w - 1, row), (255, 255, 0), thick)
+    vc = int(cfg.vehicle_col)
+    cv2.line(img, (vc, cfg.bev_h - 15), (vc, cfg.bev_h - 1), (255, 255, 255), 2)
+    txt = f'{out.status} {out.source} k={out.kappa:+.2f}'
+    cv2.putText(img, txt, (6, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+    if out.stoplines_mm:
+        cv2.putText(img, f'stop {out.stoplines_mm[0]:.0f}mm', (6, 38),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+    return img
