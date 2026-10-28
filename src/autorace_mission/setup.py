@@ -21,6 +21,7 @@ setup(
         'console_scripts': [
             'mission_node = autorace_mission.mission_node:main',
             'parking_node = autorace_mission.parking_node:main',
+            'ackermann_bridge = autorace_mission.ackermann_bridge:main',
         ],
     },
 )

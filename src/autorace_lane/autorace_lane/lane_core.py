@@ -182,7 +182,7 @@ class LaneParams:
     min_points: int = 4               # 중앙선 최소 점 수 (윈도우 단위)
     lookahead_mm: float = 650.0       # 제어 기준점에서 목표점까지 전방 거리
     target_offset_mm: float = 0.0     # 차로 중심에서 옆으로 비켜 갈 거리 (왼쪽 +). 3차선 변경용
-    kappa_max: float = 2.5            # 1/m. 애커만 최대 조향(안쪽 바퀴 28도) 근처
+    kappa_max: float = 2.1            # 1/m. 최소 회전반경 약 0.46m(안쪽 바퀴 28도, 가상 바퀴 0.41rad)
     # 시간 필터 / 게이트
     kappa_alpha: float = 0.5          # 곡률 명령 EMA (1.0 = 필터 없음)
     kappa_rate_max: float = 0.6       # 프레임당 곡률 변화 한계 (1/m)

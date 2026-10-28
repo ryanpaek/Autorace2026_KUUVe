@@ -23,7 +23,7 @@ lane_node:
     yellow_v_min: 80
     lane_width_mm: 530.0                   # TODO 실측: 좌우 차선 중심 사이
     lookahead_mm: 650.0
-    kappa_max: 2.5
+    kappa_max: 2.1                         # 최소 회전반경 약 0.46m(가상 바퀴 0.41rad) -> 1/0.46
     kappa_alpha: 0.5
     kappa_rate_max: 0.6
     lost_hold_frames: 30

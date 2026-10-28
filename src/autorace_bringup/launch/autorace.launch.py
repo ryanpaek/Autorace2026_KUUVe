@@ -1,6 +1,9 @@
 """전체 스택 실행.
 
-LIMO 드라이버·카메라·라이다는 LIMO 기본 bringup으로 먼저 띄운 뒤 실행한다.
+LIMO 드라이버·카메라·라이다를 먼저 띄운 뒤 실행한다 (애커만 LIMO 예):
+  ros2 launch limo_base limo_base_ackerman.launch.py
+  ros2 launch limo_base open_ydlidar_launch.py
+  ros2 launch orbbec_camera dabai.launch.py
   ros2 launch autorace_bringup autorace.launch.py
   ros2 launch autorace_bringup autorace.launch.py start_state:=M3_PEDESTRIAN use_detector:=false
 출발: ros2 topic pub --once /mission/start std_msgs/msg/Empty
@@ -22,12 +25,17 @@ def generate_launch_description():
     bev = LaunchConfiguration('bev_config')
     start_state = LaunchConfiguration('start_state')
     use_detector = LaunchConfiguration('use_detector')
+    use_bridge = LaunchConfiguration('use_ackermann_bridge')
     return LaunchDescription([
         DeclareLaunchArgument('params', default_value=os.path.join(share, 'config', 'params.yaml')),
         DeclareLaunchArgument('bev_config',
                               default_value=os.path.join(share, 'config', 'bev_limo.yaml')),
         DeclareLaunchArgument('start_state', default_value='WAIT_START'),
         DeclareLaunchArgument('use_detector', default_value='true'),
+        # 이 LIMO의 애커만 드라이버는 /limo/ack_cmd(AckermannDrive)만 받는다
+        DeclareLaunchArgument('use_ackermann_bridge', default_value='true'),
+        Node(package='autorace_mission', executable='ackermann_bridge', name='ackermann_bridge',
+             output='screen', condition=IfCondition(use_bridge)),
         Node(package='autorace_lane', executable='lane_node', name='lane_node',
              parameters=[params, {'bev_config': bev}], output='screen'),
         Node(package='autorace_mission', executable='mission_node', name='mission_node',
