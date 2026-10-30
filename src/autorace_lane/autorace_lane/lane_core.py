@@ -172,6 +172,8 @@ class LaneParams:
     pair_max_ratio: float = 1.35
     continuity_lambda: float = 3.0    # 쌍 점수 = |폭-예상| + lambda*|중점-직전 중점|
     side_deadband_mm: float = 40.0    # 한쪽 선이 중심 근처일 때 좌/우 판정 유지 폭
+    side_track_mm: float = 300.0      # 한쪽 선만 보일 때, 직전 시작점에서 이 안이면 같은 선으로 본다 (차로 폭의 절반 남짓)
+    min_component_px: int = 120       # 히스토그램이 비면(급곡선의 비스듬한 선) 덩어리로 찾는 최소 화소 수
     # 슬라이딩 윈도우
     n_windows: int = 16
     window_margin_mm: float = 100.0
@@ -183,6 +185,13 @@ class LaneParams:
     lookahead_mm: float = 650.0       # 제어 기준점에서 목표점까지 전방 거리
     target_offset_mm: float = 0.0     # 차로 중심에서 옆으로 비켜 갈 거리 (왼쪽 +). 3차선 변경용
     kappa_max: float = 2.1            # 1/m. 최소 회전반경 약 0.46m(안쪽 바퀴 28도, 가상 바퀴 0.41rad)
+    # 원호 모델: 급곡선(R~0.6m)에서는 보이는 선이 짧고 옆으로 누워 x(y) 다항식이 틀린다.
+    # 보이는 선 조각에 원을 맞춰 중앙선 원을 만들고, 그 원 위에서 목표점을 잡는다.
+    circle_fit: bool = True
+    circle_max_r_mm: float = 2500.0   # 이보다 큰 원(완만한 곡선·직선)은 다항식을 쓴다
+    circle_min_r_mm: float = 250.0
+    circle_max_rms_mm: float = 15.0   # 원 맞춤 잔차 상한
+    circle_min_points: int = 4
     # 시간 필터 / 게이트
     kappa_alpha: float = 0.5          # 곡률 명령 EMA (1.0 = 필터 없음)
     kappa_rate_max: float = 0.6       # 프레임당 곡률 변화 한계 (1/m)
@@ -233,6 +242,9 @@ class Centerline:
     coeffs: np.ndarray                  # x(y) 다항식 계수 (np.polyval 순서)
     y_near: float
     y_far: float
+    # 원호 모델 (cx, cy, rc, s, turn): 중심(mm), 중앙선 반경(mm),
+    # 진행 방향 s(+1 반시계, -1 시계, x 오른쪽+ y 전방+ 좌표), turn(+1 오른쪽 곡선, -1 왼쪽)
+    circle: Optional[Tuple[float, float, float, int, int]] = None
 
 
 @dataclass
@@ -308,7 +320,8 @@ def _side_candidates(col_sum: np.ndarray, lo: int, hi: int, min_peak: int,
 
 
 def detect_lanes(bev: np.ndarray, cfg: BevConfig, p: LaneParams, mode: str,
-                 mid_ema: Optional[float], last_side: Optional[str]) -> Detection:
+                 mid_ema: Optional[float], last_side: Optional[str],
+                 last_x: Optional[float] = None) -> Detection:
     h, w = bev.shape[:2]
     exp_w = p.lane_width_mm / cfg.mm_per_px_x
     band_rows = int(min(h, max(10, round(p.hist_band_mm / cfg.mm_per_px_y))))
@@ -358,12 +371,28 @@ def detect_lanes(bev: np.ndarray, cfg: BevConfig, p: LaneParams, mode: str,
     # 쌍이 없으면 가장 강한 선 하나. 좌/우는 차량 중심선 기준 절대 판정.
     singles = left_c[:1] + right_c[:1]
     if not singles:
-        return det
+        # 급곡선에서는 선이 비스듬히 누워 열별 화소 수가 min_peak에 못 미친다.
+        # 하단 밴드에서 가장 큰 덩어리를 찾아 그 아래쪽 끝을 시작점으로 쓴다.
+        band = (bev[h - band_rows:] > 0).astype(np.uint8)
+        n, lab, stats, _ = cv2.connectedComponentsWithStats(band, connectivity=8)
+        if n <= 1:
+            return det
+        k = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+        if stats[k, cv2.CC_STAT_AREA] < p.min_component_px:
+            return det
+        ys, xs = np.nonzero(lab == k)
+        low = ys >= ys.max() - 8
+        singles = [(float(xs[low].mean()), int(stats[k, cv2.CC_STAT_AREA]))]
     x, _ = max(singles, key=lambda c: c[1])
     side = 'L' if x < vc else 'R'
     dead = p.side_deadband_mm / cfg.mm_per_px_x
     if abs(x - vc) <= dead and last_side in ('L', 'R'):
         side = last_side          # 선 위에 걸쳐 있을 때는 직전 판정을 유지
+    # 급곡선에서는 바깥 선이 차 앞을 가로질러 중심선 반대편으로 넘어간다.
+    # 직전에 본 선과 가까우면 같은 선으로 보고 좌/우 판정을 유지한다.
+    if (last_side in ('L', 'R') and last_x is not None
+            and abs(x - last_x) <= p.side_track_mm / cfg.mm_per_px_x):
+        side = last_side
     if side == 'L':
         det.left_x0, det.status = x, 'L'
     else:
@@ -448,10 +477,194 @@ def _robust_polyfit(y: np.ndarray, x: np.ndarray, order: int) -> Optional[np.nda
     return coeffs
 
 
+def fit_circle(x: np.ndarray, y: np.ndarray) -> Optional[Tuple[float, float, float, float]]:
+    """대수적 원 맞춤 (Kasa) + 잔차 큰 점 한 번 제거. (cx, cy, r, rms) mm."""
+    def _fit(x, y):
+        A = np.stack([x, y, np.ones_like(x)], axis=1)
+        b = x * x + y * y
+        try:
+            sol, *_ = np.linalg.lstsq(A, b, rcond=None)
+        except np.linalg.LinAlgError:
+            return None
+        cx, cy = sol[0] / 2.0, sol[1] / 2.0
+        r2 = sol[2] + cx * cx + cy * cy
+        if not np.isfinite(r2) or r2 <= 0:
+            return None
+        r = math.sqrt(r2)
+        # 대수적 맞춤은 짧고 두꺼운 호에서 반경을 작게 잡는다 -> 기하학적 거리로 다듬는다
+        for _ in range(20):
+            dx, dy = x - cx, y - cy
+            d = np.hypot(dx, dy)
+            if np.any(d < 1e-6):
+                break
+            J = np.stack([-dx / d, -dy / d, -np.ones_like(d)], axis=1)
+            res = d - r
+            try:
+                step, *_ = np.linalg.lstsq(J, -res, rcond=None)
+            except np.linalg.LinAlgError:
+                break
+            cx, cy, r = cx + step[0], cy + step[1], r + step[2]
+            if not np.all(np.isfinite([cx, cy, r])) or r <= 0:
+                return None
+            if abs(step).max() < 0.05:
+                break
+        return cx, cy, r
+    if len(x) < 3:
+        return None
+    res = _fit(x, y)
+    if res is None:
+        return None
+    cx, cy, r = res
+    d = np.abs(np.hypot(x - cx, y - cy) - r)
+    keep = d <= max(3.0 * float(np.median(d)), 8.0)
+    if 3 <= keep.sum() < len(x):
+        res2 = _fit(x[keep], y[keep])
+        if res2 is not None:
+            cx, cy, r = res2
+            x, y = x[keep], y[keep]
+            d = np.abs(np.hypot(x - cx, y - cy) - r)
+    return cx, cy, r, float(np.sqrt(np.mean(d * d)))
+
+
+def _track_mm(track: Optional[np.ndarray], cfg: BevConfig) -> Optional[np.ndarray]:
+    """추적 결과(윈도우 순서 = 진행 순서)를 mm 점 배열로."""
+    if track is None:
+        return None
+    ok = ~np.isnan(track[:, 0])
+    if ok.sum() == 0:
+        return None
+    return np.stack([cfg.col_to_x_mm(track[ok, 0]), cfg.row_to_y_mm(track[ok, 1])], axis=1)
+
+
+def circle_centerline(pts: np.ndarray, side: str, half_mm: float,
+                      p: 'LaneParams', fit_pts: Optional[np.ndarray] = None
+                      ) -> Optional[Tuple[float, float, float, int, int]]:
+    """진행 순서 점들(선 하나 또는 중앙점)로 중앙선 원을 만든다.
+
+    side: 'L' 왼쪽 선, 'R' 오른쪽 선, 'C' 이미 중앙점.
+    fit_pts: 원 맞춤에 쓸 촘촘한 점(선 화소). 없으면 pts로 맞춘다. pts는 진행 방향 판단용.
+    """
+    if pts is None or len(pts) < 2:
+        return None
+    if fit_pts is None:
+        if len(pts) < p.circle_min_points:
+            return None
+        fit_pts = pts
+    elif len(fit_pts) < 20:
+        return None
+    fit = fit_circle(fit_pts[:, 0], fit_pts[:, 1])
+    if fit is None:
+        return None
+    cx, cy, r, rms = fit
+    if not (p.circle_min_r_mm <= r <= p.circle_max_r_mm) or rms > p.circle_max_rms_mm:
+        return None
+    # 진행 방향: 가까운 점 -> 몇 칸 앞 점
+    j = min(len(pts) - 1, 2)
+    # 가까운 점은 원 위로 옮겨 쓴다 (윈도우 무게중심 오차 제거)
+    t = pts[j] - pts[0]
+    nt = float(np.hypot(t[0], t[1]))
+    if nt < 1e-6:
+        return None
+    t = t / nt
+    p0 = pts[0]
+    right_n = np.array([t[1], -t[0]])                 # 진행 방향의 오른쪽
+    turn = 1 if float(np.dot(np.array([cx, cy]) - p0, right_n)) > 0 else -1
+    if side == 'L':
+        rc = r - half_mm if turn > 0 else r + half_mm
+    elif side == 'R':
+        rc = r + half_mm if turn > 0 else r - half_mm
+    else:
+        rc = r
+    if rc < 150.0:
+        return None
+    cz = (p0[0] - cx) * t[1] - (p0[1] - cy) * t[0]
+    s = 1 if cz > 0 else -1
+    return float(cx), float(cy), float(rc), s, turn
+
+
+def _circle_point(circ, phi: float) -> Tuple[float, float]:
+    cx, cy, rc, _, _ = circ
+    return cx + rc * math.cos(phi), cy + rc * math.sin(phi)
+
+
+def circle_nearest(circ) -> Tuple[float, float, float]:
+    """원 위에서 기준점(원점)에 가장 가까운 점 (x, y, phi)."""
+    cx, cy = circ[0], circ[1]
+    phi = math.atan2(-cy, -cx)
+    x, y = _circle_point(circ, phi)
+    return x, y, phi
+
+
+def circle_sample(circ, arc_mm: float, n: int = 30) -> np.ndarray:
+    """가장 가까운 점부터 진행 방향으로 arc_mm만큼의 점들 (n, 2)."""
+    _, _, phi0 = circle_nearest(circ)
+    rc, s = circ[2], circ[3]
+    phis = phi0 + s * np.linspace(0.0, arc_mm / rc, n)
+    return np.stack([circ[0] + rc * np.cos(phis), circ[1] + rc * np.sin(phis)], axis=1)
+
+
+def circle_target(circ, lookahead_mm: float) -> Tuple[Tuple[float, float], bool]:
+    """원 위에서 기준점으로부터 직선거리 lookahead_mm인 점 중 진행 방향 첫 점.
+    교점이 없으면(차가 경로에서 멀다) 가장 가까운 점에서 호 길이 lookahead만큼 앞 점."""
+    cx, cy, rc, s, _ = circ
+    _, _, phi0 = circle_nearest(circ)
+    D = math.hypot(cx, cy)
+    if D > 1e-6:
+        c = (lookahead_mm ** 2 - D * D - rc * rc) / (2.0 * rc * D)
+        if -1.0 <= c <= 1.0:
+            psi = math.atan2(cy, cx)
+            best = None
+            for phi in (psi + math.acos(c), psi - math.acos(c)):
+                u = (s * (phi - phi0)) % (2.0 * math.pi)
+                if best is None or u < best[0]:
+                    best = (u, phi)
+            if best[0] <= math.pi:
+                return _circle_point(circ, best[1]), False
+    return _circle_point(circ, phi0 + s * lookahead_mm / rc), True
+
+
+def circle_geometry(circ) -> Tuple[float, float, float]:
+    """가장 가까운 점에서 (곡률 [1/m, 오른쪽 +], 헤딩 [rad, 오른쪽 +], 횡위치 x [mm, 오른쪽 +])."""
+    cx, cy, rc, s, turn = circ
+    x, y, phi = circle_nearest(circ)
+    ux, uy = (x - cx) / rc, (y - cy) / rc
+    tx, ty = -s * uy, s * ux                          # 진행 방향 접선
+    return turn * 1000.0 / rc, math.atan2(tx, ty), x
+
+
+
+def _line_pixels_mm(mask: Optional[np.ndarray], track: Optional[np.ndarray], cfg: BevConfig,
+                    max_pts: int = 600) -> Optional[np.ndarray]:
+    """추적한 선이 지나는 덩어리(연결 성분)의 화소를 mm 점으로. 원 맞춤용."""
+    if mask is None or track is None:
+        return None
+    ok = ~np.isnan(track[:, 0])
+    if ok.sum() == 0:
+        return None
+    n, lab = cv2.connectedComponents((mask > 0).astype(np.uint8), connectivity=8)
+    h, w = mask.shape[:2]
+    keep = set()
+    for c, r in track[ok]:
+        ci, ri = int(round(c)), int(round(r))
+        win = lab[max(0, ri - 3):min(h, ri + 4), max(0, ci - 3):min(w, ci + 4)]
+        keep.update(int(v) for v in np.unique(win) if v > 0)
+    if not keep:
+        return None
+    ys, xs = np.nonzero(np.isin(lab, list(keep)))
+    if xs.size > max_pts:
+        idx = np.linspace(0, xs.size - 1, max_pts).astype(int)
+        xs, ys = xs[idx], ys[idx]
+    return np.stack([cfg.col_to_x_mm(xs.astype(float)), cfg.row_to_y_mm(ys.astype(float))], axis=1)
+
+
 def build_centerline(left: Optional[np.ndarray], right: Optional[np.ndarray],
                      det: Detection, cfg: BevConfig, p: LaneParams,
-                     fit_order: int) -> Optional[Centerline]:
-    """좌/우 추적 결과로 중앙선을 만든다 (윈도우 단위)."""
+                     fit_order: int, use_circle: bool = True,
+                     mask: Optional[np.ndarray] = None) -> Optional[Centerline]:
+    """좌/우 추적 결과로 중앙선을 만든다 (윈도우 단위).
+
+    급곡선이면 원호 모델(circle)을 함께 붙인다. 목표점·곡률은 원호가 있으면 원호로 계산한다.
+    """
     exp_w = det.expected_w_px
     half_mm = p.lane_width_mm / 2.0
     rows, xs = [], []
@@ -477,13 +690,39 @@ def build_centerline(left: Optional[np.ndarray], right: Optional[np.ndarray],
             off = half_mm * math.sqrt(1.0 + sr[i] ** 2) / cfg.mm_per_px_x
             xs.append(right[i, 0] - off)
             rows.append(right[i, 1])
-    if len(xs) < max(2, p.min_points):
+    circ = None
+    if use_circle and p.circle_fit:
+        if det.status == 'BOTH' and len(xs) >= p.circle_min_points:
+            cpts = np.stack([cfg.col_to_x_mm(np.asarray(xs)),
+                             cfg.row_to_y_mm(np.asarray(rows))], axis=1)
+            circ = circle_centerline(cpts, 'C', half_mm, p)
+        # 쌍이 원을 못 만들면(또는 한쪽만 보이면) 보이는 선 하나로
+        if circ is None:
+            for side, tr in (('L', left), ('R', right)):
+                if circ is None and (det.status == side or det.status == 'BOTH'):
+                    circ = circle_centerline(_track_mm(tr, cfg), side, half_mm, p,
+                                             fit_pts=_line_pixels_mm(mask, tr, cfg))
+    if len(xs) < max(2, p.min_points) and circ is None:
         return None
-    x_mm = cfg.col_to_x_mm(np.asarray(xs))
-    y_mm = cfg.row_to_y_mm(np.asarray(rows))
-    order = np.argsort(y_mm)
-    x_mm, y_mm = x_mm[order], y_mm[order]
-    coeffs = _robust_polyfit(y_mm, x_mm, fit_order)
+    coeffs = None
+    if len(xs) >= 2:
+        x_mm = cfg.col_to_x_mm(np.asarray(xs))
+        y_mm = cfg.row_to_y_mm(np.asarray(rows))
+        order = np.argsort(y_mm)
+        x_mm, y_mm = x_mm[order], y_mm[order]
+        coeffs = _robust_polyfit(y_mm, x_mm, fit_order)
+    if circ is not None:
+        # 다항식은 정지선 중심·디버그용 근사. 원호 위 점으로 다시 맞춘다.
+        pts = circle_sample(circ, 900.0)
+        fwd = pts[:, 1] >= cfg.ref_to_bev_bottom_mm - 1.0
+        sp = pts[fwd] if fwd.sum() >= 3 else pts
+        c2 = _robust_polyfit(sp[:, 1], sp[:, 0], 2) if np.ptp(sp[:, 1]) > 1.0 else None
+        if c2 is not None:
+            coeffs = c2
+        if coeffs is None:
+            coeffs = np.array([float(sp[0, 0])])
+        return Centerline(pts_mm=pts, coeffs=coeffs, y_near=float(sp[:, 1].min()),
+                          y_far=float(sp[:, 1].max()), circle=circ)
     if coeffs is None:
         return None
     pts = np.stack([np.polyval(coeffs, y_mm), y_mm], axis=1)
@@ -498,6 +737,18 @@ def pure_pursuit(cl: Centerline, lookahead_mm: float,
     반환: (kappa_right [1/m, 오른쪽 +], 목표점(x, y) mm, low_conf)
     기준점(원점)에서 목표점을 지나는 원의 곡률 = 2x / (x^2 + y^2).
     """
+    if cl.circle is not None:
+        (x_t, y_t), low_conf = circle_target(cl.circle, float(lookahead_mm))
+        if offset_right_mm:
+            # 진행 방향의 오른쪽 법선으로 비켜 간다
+            cx, cy, rc, s = cl.circle[0], cl.circle[1], cl.circle[2], cl.circle[3]
+            ux, uy = (x_t - cx) / rc, (y_t - cy) / rc
+            tx, ty = -s * uy, s * ux
+            x_t, y_t = x_t + offset_right_mm * ty, y_t - offset_right_mm * tx
+        d2 = x_t * x_t + y_t * y_t
+        if d2 < 1.0:
+            return 0.0, (x_t, y_t), True
+        return 2000.0 * x_t / d2, (x_t, y_t), low_conf
     y_t = float(lookahead_mm)
     low_conf = y_t > cl.y_far + 1e-6
     if low_conf:
@@ -591,6 +842,7 @@ class LaneFollower:
     def reset(self) -> None:
         self.mid_ema = None
         self.last_side = None
+        self.last_single_x = None
         self.prev_target_x = None
         self.reject_count = 0
         self.lost_frames = 0
@@ -635,7 +887,8 @@ class LaneFollower:
 
         out = LaneOutput()
         out.debug['bev'] = bev_lane
-        det = detect_lanes(bev_lane, cfg, p, self.mode, self.mid_ema, self.last_side)
+        det = detect_lanes(bev_lane, cfg, p, self.mode, self.mid_ema, self.last_side,
+                           self.last_single_x)
         out.status = det.status
 
         left = track_line(bev_lane, det.left_x0, cfg, p) if det.left_x0 is not None else None
@@ -645,7 +898,8 @@ class LaneFollower:
         fit_order = self.fit_order_override or (1 if self.mode == 'zigzag' else p.fit_order)
         cl = None
         if det.status != 'NONE':
-            cl = build_centerline(left, right, det, cfg, p, fit_order)
+            cl = build_centerline(left, right, det, cfg, p, fit_order,
+                                  use_circle=(self.mode != 'zigzag'), mask=bev_lane)
         out.debug['centerline'] = cl
 
         # 연속성 상태 갱신
@@ -653,17 +907,23 @@ class LaneFollower:
             mid = (det.left_x0 + det.right_x0) / 2.0
             self.mid_ema = mid if self.mid_ema is None else 0.3 * mid + 0.7 * self.mid_ema
             self.last_side = None
+            self.last_single_x = None
         elif det.status in ('L', 'R'):
             self.last_side = det.status
+            self.last_single_x = det.left_x0 if det.status == 'L' else det.right_x0
         else:
-            self.mid_ema, self.last_side = None, None
+            self.mid_ema, self.last_side, self.last_single_x = None, None, None
 
         kappa_raw, source = None, 'lane'
         if cl is not None:
-            k_path, psi = path_geometry(cl, cl.y_near)
+            if cl.circle is not None:
+                k_path, psi, x_near = circle_geometry(cl.circle)
+            else:
+                k_path, psi = path_geometry(cl, cl.y_near)
+                x_near = float(np.polyval(cl.coeffs, cl.y_near))
             out.path_kappa = -k_path
             out.heading_rad = -psi
-            out.offset_mm = -float(np.polyval(cl.coeffs, cl.y_near))
+            out.offset_mm = -x_near
             if p.target_offset_mm != self._last_offset:
                 self.prev_target_x = None      # 의도한 비켜 가기는 점프 게이트에 안 걸리게
                 self._last_offset = p.target_offset_mm
@@ -747,10 +1007,15 @@ def draw_debug(out: LaneOutput, cfg: BevConfig) -> np.ndarray:
                 cv2.circle(img, (int(c), int(r)), 4, color, -1)
     cl = out.debug.get('centerline')
     if cl is not None:
-        ys = np.linspace(cl.y_near, cl.y_far, 30)
-        pts = [(int(cfg.vehicle_col + np.polyval(cl.coeffs, y) / cfg.mm_per_px_x),
-                int(cfg.y_mm_to_row(y))) for y in ys]
-        cv2.polylines(img, [np.array(pts, np.int32)], False, (0, 220, 0), 2)
+        if cl.circle is not None:
+            pts = [(int(cfg.vehicle_col + x / cfg.mm_per_px_x), int(cfg.y_mm_to_row(y)))
+                   for x, y in circle_sample(cl.circle, 1500.0, 40)]
+            cv2.polylines(img, [np.array(pts, np.int32)], False, (0, 220, 220), 2)
+        else:
+            ys = np.linspace(cl.y_near, cl.y_far, 30)
+            pts = [(int(cfg.vehicle_col + np.polyval(cl.coeffs, y) / cfg.mm_per_px_x),
+                    int(cfg.y_mm_to_row(y))) for y in ys]
+            cv2.polylines(img, [np.array(pts, np.int32)], False, (0, 220, 0), 2)
     if out.target_mm is not None:
         tx = int(cfg.vehicle_col + out.target_mm[0] / cfg.mm_per_px_x)
         ty = int(cfg.y_mm_to_row(out.target_mm[1]))
