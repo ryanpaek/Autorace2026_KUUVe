@@ -190,7 +190,8 @@ class LaneParams:
     circle_fit: bool = True
     circle_max_r_mm: float = 2500.0   # 이보다 큰 원(완만한 곡선·직선)은 다항식을 쓴다
     circle_min_r_mm: float = 250.0
-    circle_max_rms_mm: float = 15.0   # 원 맞춤 잔차 상한
+    circle_max_rms_mm: float = 30.0   # 원 맞춤 잔차 상한 (실제 테이프는 BEV에서 40~60mm 두께)
+    circle_min_gain_mm: float = 8.0   # 직선 대비 원이 줄여 주는 잔차가 이 이상일 때만 원을 쓴다 (직선 구간 보호)
     circle_min_points: int = 4
     # 시간 필터 / 게이트
     kappa_alpha: float = 0.5          # 곡률 명령 EMA (1.0 = 필터 없음)
@@ -324,7 +325,7 @@ def _side_candidates(col_sum: np.ndarray, lo: int, hi: int, min_peak: int,
 
 def detect_lanes(bev: np.ndarray, cfg: BevConfig, p: LaneParams, mode: str,
                  mid_ema: Optional[float], last_side: Optional[str],
-                 last_x: Optional[float] = None) -> Detection:
+                 last_lr: Tuple[Optional[float], Optional[float]] = (None, None)) -> Detection:
     h, w = bev.shape[:2]
     exp_w = p.lane_width_mm / cfg.mm_per_px_x
     band_rows = int(min(h, max(10, round(p.hist_band_mm / cfg.mm_per_px_y))))
@@ -355,11 +356,23 @@ def detect_lanes(bev: np.ndarray, cfg: BevConfig, p: LaneParams, mode: str,
     left_c = _side_candidates(col_sum, 0, vci, p.min_peak, suppress)
     right_c = _side_candidates(col_sum, vci, w, p.min_peak, suppress)
 
+    # 하단 밴드 덩어리 번호. 두껍고 비스듬한 선 하나가 히스토그램에 봉우리 두 개를 만들면
+    # 같은 선을 좌우 쌍으로 착각한다 -> 같은 덩어리면 쌍이 아니다.
+    band = (bev[h - band_rows:] > 0).astype(np.uint8)
+    n_lab, lab, stats, _ = cv2.connectedComponentsWithStats(band, connectivity=8)
+
+    def labels_at(x):
+        c0, c1 = int(max(0, x - 2)), int(min(w, x + 3))
+        v = np.unique(lab[:, c0:c1])
+        return set(int(t) for t in v if t > 0)
+
     best, best_score = None, None
     for lx, _ in left_c:
         for rx, _ in right_c:
             pw = rx - lx
             if pw < p.pair_min_ratio * exp_w or pw > p.pair_max_ratio * exp_w:
+                continue
+            if labels_at(lx) & labels_at(rx):
                 continue
             score = abs(pw - exp_w)
             if mid_ema is not None and p.continuity_lambda > 0.0:
@@ -376,9 +389,7 @@ def detect_lanes(bev: np.ndarray, cfg: BevConfig, p: LaneParams, mode: str,
     if not singles:
         # 급곡선에서는 선이 비스듬히 누워 열별 화소 수가 min_peak에 못 미친다.
         # 하단 밴드에서 가장 큰 덩어리를 찾아 그 아래쪽 끝을 시작점으로 쓴다.
-        band = (bev[h - band_rows:] > 0).astype(np.uint8)
-        n, lab, stats, _ = cv2.connectedComponentsWithStats(band, connectivity=8)
-        if n <= 1:
+        if n_lab <= 1:
             return det
         k = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
         if stats[k, cv2.CC_STAT_AREA] < p.min_component_px:
@@ -392,10 +403,13 @@ def detect_lanes(bev: np.ndarray, cfg: BevConfig, p: LaneParams, mode: str,
     if abs(x - vc) <= dead and last_side in ('L', 'R'):
         side = last_side          # 선 위에 걸쳐 있을 때는 직전 판정을 유지
     # 급곡선에서는 바깥 선이 차 앞을 가로질러 중심선 반대편으로 넘어간다.
-    # 직전에 본 선과 가까우면 같은 선으로 보고 좌/우 판정을 유지한다.
-    if (last_side in ('L', 'R') and last_x is not None
-            and abs(x - last_x) <= p.side_track_mm / cfg.mm_per_px_x):
-        side = last_side
+    # 직전에 본 좌/우 선 위치 중 가까운 쪽이 일정 거리 안이면 그 선으로 본다.
+    lim = p.side_track_mm / cfg.mm_per_px_x
+    near = [(abs(x - lx_), sd) for lx_, sd in zip(last_lr, ('L', 'R')) if lx_ is not None]
+    if near:
+        d, sd = min(near)
+        if d <= lim:
+            side = sd
     if side == 'L':
         det.left_x0, det.status = x, 'L'
     else:
@@ -560,6 +574,14 @@ def circle_centerline(pts: np.ndarray, side: str, half_mm: float,
         return None
     cx, cy, r, rms = fit
     if not (p.circle_min_r_mm <= r <= p.circle_max_r_mm) or rms > p.circle_max_rms_mm:
+        return None
+    # 직선으로도 충분히 설명되면(직선 구간·두꺼운 선의 잡음) 원을 쓰지 않는다
+    fp = fit_pts - fit_pts.mean(axis=0)
+    _, sv, _ = np.linalg.svd(fp, full_matrices=False)
+    rms_line = float(sv[-1] / math.sqrt(len(fp)))
+    # 선 두께 때문에 두 잔차 모두 커지므로 비율 대신 '원이 줄여 준 잔차'로 본다
+    gain = math.sqrt(max(0.0, rms_line * rms_line - rms * rms))
+    if gain < p.circle_min_gain_mm:
         return None
     # 진행 방향: 가까운 점 -> 몇 칸 앞 점
     j = min(len(pts) - 1, 2)
@@ -756,6 +778,9 @@ def pure_pursuit(cl: Centerline, lookahead_mm: float,
     low_conf = y_t > cl.y_far + 1e-6
     if low_conf:
         y_t = cl.y_far          # 중앙선이 짧으면 가장 먼 점까지만
+    if y_t < cl.y_near:
+        # 보이는 구간보다 가까운 곳은 다항식을 뒤로 늘리지 않는다 (곡선에서 반대로 꺾던 원인)
+        y_t, low_conf = cl.y_near, True
     x_t = float(np.polyval(cl.coeffs, y_t)) + offset_right_mm
     d2 = x_t * x_t + y_t * y_t
     if d2 < 1.0:
@@ -845,7 +870,8 @@ class LaneFollower:
     def reset(self) -> None:
         self.mid_ema = None
         self.last_side = None
-        self.last_single_x = None
+        self.last_lr = (None, None)          # 직전 프레임 좌/우 선 시작점 (BEV 열)
+        self.prev_line_masks = (None, None)  # 직전 프레임 좌/우 선 화소 (BEV, 조금 부풀림)
         self.prev_target_x = None
         self.reject_count = 0
         self.lost_frames = 0
@@ -891,12 +917,16 @@ class LaneFollower:
         out = LaneOutput()
         out.debug['bev'] = bev_lane
         det = detect_lanes(bev_lane, cfg, p, self.mode, self.mid_ema, self.last_side,
-                           self.last_single_x)
+                           self.last_lr)
+        n_lab, lab_full = cv2.connectedComponents((bev_lane > 0).astype(np.uint8), connectivity=8)
+        if det.status in ('L', 'R') and self.mode not in ('left_only', 'right_only'):
+            self._keep_side_by_overlap(det, lab_full)
         out.status = det.status
 
         left = track_line(bev_lane, det.left_x0, cfg, p) if det.left_x0 is not None else None
         right = track_line(bev_lane, det.right_x0, cfg, p) if det.right_x0 is not None else None
         out.debug['left'], out.debug['right'] = left, right
+        self.prev_line_masks = (self._line_mask(lab_full, left), self._line_mask(lab_full, right))
 
         fit_order = self.fit_order_override or (1 if self.mode == 'zigzag' else p.fit_order)
         cl = None
@@ -910,12 +940,13 @@ class LaneFollower:
             mid = (det.left_x0 + det.right_x0) / 2.0
             self.mid_ema = mid if self.mid_ema is None else 0.3 * mid + 0.7 * self.mid_ema
             self.last_side = None
-            self.last_single_x = None
+            self.last_lr = (det.left_x0, det.right_x0)
         elif det.status in ('L', 'R'):
             self.last_side = det.status
-            self.last_single_x = det.left_x0 if det.status == 'L' else det.right_x0
+            self.last_lr = (det.left_x0, None) if det.status == 'L' else (None, det.right_x0)
         else:
-            self.mid_ema, self.last_side, self.last_single_x = None, None, None
+            self.mid_ema, self.last_side = None, None
+            self.last_lr = (None, None)
 
         kappa_raw, source = None, 'lane'
         if cl is not None:
@@ -984,6 +1015,56 @@ class LaneFollower:
             out.stoplines_mm = [d for d, _ in lines]
             out.crosswalk_lines_mm = [d for d, bars in lines if bars]
         return out
+
+    # --- 선 동일성 (프레임 간) --------------------------------------------------
+    @staticmethod
+    def _labels_near(lab: np.ndarray, pts) -> set:
+        h, w = lab.shape[:2]
+        out = set()
+        for c, r in pts:
+            ci, ri = int(round(c)), int(round(r))
+            win = lab[max(0, ri - 3):min(h, ri + 4), max(0, ci - 3):min(w, ci + 4)]
+            out.update(int(v) for v in np.unique(win) if v > 0)
+        return out
+
+    def _line_mask(self, lab: np.ndarray, track: Optional[np.ndarray]) -> Optional[np.ndarray]:
+        """추적한 선이 지나는 덩어리 화소. 다음 프레임에서 같은 선인지 가리는 데 쓴다."""
+        if track is None:
+            return None
+        ok = ~np.isnan(track[:, 0])
+        if ok.sum() == 0:
+            return None
+        labels = self._labels_near(lab, track[ok])
+        if not labels:
+            return None
+        m = np.isin(lab, list(labels)).astype(np.uint8)
+        return cv2.dilate(m, np.ones((19, 19), np.uint8)) > 0   # 한 프레임 이동·회전 여유
+
+    def _keep_side_by_overlap(self, det: 'Detection', lab: np.ndarray) -> None:
+        """한쪽 선만 보일 때, 직전 프레임의 좌/우 선 화소와 더 많이 겹치는 쪽으로 판정한다.
+
+        급곡선에서 바깥 선은 차 앞을 가로질러 반대편으로 넘어가고, 두꺼운 선은 시작점이
+        크게 튈 수 있어서 시작점 거리만으로는 같은 선인지 모른다.
+        """
+        pl, pr = self.prev_line_masks
+        if pl is None and pr is None:
+            return
+        x0 = det.left_x0 if det.status == 'L' else det.right_x0
+        h = lab.shape[0]
+        band = int(min(h, max(10, round(self.p.hist_band_mm / self.cfg.mm_per_px_y))))
+        rows = np.arange(h - 1, h - band - 1, -3)
+        labels = self._labels_near(lab, [(x0, r) for r in rows])
+        if not labels:
+            return
+        comp = np.isin(lab, list(labels))
+        ol = int((comp & pl).sum()) if pl is not None else 0
+        orr = int((comp & pr).sum()) if pr is not None else 0
+        if max(ol, orr) < 30 or ol == orr:
+            return
+        side = 'L' if ol > orr else 'R'
+        if side != det.status:
+            det.left_x0, det.right_x0 = (x0, None) if side == 'L' else (None, x0)
+            det.status = side
 
     def _heading_kappa(self, yaw: float, yaw_ref: float, speed: float) -> float:
         """yaw_ref를 향하도록 하는 곡률 (왼쪽 +). omega = -kp*err, kappa = omega/v."""

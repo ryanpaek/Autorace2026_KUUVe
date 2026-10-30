@@ -21,7 +21,7 @@ lane_node:
     yellow_h_max: 40
     yellow_s_min: 80
     yellow_v_min: 80
-    lane_width_mm: 530.0                   # TODO 실측: 좌우 차선 중심 사이
+    lane_width_mm: 515.0                   # 모의 맵 실측(10/30): 바깥~바깥 535, 테이프 20 -> 중심 간 515
     lookahead_mm: 650.0
     kappa_max: 2.1                         # 최소 회전반경 약 0.46m(가상 바퀴 0.41rad) -> 1/0.46
     kappa_alpha: 0.5

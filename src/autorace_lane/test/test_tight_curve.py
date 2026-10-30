@@ -81,8 +81,12 @@ def drive(mirror=False, v=0.25, x0=0.0, params=None):
     return False, errs
 
 
+@pytest.mark.parametrize('line_half', [12.0, 25.0], ids=['thin', 'thick'])
 @pytest.mark.parametrize('mirror', [False, True], ids=['right_curve', 'left_curve'])
-def test_tight_curve_completes(mirror):
+def test_tight_curve_completes(mirror, line_half, monkeypatch):
+    # 실차 BEV에서는 20mm 테이프가 번짐 때문에 40~60mm로 보인다. 두꺼운 선은 히스토그램 봉우리가
+    # 둘로 갈려 같은 선을 좌우 쌍으로 착각하던 문제(10/30 curve_v2)를 재현한다.
+    monkeypatch.setattr(__import__(__name__), 'LINE_HALF', line_half)
     ok, errs = drive(mirror=mirror)
     assert ok, f'곡선 도중 정지 (최대 횡오차 {max(map(abs, errs)):.0f}mm)'
     assert max(map(abs, errs)) < 150.0
