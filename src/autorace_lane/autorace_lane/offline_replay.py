@@ -128,7 +128,7 @@ def main(argv=None):
     with open(os.path.join(out_dir, 'result.csv'), 'w', newline='') as fcsv:
         w = csv.writer(fcsv)
         w.writerow(['frame', 'status', 'source', 'kappa', 'offset_mm', 'heading_rad',
-                    'path_kappa', 'low_conf', 'stopline_mm', 'idx'])
+                    'path_kappa', 'low_conf', 'stopline_mm', 'idx', 'model', 'circle_r_mm'])
         for idx, (name, img) in enumerate(frames):
             if a.range and not (a.range[0] <= idx <= a.range[1]):
                 if idx > a.range[1]:
@@ -136,12 +136,14 @@ def main(argv=None):
                 continue
             n = idx
             out = f.process(img, speed=a.speed)
+            st = out.status_dict()
             w.writerow([name, out.status, out.source, f'{out.kappa:.4f}',
                         '' if out.offset_mm is None else f'{out.offset_mm:.1f}',
                         '' if out.heading_rad is None else f'{out.heading_rad:.4f}',
                         '' if out.path_kappa is None else f'{out.path_kappa:.3f}',
                         int(out.low_conf),
-                        out.stoplines_mm[0] if out.stoplines_mm else '', idx])
+                        out.stoplines_mm[0] if out.stoplines_mm else '', idx,
+                        st['model'] or '', st['circle_r_mm'] or ''])
             if n % max(1, a.every) == 0:
                 cam = cv2.resize(img, (cfg.image_width, cfg.image_height))
                 dbg = draw_debug(out, cfg)

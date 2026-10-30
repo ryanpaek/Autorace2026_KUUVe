@@ -268,6 +268,9 @@ class LaneOutput:
             'heading_rad', 'path_kappa', 'low_conf', 'stoplines_mm',
             'crosswalk_lines_mm')}
         d['target_mm'] = list(self.target_mm) if self.target_mm else None
+        cl = self.debug.get('centerline')
+        d['model'] = ('circle' if cl.circle is not None else 'poly') if cl is not None else None
+        d['circle_r_mm'] = round(cl.circle[2]) if cl is not None and cl.circle is not None else None
         return d
 
 
