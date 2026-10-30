@@ -191,6 +191,7 @@ class LaneParams:
     circle_max_r_mm: float = 2500.0   # 이보다 큰 원(완만한 곡선·직선)은 다항식을 쓴다
     circle_min_r_mm: float = 250.0
     circle_max_rms_mm: float = 30.0   # 원 맞춤 잔차 상한 (실제 테이프는 BEV에서 40~60mm 두께)
+    track_corner_r_mm: float = 850.0  # 코너 차로 중심 반경(도면). 한쪽 선이 안쪽인지 바깥인지 반경으로 판단. 0이면 끔
     circle_min_gain_mm: float = 8.0   # 직선 대비 원이 줄여 주는 잔차가 이 이상일 때만 원을 쓴다 (직선 구간 보호)
     circle_min_points: int = 4
     # 시간 필터 / 게이트
@@ -594,7 +595,13 @@ def circle_centerline(pts: np.ndarray, side: str, half_mm: float,
     p0 = pts[0]
     right_n = np.array([t[1], -t[0]])                 # 진행 방향의 오른쪽
     turn = 1 if float(np.dot(np.array([cx, cy]) - p0, right_n)) > 0 else -1
-    if side == 'L':
+    if side in ('L', 'R') and p.track_corner_r_mm > 0.0 and r <= p.circle_max_r_mm:
+        # 이 트랙 코너는 모두 차로 중심 R850(도면)이라 안쪽 선은 약 R590, 바깥 선은 약 R1110.
+        # 맞춘 반경으로 안쪽/바깥 선을 가린다. 좌/우 판정(화면 위치)은 곡선에서 자주 틀린다
+        # (10/30 curve_v3: 안쪽 선 R~600을 왼쪽=바깥 선으로 보고 중앙선을 R~340에 그림).
+        inner = r < p.track_corner_r_mm
+        rc = r + half_mm if inner else r - half_mm
+    elif side == 'L':
         rc = r - half_mm if turn > 0 else r + half_mm
     elif side == 'R':
         rc = r + half_mm if turn > 0 else r - half_mm
