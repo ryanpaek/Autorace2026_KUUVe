@@ -100,6 +100,8 @@ def main(argv=None):
     ap.add_argument('--speed', type=float, default=0.3)
     ap.add_argument('--set', nargs='*', help='LaneParams 덮어쓰기 key=value')
     ap.add_argument('--every', type=int, default=1, help='N프레임마다 이미지 저장')
+    ap.add_argument('--range', nargs=2, type=int, default=None, metavar=('START', 'END'),
+                    help='이 프레임 번호 구간만 처리 (result.csv 번호와 같음). 예: --range 2250 2600')
     ap.add_argument('--model', default=None, help='차선 분할 ONNX (없으면 HSV)')
     a = ap.parse_args(argv)
 
@@ -126,15 +128,20 @@ def main(argv=None):
     with open(os.path.join(out_dir, 'result.csv'), 'w', newline='') as fcsv:
         w = csv.writer(fcsv)
         w.writerow(['frame', 'status', 'source', 'kappa', 'offset_mm', 'heading_rad',
-                    'path_kappa', 'low_conf', 'stopline_mm'])
-        for name, img in frames:
+                    'path_kappa', 'low_conf', 'stopline_mm', 'idx'])
+        for idx, (name, img) in enumerate(frames):
+            if a.range and not (a.range[0] <= idx <= a.range[1]):
+                if idx > a.range[1]:
+                    break
+                continue
+            n = idx
             out = f.process(img, speed=a.speed)
             w.writerow([name, out.status, out.source, f'{out.kappa:.4f}',
                         '' if out.offset_mm is None else f'{out.offset_mm:.1f}',
                         '' if out.heading_rad is None else f'{out.heading_rad:.4f}',
                         '' if out.path_kappa is None else f'{out.path_kappa:.3f}',
                         int(out.low_conf),
-                        out.stoplines_mm[0] if out.stoplines_mm else ''])
+                        out.stoplines_mm[0] if out.stoplines_mm else '', idx])
             if n % max(1, a.every) == 0:
                 cam = cv2.resize(img, (cfg.image_width, cfg.image_height))
                 dbg = draw_debug(out, cfg)

@@ -50,7 +50,10 @@ DEFAULT_PARAMS = {
     'leave_mm': 600.0,           # 출발 후 다음 미션으로 넘어가기까지 거리 (횡단보도 깊이 약 570mm를 벗어나게)
     # M7 / M8
     'obstacle_source_ready': False,  # 장애물 노드가 완성되면 true. 그 전엔 차선 주행으로 통과
-    'm7_len_mm': 6000.0,         # 도면: M3 종료 ~ 우하단 코너(약1.6m) + 3차선 약4.5m(섬 오른쪽 끝까지)
+    'm7_len_mm': 6000.0,
+    # 3차선: 차로 500mm, 바깥 실선은 노랑·안쪽 점선은 흰색(모의 맵 10/30 확인) -> 두 색 다 차선으로
+    'three_lane_width_mm': 500.0,
+    'three_lane_color': 'both',         # 도면: M3 종료 ~ 우하단 코너(약1.6m) + 3차선 약4.5m(섬 오른쪽 끝까지)
     'cones_len_mm': 4300.0,      # 도면: M8 진입(갈림길 끝) ~ 좌하단 코너 ~ 라바콘 구간(약2.2m) 끝 + 여유
     # M2 갈림길
     'fork_len_mm': 2300.0,       # 도면: 섬 오른쪽 끝부터 왼쪽 합류 테이퍼 끝까지 약 2.4m
@@ -336,7 +339,9 @@ class MissionFSM:
         if done or ((d >= self.p['m7_len_mm']) if end is None else end):
             self._next(inp, 'obstacle zone done' if done else f'm7 end at {d:.0f}mm')
         src = 'obstacle' if self.p['obstacle_source_ready'] else 'lane'
-        return Command(src, self._lane(self.p['approach_speed']))
+        return Command(src, self._lane(self.p['approach_speed'],
+                                       lane_width_mm=self.p['three_lane_width_mm'],
+                                       lane_color=self.p['three_lane_color']))
 
     def _s_M2_FORK(self, inp):
         """A(왼쪽) / B(오른쪽): 한쪽 경계선만 따라가는 차선 모드로 분기."""
