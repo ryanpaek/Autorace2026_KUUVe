@@ -14,7 +14,7 @@ lane_node:
     lane_mask_source: hsv                  # 학습한 분할 모델을 쓰려면 model
     seg_model_path: ''                     # 예: /home/agilex/models/lane_seg.onnx
     seg_threshold: 0.5
-    lane_color: both                       # TODO 트랙 실물: 가장자리가 노랑이면 yellow
+    lane_color: yellow                     # 모의 맵 차선 노란색 확인 (10/30). 정지선은 흰색 마스크로 따로 찾음
     white_v_min: 180
     white_s_max: 60
     yellow_h_min: 15

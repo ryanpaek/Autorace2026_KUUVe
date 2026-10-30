@@ -11,6 +11,7 @@ import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
+from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
@@ -26,6 +27,10 @@ def generate_launch_description():
         DeclareLaunchArgument('bev_config',
                               default_value=os.path.join(share, 'config', 'bev_limo.yaml')),
         DeclareLaunchArgument('speed', default_value='0.25'),
+        # 이 LIMO의 애커만 드라이버는 /limo/ack_cmd(AckermannDrive)만 받는다
+        DeclareLaunchArgument('use_ackermann_bridge', default_value='true'),
+        Node(package='autorace_mission', executable='ackermann_bridge', name='ackermann_bridge',
+             output='screen', condition=IfCondition(LaunchConfiguration('use_ackermann_bridge'))),
         Node(package='autorace_lane', executable='lane_node', name='lane_node',
              parameters=[params, {'bev_config': bev}], output='screen'),
         Node(package='autorace_mission', executable='mission_node', name='mission_node',
