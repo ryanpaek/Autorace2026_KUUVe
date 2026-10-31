@@ -1,4 +1,4 @@
-"""급곡선(코너 차로 중심 반경 850mm) 폐루프 시험.
+"""급곡선 폐루프 시험 (모의 맵 코너: 안쪽 선 R600, 바깥 선 R650, 동심원 아님).
 
 10/30 실차 캘리브레이션(bev_limo.yaml)과 같은 카메라 시야로 트랙을 그려,
 차선 노드 출력 곡률로 차를 움직이며 곡선을 끝까지 도는지 본다.
@@ -14,9 +14,11 @@ import pytest
 
 from autorace_lane.lane_core import BevConfig, LaneFollower, LaneParams
 
-RC = 850.0          # 코너 차로 중심 반경 (도면 track_route.yaml: 안쪽 경계 R600 + 반폭)
 HALF = 257.5        # 차로 폭 절반 (모의 맵 실측: 선 중심 간 515mm)
+R_IN = 600.0        # 안쪽 선 코너 반경 (규정·도면)
+R_OUT = 650.0       # 바깥 선 코너 반경. 동심원이 아니라 코너 가운데서 차로가 약 730mm로 넓어진다
 LINE_HALF = 12.0    # 선 두께 절반 (mm)
+END_X = HALF + R_IN + 800.0
 
 
 def _cfg():
@@ -24,8 +26,27 @@ def _cfg():
     return BevConfig.from_rectangle(pts, 500, 600, 650, (640, 480), ref_to_bev_bottom_mm=550)
 
 
+def _dist_inner(X, Y):
+    """오른쪽 곡선의 안쪽(오른쪽) 선까지 거리: 북쪽 직선 x=HALF -> R_IN 코너 -> 동쪽 직선 y=R_IN."""
+    cx, cy = HALF + R_IN, 0.0
+    d_arc = np.abs(np.hypot(X - cx, Y - cy) - R_IN)
+    in_arc = (X <= cx) & (Y >= cy)
+    d = np.where(Y < cy, np.abs(X - HALF), np.where(X > cx, np.abs(Y - R_IN), d_arc))
+    return np.where(in_arc, d_arc, d)
+
+
+def _dist_outer(X, Y):
+    """바깥(왼쪽) 선: 북쪽 직선 x=-HALF -> R_OUT 코너 -> 동쪽 직선 y=R_IN+2*HALF."""
+    top = R_IN + 2 * HALF
+    cx, cy = -HALF + R_OUT, top - R_OUT
+    d_arc = np.abs(np.hypot(X - cx, Y - cy) - R_OUT)
+    in_arc = (X <= cx) & (Y >= cy)
+    d = np.where(Y < cy, np.abs(X + HALF), np.where(X > cx, np.abs(Y - top), d_arc))
+    return np.where(in_arc, d_arc, d)
+
+
 class Track:
-    """북쪽 직선 -> 오른쪽 90도 곡선(중심 (RC, 0)) -> 동쪽 직선."""
+    """북쪽 직선 -> 오른쪽 90도 코너 -> 동쪽 직선. 두 선은 각자 R600/R650으로 모서리를 깎았다."""
 
     def __init__(self, cfg):
         self.cfg = cfg
@@ -38,13 +59,8 @@ class Track:
         X = x + self.gx * c + self.gy * s
         Y = y - self.gx * s + self.gy * c
         img = np.zeros(self.gx.shape, np.uint8)
-        r = np.hypot(X - RC, Y)
-        ang = np.arctan2(Y, RC - X)
-        for rr in (RC + HALF, RC - HALF):
-            on = (np.abs(r - rr) < LINE_HALF) & (ang >= 0) & (ang <= math.pi / 2)
-            on |= (np.abs((RC - X) - rr) < LINE_HALF) & (Y < 0)
-            on |= (np.abs(Y - rr) < LINE_HALF) & (X > RC)
-            img[on] = 255
+        on = (_dist_inner(X, Y) < LINE_HALF) | (_dist_outer(X, Y) < LINE_HALF)
+        img[on] = 255
         # 카메라 시야 밖은 지운다
         cam = cv2.warpPerspective(img, np.linalg.inv(self.cfg.H), (640, 480),
                                   flags=cv2.INTER_NEAREST)
@@ -53,11 +69,9 @@ class Track:
 
     @staticmethod
     def lateral_error(x, y):
-        if y < 0:
-            return x
-        if x > RC:
-            return RC - y
-        return RC - math.hypot(x - RC, y)
+        """차로 가운데에서 오른쪽(안쪽)으로 벗어난 거리 (+)."""
+        X, Y = np.array([x]), np.array([y])
+        return float((_dist_outer(X, Y) - _dist_inner(X, Y))[0] / 2.0)
 
 
 def drive(mirror=False, v=0.25, x0=0.0, params=None):
@@ -76,7 +90,7 @@ def drive(mirror=False, v=0.25, x0=0.0, params=None):
         x += v * 1000.0 * dt * math.sin(hd)
         y += v * 1000.0 * dt * math.cos(hd)
         errs.append(Track.lateral_error(x, y))
-        if x > RC + 800.0:
+        if x > END_X:
             return True, errs
     return False, errs
 
@@ -98,17 +112,23 @@ def test_old_behavior_fails():
     assert not ok
 
 
-@pytest.mark.parametrize('label', ['L', 'R'])
 @pytest.mark.parametrize('which', ['inner', 'outer'])
-def test_corner_line_role_by_radius(label, which):
-    """한쪽 선만 보일 때 좌/우 라벨이 틀려도, 반경으로 안쪽/바깥 선을 가려 중앙선 R850을 만든다."""
+def test_single_line_corner_center(which):
+    """한쪽 선만 보일 때 중앙선 원은 선 원을 차로 쪽으로 반폭 평행 이동한 것 (반경 유지)."""
     from autorace_lane.lane_core import circle_centerline
-    rc_true, half = 850.0, 257.5
-    r_line = rc_true - half if which == 'inner' else rc_true + half
-    # 오른쪽 곡선: 중심 (rc_true, 0), 차는 (0, 0)에서 북쪽으로 진행. 선의 30~70도 구간이 보인다.
-    ang = np.radians(np.linspace(30.0, 70.0, 60))
-    pts = np.stack([rc_true - r_line * np.cos(ang), r_line * np.sin(ang)], axis=1)
-    circ = circle_centerline(pts[::6], label, half, LaneParams(), fit_pts=pts)
+    if which == 'inner':      # 오른쪽 선 = 안쪽
+        c, r, side = np.array([HALF + R_IN, 0.0]), R_IN, 'R'
+    else:                     # 왼쪽 선 = 바깥
+        top = R_IN + 2 * HALF
+        c, r, side = np.array([-HALF + R_OUT, top - R_OUT]), R_OUT, 'L'
+    ang = np.radians(np.linspace(150.0, 110.0, 60))      # 북쪽에서 동쪽으로 도는 앞부분
+    pts = np.stack([c[0] + r * np.cos(ang), c[1] + r * np.sin(ang)], axis=1)
+    circ = circle_centerline(pts[::6], side, HALF, LaneParams(), fit_pts=pts)
     assert circ is not None
-    assert circ[2] == pytest.approx(rc_true, abs=20.0)
-    assert circ[4] == 1          # 오른쪽 곡선
+    assert circ[2] == pytest.approx(r, abs=15.0)
+    assert circ[4] == 1                                  # 오른쪽 곡선
+    # 중심이 차로 쪽으로 반폭만큼 옮겨졌는지
+    assert math.hypot(circ[0] - c[0], circ[1] - c[1]) == pytest.approx(HALF, abs=25.0)
+    # 안쪽 선이면 중심이 바깥(왼쪽 위)으로, 바깥 선이면 안쪽(오른쪽 아래)으로 옮겨진다
+    moved_out = circ[0] < c[0]
+    assert moved_out == (which == 'inner')

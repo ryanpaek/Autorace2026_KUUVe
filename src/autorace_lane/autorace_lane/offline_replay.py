@@ -44,13 +44,19 @@ def iter_video(path):
 
 
 def iter_bag(path, topic):
+    """rosbag2 폴더에서 이미지 토픽을 꺼낸다.
+
+    ROS2(rclpy)가 있으면 그걸 쓰고, 없으면 순수 파이썬 `rosbags` 라이브러리로 읽는다.
+    (Windows·ROS 없는 노트북: pip install rosbags)
+    """
     try:
-        import rosbag2_py
+        import rosbag2_py  # noqa: F401
         from rclpy.serialization import deserialize_message
         from rosidl_runtime_py.utilities import get_message
-        from autorace_lane.lane_node import image_msg_to_bgr
-    except ImportError as e:
-        sys.exit(f'rosbag 읽기에는 ROS2 환경이 필요합니다 ({e})')
+    except ImportError:
+        yield from _iter_bag_rosbags(path, topic)
+        return
+    from autorace_lane.lane_node import image_msg_to_bgr
     storage = 'mcap' if glob.glob(os.path.join(path, '*.mcap')) else 'sqlite3'
     reader = rosbag2_py.SequentialReader()
     reader.open(rosbag2_py.StorageOptions(uri=path, storage_id=storage),
@@ -59,7 +65,6 @@ def iter_bag(path, topic):
     if topic not in types:
         sys.exit(f'topic {topic} not in bag: {sorted(types)}')
     msg_type = get_message(types[topic])
-    i = 0
     while reader.has_next():
         name, data, t = reader.read_next()
         if name != topic:
@@ -70,7 +75,28 @@ def iter_bag(path, topic):
         else:
             img = image_msg_to_bgr(msg)
         yield f'{t}', img
-        i += 1
+
+
+def _iter_bag_rosbags(path, topic):
+    try:
+        from rosbags.rosbag2 import Reader
+        from rosbags.typesys import Stores, get_typestore
+    except ImportError:
+        sys.exit('rosbag 읽기: ROS2 환경을 source 하거나 `pip install rosbags` 하세요')
+    ts = get_typestore(Stores.ROS2_HUMBLE)
+    with Reader(path) as r:
+        conns = [c for c in r.connections if c.topic == topic]
+        if not conns:
+            sys.exit(f'topic {topic} not in bag: {sorted({c.topic for c in r.connections})}')
+        for c, t, raw in r.messages(connections=conns):
+            m = ts.deserialize_cdr(raw, c.msgtype)
+            if c.msgtype.endswith('CompressedImage'):
+                img = cv2.imdecode(np.asarray(m.data, np.uint8), cv2.IMREAD_COLOR)
+            else:
+                img = np.asarray(m.data, np.uint8).reshape(m.height, m.width, -1)
+                if m.encoding == 'rgb8':
+                    img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+            yield f'{t}', img
 
 
 def parse_sets(items):
