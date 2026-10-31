@@ -12,7 +12,7 @@ lane_node:
     publish_debug: true
     debug_every: 3
     lane_mask_source: hsv                  # 학습한 분할 모델을 쓰려면 model
-    seg_model_path: ''                     # 예: /home/agilex/models/lane_seg.onnx
+    seg_model_path: '/home/wego/autorace_ws/models/lane_seg_1031.onnx'   # 10/31 학습 (2클래스). 쓰려면 lane_mask_source: model
     seg_threshold: 0.5
     lane_color: yellow                     # 모의 맵 차선 노란색 확인 (10/30). 정지선은 흰색 마스크로 따로 찾음
     white_v_min: 180
