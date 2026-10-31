@@ -191,8 +191,8 @@ class LaneParams:
     circle_max_r_mm: float = 2500.0   # 이보다 큰 원(완만한 곡선·직선)은 다항식을 쓴다
     circle_min_r_mm: float = 250.0
     circle_max_rms_mm: float = 30.0   # 원 맞춤 잔차 상한 (실제 테이프는 BEV에서 40~60mm 두께)
-    circle_min_gain_mm: float = 8.0
-    direct_target: bool = True        # 보이는 선을 따라 걸어 목표점을 바로 잡는다 (코너 모양 가정 없음)       # 좌우 원 반경 차이가 차로 폭에서 이 비율 안이어야 쌍 원으로 인정   # 직선 대비 원이 줄여 주는 잔차가 이 이상일 때만 원을 쓴다 (직선 구간 보호)
+    circle_min_gain_mm: float = 8.0   # 직선 대비 원이 줄여 주는 잔차가 이 이상일 때만 원을 쓴다 (직선 구간 보호)
+    direct_target: bool = True        # 보이는 선을 따라 걸어 목표점을 바로 잡는다 (코너 모양 가정 없음)
     circle_min_points: int = 4
     # 시간 필터 / 게이트
     kappa_alpha: float = 0.5          # 곡률 명령 EMA (1.0 = 필터 없음)
