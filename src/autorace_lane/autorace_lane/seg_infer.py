@@ -3,9 +3,10 @@
 학습(training/lane_seg/train_lane_seg.py)과 추론이 같은 preprocess()를 쓰므로
 정규화·입력 크기가 어긋날 일이 없다. numpy/cv2만 쓰고 onnxruntime은 SegMasker에서만 부른다.
 
-모델: 입력 [1, 3, H, W] float32 (RGB, ImageNet 정규화), 출력 [1, 1, H, W] 로짓.
-클래스는 '노면 표시(차선·정지선 등 흰/노란 선)' 하나. 차선과 가로선의 구분은
-지금처럼 BEV 단계(가로선 제거, 정지선 검출)가 맡는다.
+모델: 입력 [1, 3, H, W] float32 (RGB, ImageNet 정규화), 출력 [1, C, H, W] 로짓.
+C = 2: 0 = 노란 차선, 1 = 흰 표시(정지선·횡단보도·점선·마름모·글자).
+  차선 마스크는 lane_color에 따라 노랑 / 흰색 / 둘 다, 정지선 검출에는 흰 표시를 쓴다 (HSV와 같은 규칙).
+C = 1 (예전 모델): 모든 노면 표시 한 클래스. 차선·정지선 둘 다 같은 마스크.
 """
 
 import numpy as np
@@ -24,7 +25,7 @@ def preprocess(bgr: np.ndarray, size=DEFAULT_SIZE) -> np.ndarray:
 
 
 class SegMasker:
-    """LaneFollower(mask_fn=...)에 넘기는 콜러블. bgr -> (마스크, 마스크)."""
+    """LaneFollower(mask_fn=...)에 넘기는 콜러블. (bgr, params) -> (차선 마스크, 흰 표시 마스크)."""
 
     def __init__(self, onnx_path: str, threshold: float = 0.5):
         import onnxruntime as ort
@@ -39,12 +40,24 @@ class SegMasker:
         self.providers = self.sess.get_providers()
 
     def predict(self, bgr: np.ndarray) -> np.ndarray:
-        """원본 크기의 uint8 마스크 (255 = 노면 표시)."""
+        """원본 크기의 uint8 마스크들 [C, H, W] (255 = 해당 표시)."""
         x = preprocess(bgr, self.size)[None]
-        logit = self.sess.run(None, {self.input_name: x})[0][0, 0]
-        mask = (logit > self.logit_th).astype(np.uint8) * 255
-        return cv2.resize(mask, (bgr.shape[1], bgr.shape[0]), interpolation=cv2.INTER_NEAREST)
+        logit = self.sess.run(None, {self.input_name: x})[0][0]
+        masks = (logit > self.logit_th).astype(np.uint8) * 255
+        return np.stack([cv2.resize(m, (bgr.shape[1], bgr.shape[0]),
+                                    interpolation=cv2.INTER_NEAREST) for m in masks])
 
-    def __call__(self, bgr: np.ndarray):
+    def __call__(self, bgr: np.ndarray, params=None):
+        """LaneFollower가 부른다: (차선 마스크, 흰 표시 마스크)."""
         m = self.predict(bgr)
-        return m, m
+        if len(m) == 1:
+            return m[0], m[0]
+        yellow, white = m[0], m[1]
+        color = getattr(params, 'lane_color', 'both')
+        if color == 'yellow':
+            lane = yellow
+        elif color == 'white':
+            lane = white
+        else:
+            lane = cv2.bitwise_or(yellow, white)
+        return lane, white

@@ -1,10 +1,12 @@
 """차선(노면 표시) 분할 모델 학습 -> ONNX 내보내기.
 
-모델: MobileNetV2 인코더 + 작은 U-Net 디코더, 입력 320x240, 출력 1채널 로짓.
+모델: MobileNetV2 인코더 + 작은 U-Net 디코더, 입력 320x240, 출력 2채널 로짓
+      (0 = 노란 차선, 1 = 흰 표시: 정지선·횡단보도·점선·마름모·글자).
 VRAM 4GB에 맞춘 기본값: batch 8, 혼합정밀도(AMP). 부족하면 --batch 4.
 
 데이터 폴더 (autolabel.py 결과)
-  DATA/images/*.jpg|png, DATA/masks/*.png (같은 이름, 0/255)
+  DATA/images/*.jpg|png, DATA/masks/*.png (같은 이름, 컬러: 노랑 (0,255,255) / 흰색 (255,255,255) / 검정)
+  예전 흑백 마스크(0/255)는 '흰 표시'로 읽는다.
 
 예)
   pip install torch torchvision onnx          # CUDA 버전은 pytorch.org 안내대로
@@ -34,6 +36,21 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '..', '..', 'src', 'autorace_lane'))
 from autorace_lane.seg_infer import DEFAULT_SIZE, preprocess  # noqa: E402
 
+N_CLASSES = 2
+CLASS_NAMES = ('yellow', 'white')
+
+
+def read_label(path, size):
+    """컬러 라벨 -> [2, H, W] 0/1 (노랑, 흰색). 흑백 0/255는 흰색으로."""
+    lab = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+    if lab.ndim == 2:
+        lab = cv2.cvtColor(lab, cv2.COLOR_GRAY2BGR)
+    lab = cv2.resize(lab[..., :3], size, interpolation=cv2.INTER_NEAREST).astype(np.int16)
+    b, g, r = lab[..., 0], lab[..., 1], lab[..., 2]
+    yellow = (r > 127) & (g > 127) & (b < 128)
+    white = (r > 127) & (g > 127) & (b > 127)
+    return np.stack([yellow, white]).astype(np.uint8)
+
 
 # --------------------------------------------------------------------------
 # 모델
@@ -55,7 +72,7 @@ class Up(nn.Module):
 class LaneUNet(nn.Module):
     """MobileNetV2 특징 (stride 2/4/8/16/32) + U-Net 디코더."""
 
-    def __init__(self, pretrained=False):
+    def __init__(self, pretrained=False, n_classes=N_CLASSES):
         super().__init__()
         weights = 'DEFAULT' if pretrained else None
         feats = torchvision.models.mobilenet_v2(weights=weights).features
@@ -65,7 +82,7 @@ class LaneUNet(nn.Module):
         self.up8 = Up(96, 32, 48)
         self.up4 = Up(48, 24, 32)
         self.up2 = Up(32, 16, 24)
-        self.head = nn.Conv2d(24, 1, 1)
+        self.head = nn.Conv2d(24, n_classes, 1)
 
     def forward(self, x):
         h, w = x.shape[-2:]
@@ -155,13 +172,15 @@ class LaneDataset(torch.utils.data.Dataset):
     def __getitem__(self, i):
         fi, fm = self.pairs[i]
         img = cv2.resize(cv2.imread(fi), self.size, interpolation=cv2.INTER_AREA)
-        mask = cv2.resize(cv2.imread(fm, cv2.IMREAD_GRAYSCALE), self.size,
-                          interpolation=cv2.INTER_NEAREST)
+        lab = read_label(fm, self.size)                       # [2, H, W]
+        mask = np.ascontiguousarray(lab.transpose(1, 2, 0))   # [H, W, 2] (증강 공용)
         if self.train:
             img, mask = geo_augment(img, mask, self.rng)
             img = light_augment(img, self.rng)
+        if mask.ndim == 2:
+            mask = mask[..., None]
         x = torch.from_numpy(preprocess(img, self.size))
-        y = torch.from_numpy((mask > 127).astype(np.float32))[None]
+        y = torch.from_numpy(mask.transpose(2, 0, 1).astype(np.float32))
         return x, y
 
 
@@ -169,21 +188,24 @@ class LaneDataset(torch.utils.data.Dataset):
 # 학습
 # --------------------------------------------------------------------------
 def dice_loss(logits, y, eps=1.0):
+    """클래스별 dice를 평균."""
     p = torch.sigmoid(logits)
-    inter = (p * y).sum((1, 2, 3))
-    return (1 - (2 * inter + eps) / (p.sum((1, 2, 3)) + y.sum((1, 2, 3)) + eps)).mean()
+    inter = (p * y).sum((2, 3))
+    return (1 - (2 * inter + eps) / (p.sum((2, 3)) + y.sum((2, 3)) + eps)).mean()
 
 
 @torch.no_grad()
 def evaluate(model, loader, device):
+    """클래스별 IoU 리스트."""
     model.eval()
-    inter = union = 0.0
+    inter = np.zeros(N_CLASSES)
+    union = np.zeros(N_CLASSES)
     for x, y in loader:
         x, y = x.to(device), y.to(device)
         p = (model(x) > 0).float()
-        inter += (p * y).sum().item()
-        union += ((p + y) > 0).float().sum().item()
-    return inter / max(union, 1.0)
+        inter += (p * y).sum((0, 2, 3)).cpu().numpy()
+        union += ((p + y) > 0).float().sum((0, 2, 3)).cpu().numpy()
+    return list(inter / np.maximum(union, 1.0))
 
 
 def export_onnx(model, path, size):
@@ -195,20 +217,25 @@ def export_onnx(model, path, size):
 
 
 def save_previews(model, pairs, out_dir, size, n=12):
+    """왼쪽 원본, 가운데 노란 차선, 오른쪽 흰 표시. 초록 맞춤 / 빨강 놓침 / 파랑 잘못 잡음."""
     os.makedirs(out_dir, exist_ok=True)
     model.eval().cpu()
     with torch.no_grad():
         for fi, fm in pairs[:n]:
             img = cv2.resize(cv2.imread(fi), size)
-            logit = model(torch.from_numpy(preprocess(img, size))[None])[0, 0].numpy()
-            pred = logit > 0
-            gt = cv2.resize(cv2.imread(fm, cv2.IMREAD_GRAYSCALE), size,
-                            interpolation=cv2.INTER_NEAREST) > 127
-            vis = img.copy()
-            vis[gt & ~pred] = (0, 0, 255)      # 빨강: 놓친 곳
-            vis[pred & ~gt] = (255, 0, 0)      # 파랑: 잘못 잡은 곳
-            vis[pred & gt] = (0, 255, 0)       # 초록: 맞춘 곳
-            cv2.imwrite(os.path.join(out_dir, os.path.basename(fi)), np.hstack([img, vis]))
+            logit = model(torch.from_numpy(preprocess(img, size))[None])[0].numpy()
+            gt_all = read_label(fm, size) > 0
+            panels = [img]
+            for c in range(N_CLASSES):
+                pred, gt = logit[c] > 0, gt_all[c]
+                vis = img.copy()
+                vis[gt & ~pred] = (0, 0, 255)
+                vis[pred & ~gt] = (255, 0, 0)
+                vis[pred & gt] = (0, 255, 0)
+                cv2.putText(vis, CLASS_NAMES[c], (4, 14), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
+                            (255, 255, 255), 1)
+                panels.append(vis)
+            cv2.imwrite(os.path.join(out_dir, os.path.basename(fi)), np.hstack(panels))
 
 
 def main(argv=None):
@@ -224,6 +251,7 @@ def main(argv=None):
     ap.add_argument('--pretrained', action='store_true', help='ImageNet 사전학습 인코더 (권장)')
     ap.add_argument('--device', default='auto')
     ap.add_argument('--export-only', default=None, help='best.pt 경로: 학습 없이 ONNX만')
+    ap.add_argument('--limit', type=int, default=0, help='데이터 앞 N쌍만 (빠른 점검용)')
     a = ap.parse_args(argv)
 
     size = DEFAULT_SIZE
@@ -239,6 +267,8 @@ def main(argv=None):
     if len(pairs) < 10:
         sys.exit(f'라벨 쌍이 너무 적음: {len(pairs)}')
     random.Random(0).shuffle(pairs)
+    if a.limit:
+        pairs = pairs[:a.limit]
     n_val = max(2, int(len(pairs) * a.val_ratio))
     val_pairs, train_pairs = pairs[:n_val], pairs[n_val:]
     print(f'train {len(train_pairs)} / val {len(val_pairs)}, device {device}')
@@ -254,7 +284,8 @@ def main(argv=None):
     use_amp = device.startswith('cuda')
     scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
     # 노면 표시는 화소의 몇 %뿐이라 양성 가중치를 준다
-    bce = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([5.0], device=device))
+    bce = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([5.0] * N_CLASSES,
+                                                       device=device).view(1, -1, 1, 1))
 
     best = -1.0
     for ep in range(a.epochs):
@@ -271,14 +302,16 @@ def main(argv=None):
             scaler.update()
             sched.step()
             total += loss.item()
-        iou = evaluate(model, val_dl, device)
+        ious = evaluate(model, val_dl, device)
+        iou = float(np.mean(ious))
         mark = ''
         if iou > best:
             best = iou
             torch.save(model.state_dict(), os.path.join(a.out, 'best.pt'))
             mark = ' *best'
         print(f'epoch {ep + 1}/{a.epochs} loss {total / max(1, len(train_dl)):.4f} '
-              f'val IoU {iou:.3f} ({time.time() - t0:.0f}s){mark}')
+              f'val IoU {iou:.3f} (노랑 {ious[0]:.3f}, 흰색 {ious[1]:.3f}) '
+              f'({time.time() - t0:.0f}s){mark}')
         if use_amp and ep == 0:
             print(f'  GPU memory peak {torch.cuda.max_memory_allocated() / 2**30:.2f} GB')
 

@@ -998,7 +998,7 @@ class LaneFollower:
 
     def __init__(self, cfg: BevConfig, params: Optional[LaneParams] = None,
                  mask_fn=None):
-        """mask_fn(bgr) -> (차선 마스크, 흰색 마스크). None이면 HSV(color_masks).
+        """mask_fn(bgr, params) -> (차선 마스크, 흰색 마스크). None이면 HSV(color_masks).
 
         딥러닝 분할 모델을 쓸 때는 seg_infer.SegMasker를 넘긴다. 이후 단계(BEV, 쌍 선택,
         중앙선, 정지선, Pure Pursuit)는 마스크 출처와 상관없이 똑같다.
@@ -1045,7 +1045,13 @@ class LaneFollower:
         if bgr.shape[1] != cfg.image_width or bgr.shape[0] != cfg.image_height:
             bgr = cv2.resize(bgr, (cfg.image_width, cfg.image_height),
                              interpolation=cv2.INTER_AREA)
-        lane, white = self.mask_fn(bgr) if self.mask_fn is not None else color_masks(bgr, p)
+        if self.mask_fn is None:
+            lane, white = color_masks(bgr, p)
+        else:
+            try:
+                lane, white = self.mask_fn(bgr, p)
+            except TypeError:
+                lane, white = self.mask_fn(bgr)
         bev_lane = cfg.warp(lane)
         bev_white = cfg.warp(white)
         return self.process_bev(bev_lane, bev_white, yaw=yaw, speed=speed)
