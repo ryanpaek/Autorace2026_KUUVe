@@ -106,4 +106,4 @@ def test_state_reports_next_landmark(route):
     t.reset(9000.0, 0.0)
     st = t.state()
     assert st['next'] == 'm6_zigzag_line'
-    assert st['next_in_mm'] == pytest.approx(292, abs=5)
+    assert st['next_in_mm'] == pytest.approx(route.points["m6_zigzag_line"] - 9000.0, abs=5)
