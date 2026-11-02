@@ -1,7 +1,7 @@
 # LIMO 캘리브레이션 결과 (2026-11-02, 윤서)
 
 LIMO Pro 1대(본체 번호 4302), 애커만 모드(`motion_mode: 1`), ROS 2 Humble, 실내 타일 바닥, 배터리 12.7 V(시작 시).
-측정 방법과 스크립트는 [README.md](README.md).
+측정 방법과 스크립트는 [USAGE.md](USAGE.md).
 
 ## 결론 먼저
 

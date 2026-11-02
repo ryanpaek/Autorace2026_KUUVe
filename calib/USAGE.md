@@ -1,7 +1,7 @@
 # calib — LIMO 센서·주행 캘리브레이션 도구
 
 2026-11-02 윤서가 실차(LIMO Pro, 애커만 모드)에서 쓴 시험 스크립트 모음.
-결과는 [RESULTS_20261102.md](RESULTS_20261102.md)에 있다.
+결과는 [README.md](README.md)에 있다.
 
 > 이 폴더는 `src/` 밖에 있어서 `colcon build` 대상이 아니다. 그냥 `python3`로 실행한다.
 > 팀 코드(`src/`)는 하나도 고치지 않았다.
