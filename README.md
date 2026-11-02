@@ -14,6 +14,17 @@
 | `training/lane_seg` | `autolabel.py`, `train_lane_seg.py` (PC에서 실행) | 차선 분할 모델 수집·라벨·학습·ONNX. 사용법은 그 폴더 README |
 | `autorace_bringup` | `autorace.launch.py`, `lane_test.launch.py`, 설정, 스크립트 | 실행 틀 |
 
+## 폴더
+
+| 폴더 | 내용 |
+| --- | --- |
+| `src/` | ROS2 패키지 (colcon 빌드 대상) |
+| `calib/` | LIMO 캘리브레이션 결과([README](calib/README.md))와 시험 스크립트([USAGE](calib/USAGE.md)) |
+| `tools/` | 경로 기록·재생 등 `python3`로 직접 실행하는 도구 ([README](tools/README.md)) |
+| `training/` | PC에서 돌리는 학습 코드 |
+| `models/` | 학습된 ONNX 모델 |
+| `docs/` | 트랙 도면 등 자료 |
+
 ## 빌드
 
 ```bash
