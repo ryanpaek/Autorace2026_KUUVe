@@ -74,7 +74,10 @@ class Track:
         return float((_dist_outer(X, Y) - _dist_inner(X, Y))[0] / 2.0)
 
 
-def drive(mirror=False, v=0.25, x0=0.0, params=None):
+def drive(mirror=False, v=0.25, x0=0.0, params=None, delay_frames=0):
+    """delay_frames: 명령이 바퀴에 반영되기까지의 지연 (프레임, 1프레임 = 40ms)."""
+    from collections import deque
+    q = deque([0.0] * delay_frames)
     cfg = _cfg()
     tr = Track(cfg)
     f = LaneFollower(cfg, LaneParams(lane_color='yellow', lane_width_mm=2 * HALF, **(params or {})))
@@ -86,7 +89,8 @@ def drive(mirror=False, v=0.25, x0=0.0, params=None):
         out = f.process_bev(bev.copy(), bev.copy(), speed=v)
         if out.source == 'stop':
             return False, errs
-        hd += sign * out.kappa * v * dt
+        q.append(out.kappa)
+        hd += sign * q.popleft() * v * dt
         x += v * 1000.0 * dt * math.sin(hd)
         y += v * 1000.0 * dt * math.cos(hd)
         errs.append(Track.lateral_error(x, y))

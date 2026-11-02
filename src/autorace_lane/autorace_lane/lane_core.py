@@ -193,6 +193,10 @@ class LaneParams:
     circle_max_rms_mm: float = 30.0   # 원 맞춤 잔차 상한 (실제 테이프는 BEV에서 40~60mm 두께)
     circle_min_gain_mm: float = 8.0   # 직선 대비 원이 줄여 주는 잔차가 이 이상일 때만 원을 쓴다 (직선 구간 보호)
     direct_target: bool = True        # 보이는 선을 따라 걸어 목표점을 바로 잡는다 (코너 모양 가정 없음)
+    # 지연 보상: 사진을 찍은 뒤 바퀴가 실제로 꺾이기까지 걸리는 시간(초). 그만큼 차가 이미
+    # 움직였다고 보고, 예측 위치에서 목표점을 본다. 10/30 녹화로 잰 명령->실제 회전 지연은
+    # 0.28~0.40초 (카메라·처리 지연 별도). 0이면 끔.
+    latency_comp_sec: float = 0.35
     circle_min_points: int = 4
     # 시간 필터 / 게이트
     kappa_alpha: float = 0.5          # 곡률 명령 EMA (1.0 = 필터 없음)
@@ -737,6 +741,31 @@ def direct_target(left_pix, right_pix, status: str, half_mm: float, lookahead_mm
     return tgt, low, c
 
 
+def pp_kappa_with_latency(tgt, kappa_cmd_left: float, speed: float, latency_sec: float) -> float:
+    """목표점(x 오른쪽+, y 전방+, mm)으로 가는 Pure Pursuit 곡률 (1/m, 오른쪽 +).
+
+    latency_sec 동안 차가 지금 명령(kappa_cmd_left, 왼쪽 +)대로 speed(m/s)로 움직였다고 보고,
+    그 예측 위치·방향에서 목표점을 다시 본다. 늦게 꺾는 것(명령->바퀴 지연)을 줄인다.
+    """
+    x, y = float(tgt[0]), float(tgt[1])
+    if latency_sec > 0.0 and speed > 0.0:
+        s = speed * latency_sec * 1000.0                 # mm
+        dpsi = kappa_cmd_left * s / 1000.0               # rad, 왼쪽 +
+        if abs(kappa_cmd_left) < 1e-6:
+            px, py = 0.0, s
+        else:
+            r = 1000.0 / kappa_cmd_left                  # mm, 왼쪽 +
+            px, py = -r * (1.0 - math.cos(dpsi)), r * math.sin(dpsi)
+        qx, qy = x - px, y - py
+        c, sn = math.cos(dpsi), math.sin(dpsi)
+        x, y = c * qx + sn * qy, -sn * qx + c * qy
+    d2 = x * x + y * y
+    if d2 < 1.0 or y <= 0.0:
+        # 예측 위치에서 목표가 옆·뒤에 있으면 그쪽으로 최대한
+        return math.copysign(2.1, x) if abs(x) > 1.0 else 0.0
+    return 2000.0 * x / d2
+
+
 def _circle_point(circ, phi: float) -> Tuple[float, float]:
     cx, cy, rc, _, _ = circ
     return cx + rc * math.cos(phi), cy + rc * math.sin(phi)
@@ -1126,10 +1155,10 @@ class LaneFollower:
                 self._last_offset = p.target_offset_mm
             if direct is not None:
                 tgt, low = direct[0], direct[1]
-                d2 = tgt[0] * tgt[0] + tgt[1] * tgt[1]
-                k_r = 2000.0 * tgt[0] / d2 if d2 > 1.0 else 0.0
+                k_r = pp_kappa_with_latency(tgt, self.kappa_cmd, speed, p.latency_comp_sec)
             else:
                 k_r, tgt, low = pure_pursuit(cl, p.lookahead_mm, -p.target_offset_mm)
+                k_r = pp_kappa_with_latency(tgt, self.kappa_cmd, speed, p.latency_comp_sec)
             out.target_mm, out.low_conf = tgt, low
             # 중앙 점프 게이트: 목표점 횡위치가 갑자기 튀면 그 프레임은 버린다
             if (self.prev_target_x is not None

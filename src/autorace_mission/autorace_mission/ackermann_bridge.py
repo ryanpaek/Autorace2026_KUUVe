@@ -55,6 +55,7 @@ def main(args=None):
             self.speed = max(-vmax, min(vmax, v))
             self.steer = d
             self.last = time.monotonic()
+            self._tick()      # 타이머(20Hz)를 기다리지 않고 바로 보낸다 (지연 최대 50ms 줄임)
 
         def _tick(self):
             stale = (self.last is None or
