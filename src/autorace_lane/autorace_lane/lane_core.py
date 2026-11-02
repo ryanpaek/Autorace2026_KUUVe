@@ -197,6 +197,9 @@ class LaneParams:
     # 움직였다고 보고, 예측 위치에서 목표점을 본다. 10/30 녹화로 잰 명령->실제 회전 지연은
     # 0.28~0.40초 (카메라·처리 지연 별도). 0이면 끔.
     latency_comp_sec: float = 0.35
+    # 코너 바깥 선만 보일 때 반폭에 더 얹는 거리(mm). 코너 가운데서 차로가 약 730mm(반폭 365)로
+    # 넓어지므로 최대 약 100. 0이면 끔
+    corner_outer_extra_mm: float = 75.0
     circle_min_points: int = 4
     # 시간 필터 / 게이트
     kappa_alpha: float = 0.5          # 곡률 명령 EMA (1.0 = 필터 없음)
@@ -690,12 +693,31 @@ def walk_line(pix: np.ndarray, step_mm: float = 40.0, max_steps: int = 80) -> Op
     return np.array(pts) if len(pts) >= 4 else None
 
 
-def offset_polyline(pts: np.ndarray, side: str, half_mm: float) -> np.ndarray:
-    """선 점열을 차로 쪽(왼쪽 선이면 오른쪽, 오른쪽 선이면 왼쪽)으로 반폭 옮긴 중앙선 점열."""
+def offset_polyline(pts: np.ndarray, side: str, half_mm: float,
+                    outer_extra_mm: float = 0.0, extra_r_mm: float = 700.0) -> np.ndarray:
+    """선 점열을 차로 쪽(왼쪽 선이면 오른쪽, 오른쪽 선이면 왼쪽)으로 반폭 옮긴 중앙선 점열.
+
+    outer_extra_mm: 이 선이 코너의 바깥 선이면(왼쪽 선이 오른쪽으로 휠 때, 오른쪽 선이 왼쪽으로 휠 때)
+      그 점의 굽은 정도에 비례해 더 안쪽으로 옮긴다. 모의 맵 코너는 안쪽 R600 / 바깥 R650이 동심원이
+      아니라 코너 가운데서 차로가 약 730mm로 넓어진다. 바깥 선에서 반폭(257)만 옮기면 중앙선이 바깥으로
+      치우쳐 코너를 늦게 꺾는다 (11/02 실차: 우코너 진입 중 왼쪽으로 조향).
+      반경이 extra_r_mm 이하로 굽은 곳에서 최대.
+    """
     t = np.gradient(pts, axis=0)
     t = t / np.maximum(np.hypot(t[:, 0], t[:, 1]), 1e-6)[:, None]
     n_r = np.stack([t[:, 1], -t[:, 0]], axis=1)
-    return pts + (n_r if side == 'L' else -n_r) * half_mm
+    off = np.full(len(pts), half_mm)
+    if outer_extra_mm > 0.0 and len(pts) >= 5:
+        # 점마다 곡률 (오른쪽으로 휘면 +): 방향각 변화 / 거리, 이웃 몇 점으로 평균
+        ang = np.unwrap(np.arctan2(t[:, 0], t[:, 1]))
+        ds = np.maximum(np.hypot(*np.gradient(pts, axis=0).T), 1e-6)
+        k = np.gradient(ang) / ds
+        k = np.convolve(k, np.ones(5) / 5.0, mode='same')
+        outward = k if side == 'L' else -k                # 바깥 선일 때 +
+        frac = np.clip(outward * extra_r_mm, 0.0, 1.0)
+        off = off + outer_extra_mm * frac
+    sgn = 1.0 if side == 'L' else -1.0
+    return pts + sgn * n_r * off[:, None]
 
 
 def polyline_target(cpts: np.ndarray, lookahead_mm: float) -> Tuple[Tuple[float, float], bool]:
@@ -713,7 +735,7 @@ def polyline_target(cpts: np.ndarray, lookahead_mm: float) -> Tuple[Tuple[float,
 
 
 def direct_target(left_pix, right_pix, status: str, half_mm: float, lookahead_mm: float,
-                  lane_w_mm: float):
+                  lane_w_mm: float, outer_extra_mm: float = 0.0):
     """보이는 선을 따라 걸어 반폭 옮긴 점열 위에서 바로 목표점을 잡는다 (원·다항식 가정 없음).
 
     반환: (target(x, y), low_conf, centerline 점열) 또는 None.
@@ -726,7 +748,8 @@ def direct_target(left_pix, right_pix, status: str, half_mm: float, lookahead_mm
         w = walk_line(pix)
         if w is None:
             continue
-        c = offset_polyline(w, side, half_mm)
+        # 두 선이 다 보이면 평균이 넓어진 차로를 알아서 반영하므로 보정은 한쪽 선만 보일 때만
+        c = offset_polyline(w, side, half_mm, outer_extra_mm if status != 'BOTH' else 0.0)
         tgt, low = polyline_target(c, lookahead_mm)
         cands.append((tgt, low, c, len(w)))
     if not cands:
@@ -1134,7 +1157,8 @@ class LaneFollower:
                 and self.mode not in ('zigzag', 'heading')):
             direct = direct_target(_line_pixels_mm(bev_lane, left, cfg),
                                    _line_pixels_mm(bev_lane, right, cfg), det.status,
-                                   p.lane_width_mm / 2.0, p.lookahead_mm, p.lane_width_mm)
+                                   p.lane_width_mm / 2.0, p.lookahead_mm, p.lane_width_mm,
+                                   p.corner_outer_extra_mm)
             out.debug['direct'] = direct[2] if direct is not None else None
         if cl is None and direct is not None:
             # 원·다항식이 안 돼도 목표점은 있다 (코너 출구처럼 선이 옆으로 누운 경우)

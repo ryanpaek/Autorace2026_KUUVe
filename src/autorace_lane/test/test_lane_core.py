@@ -47,7 +47,9 @@ def test_arc_curvature(cfg, turn, sign, radius, tol):
 
     R650은 스트레스 케이스: 안쪽 선이 BEV 밖으로 금방 빠져서 한쪽 선만 보일 수 있다.
     """
-    f = LaneFollower(cfg, LaneParams(lookahead_mm=600.0))
+    # synth.arc_lane은 동심원 차로라 '넓어지는 코너' 보정(corner_outer_extra_mm)을 끄고 본다.
+    # 실제 트랙 코너(안쪽 R600 / 바깥 R650, 비동심)는 test_tight_curve.py가 맡는다.
+    f = LaneFollower(cfg, LaneParams(lookahead_mm=600.0, corner_outer_extra_mm=0.0))
     out = run(f, synth.arc_lane(cfg, radius, turn=turn), frames=20)
     assert out.status != 'NONE'
     assert out.source == 'lane'
