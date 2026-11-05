@@ -48,7 +48,7 @@ def generate_launch_description():
         Node(package='autorace_mission', executable='parking_node', name='parking_node',
              parameters=[params], output='screen'),
         Node(package='autorace_obstacle', executable='obstacle_node', name='obstacle_node',
-             parameters=[params], output='screen'),
+             parameters=[params, {'bev_config': bev}], output='screen'),
         Node(package='autorace_perception', executable='detector_node', name='detector_node',
              parameters=[params], output='screen', condition=IfCondition(use_detector)),
     ])

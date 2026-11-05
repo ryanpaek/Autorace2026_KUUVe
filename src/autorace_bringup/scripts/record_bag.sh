@@ -8,7 +8,8 @@ dir=~/bags/$(date +%m%d_%H%M%S)_${name}
 mkdir -p ~/bags
 
 topics=(/scan /odom /wheel/odom /imu /limo_status /cmd_vel /limo/ack_cmd /lane/cmd_vel /lane/status /lane/config
-        /lane/debug/compressed /mission/state /perception/detections /obstacle/state)
+        /lane/debug/compressed /mission/state /perception/detections /obstacle/state
+        /obstacle/cmd_vel /obstacle/debug/compressed)
 if [ "${RAW:-1}" = "1" ]; then
   topics+=(/camera/color/image_raw)
 else

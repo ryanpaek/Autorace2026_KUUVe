@@ -76,3 +76,23 @@ def test_without_route_falls_back_to_distance():
                       'zigzag_len_mm': 300.0, 'route_points': {'m6_zigzag_line': 9292.0}})
     fsm.step(Inputs(t=0, dist_mm=0))
     assert fsm.step(Inputs(t=1, dist_mm=150)).lane['mode'] == 'zigzag'   # route_s 없음 -> 거리
+
+
+def test_cones_by_route_positions():
+    route = RouteMap.from_yaml(ROUTE_YAML)
+    p = route.points
+    fsm = MissionFSM({'start_state': 'M8_CONES', 'route_points': p, 'cones_source_ready': True})
+    s0 = p['m2_merge_end']
+    s = s0
+    subs = {}
+    for k in range(4000):
+        inp = Inputs(t=k * 0.05, dist_mm=s - s0, route_s=s,
+                     lane={'status': 'BOTH'} if s > p['m8_end_line'] + 200 else {'status': 'NONE'})
+        fsm.step(inp)
+        subs.setdefault((fsm.state, fsm.sub), s)
+        if fsm.state == 'M1_TRAFFIC':
+            break
+        s += 0.15 * 1000 * 0.05
+    assert subs[('M8_CONES', 'cones')] == pytest.approx(p['m8_start_line'] - 300, abs=10)
+    assert subs[('M8_CONES', 'handover')] == pytest.approx(p['m8_end_line'] + 150, abs=10)
+    assert fsm.state == 'M1_TRAFFIC'

@@ -9,7 +9,7 @@
 | --- | --- | --- |
 | `autorace_lane` | `lane_node`, `bev_calib`, `offline_replay` | 초안 동작 (오프라인 테스트 통과, 실차 튜닝 필요) |
 | `autorace_mission` | `mission_node` (FSM + /cmd_vel 선택기), `parking_node` | FSM 동작, 미션별 거리값 TODO, 주차 계획 TODO |
-| `autorace_obstacle` | `obstacle_node` | 라이다 클러스터·라바콘 추종 초안, 3차선 회피 TODO |
+| `autorace_obstacle` | `obstacle_node` | M8 라바콘 회피(라이다 추적 + 카메라 주황 확인, 시뮬레이션 검증, 실차 전) — [docs/m8_cones.md](docs/m8_cones.md). 3차선 회피 TODO |
 | `autorace_perception` | `detector_node`, `image_collector` | ONNX/ultralytics 추론 틀, 모델 학습 TODO |
 | `training/lane_seg` | `autolabel.py`, `train_lane_seg.py` (PC에서 실행) | 차선 분할 모델 수집·라벨·학습·ONNX. 사용법은 그 폴더 README |
 | `autorace_bringup` | `autorace.launch.py`, `lane_test.launch.py`, 설정, 스크립트 | 실행 틀 |
@@ -56,12 +56,12 @@ source install/setup.bash
 | `/lane/config` | String(JSON) | mission_node → lane_node: `{"mode","speed","lane_width_mm",...}` |
 | `/lane/status` | String(JSON) | lane_node → mission_node: status, offset_mm, stoplines_mm, crosswalk_lines_mm |
 | `/perception/detections` | String(JSON) | detector_node → mission_node: `{"detections":[{"cls","conf","bbox"}]}` |
-| `/obstacle/state` | String(JSON) | obstacle_node → mission_node |
+| `/obstacle/state` | String(JSON) | obstacle_node → mission_node: `cones_done`, `cone_ahead_mm`, `cones{...}` |
 | `/mission/state` | String(JSON) | mission_node → 모두 |
 | `/mission/start` / `/mission/estop` / `/mission/set_state` | Empty / Bool / String | 사람 → mission_node |
 | `/route/set_s` | Float32 | 사람 → mission_node: 경로 위치 s(mm) 직접 지정 (연습용) |
 | `/limo/ack_cmd` | AckermannDrive | ackermann_bridge → LIMO 애커만 드라이버 (`/cmd_vel`을 변환) |
-| `/lane/debug/compressed`, `/perception/debug/compressed` | CompressedImage | 디버그 화면 (rqt_image_view, Foxglove) |
+| `/lane/debug/compressed`, `/perception/debug/compressed`, `/obstacle/debug/compressed` | CompressedImage | 디버그 화면 (rqt_image_view, Foxglove). obstacle은 M8에서만 |
 
 ## 도면 경로 지도 (track_route.yaml)
 
@@ -86,7 +86,7 @@ mission_node가 오도메트리로 경로상 위치 `s`(mm, 출발 체커 = 0)�
 
 ```bash
 cd ~/autorace_ws
-python3 -m pytest src -q          # 38개: 차선·정지선·지그재그·FSM·라이다·ONNX 디코딩
+python3 -m pytest src -q          # 98개: 차선·정지선·지그재그·FSM·라이다·라바콘(닫힌 루프 시뮬레이션 포함)·ONNX 디코딩
 ```
 차선 알고리즘을 고치면 `src/autorace_lane/test/test_lane_core.py`에 합성 트랙 케이스를 추가해 확인한다.
 녹화한 주행으로 튜닝 전후를 비교하려면 `offline_replay`를 쓴다.
