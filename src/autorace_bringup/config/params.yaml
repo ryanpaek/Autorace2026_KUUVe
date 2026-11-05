@@ -86,6 +86,8 @@ obstacle_node:
       lookahead_mm: 260.0                  # 시뮬레이션 220~300 좋음. 지그재그 흔들리면 늘리기
       cone_scan_radius_mm: 30.0            # TODO 실측: 라이다 높이에서 콘 단면 반지름
       cone_base_radius_mm: 50.0            # TODO 실측: 콘 바닥 반지름
+      lidar_fov_deg: 240.0                 # 라이다 시야 (뒤쪽 가림). 지나간 콘은 기억으로 유지
+      cone_min_range_mm: 120.0             # 이보다 가까운 점은 차체로 보고 버림
       car_half_width_mm: 115.0
       clear_margin_mm: 40.0
       corridor_width_mm: 500.0             # 쌍을 못 찾을 때 가정하는 통로 폭 (콘 중심 간)

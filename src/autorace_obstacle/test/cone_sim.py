@@ -55,9 +55,17 @@ def centerline(step: float = 10.0) -> np.ndarray:
 
 
 def fake_scan(lidar: Pose2D, cones: np.ndarray, r_scan: float, rng: np.random.Generator,
-              n: int = 720, noise: float = 5.0, extra: Optional[np.ndarray] = None):
-    """라이다 위치(도면 좌표)에서 본 원기둥들의 스캔. extra: [(x, y, r)] 콘 아닌 물체."""
-    angles = -math.pi + np.arange(n) * (2 * math.pi / n)
+              n: int = 720, noise: float = 5.0, extra: Optional[np.ndarray] = None,
+              fov_deg: float = 360.0):
+    """라이다 위치(도면 좌표)에서 본 원기둥들의 스캔. extra: [(x, y, r)] 콘 아닌 물체.
+
+    fov_deg: 정면 기준 시야 (LIMO 라이다는 뒤쪽이 가려져 약 240도). 스캔 메시지도 그 범위만 담는다.
+    """
+    inc = 2 * math.pi / n
+    fov_half = math.radians(fov_deg) / 2.0
+    n = int(round(2 * fov_half / inc)) if fov_deg < 360.0 else n
+    a_min = -fov_half if fov_deg < 360.0 else -math.pi
+    angles = a_min + np.arange(n) * inc
     ranges = np.full(n, np.inf)
     objs = [(c[0], c[1], r_scan) for c in cones]
     if extra is not None:
@@ -80,7 +88,7 @@ def fake_scan(lidar: Pose2D, cones: np.ndarray, r_scan: float, rng: np.random.Ge
             if disc >= 0 and b > 0:
                 ranges[i] = min(ranges[i], (b - math.sqrt(disc)) / 1000.0)
     ranges = ranges + rng.normal(0.0, noise / 1000.0, n)
-    return ranges, -math.pi, 2 * math.pi / n
+    return ranges, a_min, inc
 
 
 def footprint_clearance(car: Pose2D, cone_xy, base_r: float) -> float:
@@ -111,7 +119,7 @@ def run(cones_track, params: Optional[ConeParams] = None, imu_offset: float = 0.
         r_scan: float = 30.0, base_r: float = 50.0, steer_delay: float = 0.30,
         lane_speed: float = 0.13, extra=None, drop_scan_prob: float = 0.0,
         t_max: float = 60.0, handoff_kappa: bool = True,
-        lidar_yaw_err: float = 0.0) -> SimResult:
+        lidar_yaw_err: float = 0.0, fov_deg: float = 240.0) -> SimResult:
     p = params or ConeParams()
     cones = np.asarray(cones_track, dtype=np.float64).reshape(-1, 2)
     rng = np.random.default_rng(seed)
@@ -140,7 +148,7 @@ def run(cones_track, params: Optional[ConeParams] = None, imu_offset: float = 0.
             if rng.random() >= drop_scan_prob:
                 lid = Pose2D(car.x + lidar_x * math.cos(car.yaw),
                              car.y + lidar_x * math.sin(car.yaw), car.yaw + lidar_yaw_err)
-                rr, amin, inc = fake_scan(lid, cones, r_scan, rng, extra=extra)
+                rr, amin, inc = fake_scan(lid, cones, r_scan, rng, extra=extra, fov_deg=fov_deg)
                 pts = scan_to_points(rr, amin, inc, 0.05, 8.0, lidar_x, 0.0, 0.0)
                 fol.on_scan(pts, pose_w, (lidar_x, 0.0))
         front_y = car.y + 200.0 * math.sin(car.yaw)

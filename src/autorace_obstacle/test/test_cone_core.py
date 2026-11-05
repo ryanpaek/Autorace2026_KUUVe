@@ -56,6 +56,36 @@ def test_candidates_keep_cones_drop_limo_box():
     assert xy[1] == pytest.approx((1200, -250), abs=15)
 
 
+def test_candidates_ignore_self_body_and_240_scan():
+    """라이다 바로 옆 차체 점은 버리고, 240도 스캔(뒤 120도 없음)에서도 앞 콘은 그대로 잡는다."""
+    p = ConeParams()
+    n = 480                                            # 0.5도 x 480 = 240도
+    angles = -math.radians(120) + np.arange(n) * math.radians(0.5)
+    ranges = np.full(n, np.inf)
+    ranges[(angles > math.radians(100)) & (angles < math.radians(103))] = 0.08   # 차체 모서리
+    c = np.array([900.0, 150.0])
+    for i, a in enumerate(angles):
+        d = np.array([math.cos(a), math.sin(a)])
+        b = d @ c
+        disc = b * b - (c @ c - 30.0 ** 2)
+        if disc >= 0 and b > 0:
+            ranges[i] = (b - math.sqrt(disc)) / 1000.0
+    pts = scan_to_points(ranges, angles[0], math.radians(0.5), 0.0, 8.0)
+    got = cone_candidates(pts, p)
+    assert len(got) == 1 and got[0]['x'] == pytest.approx(900.0, abs=15)
+
+
+def test_tracker_keeps_cone_outside_fov():
+    """차 옆을 지나 뒤로 간 콘(시야 밖)은 안 보여도 지우지 않는다."""
+    p = ConeParams()
+    tr = ConeTracker(p)
+    for _ in range(4):
+        tr.update(np.array([[600.0, 250.0]]), Pose2D())
+    for _ in range(p.drop_misses_confirmed + 10):
+        tr.update(np.zeros((0, 2)), Pose2D(900.0, 0.0, 0.0))   # 콘이 뒤차축 300mm 뒤
+    assert len(tr.ok_tracks()) == 1
+
+
 def test_tracker_confirm_and_drop_tentative():
     p = ConeParams()
     tr = ConeTracker(p)

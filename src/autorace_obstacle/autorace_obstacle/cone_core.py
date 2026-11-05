@@ -43,6 +43,8 @@ class ConeParams:
     cone_min_pts: int = 2               # 콘 위쪽은 가늘어서 점이 2~3개만 맞을 수 있다
     cone_max_size_mm: float = 140.0     # 덩어리 크기(끝점 사이) 상한. LIMO(폭 220)·벽은 여기서 걸러진다
     cone_max_range_mm: float = 2600.0   # 라이다에서 이보다 먼 덩어리는 안 쓴다
+    cone_min_range_mm: float = 120.0    # 이보다 가까운 점 덩어리는 차체(가림 경계)로 보고 버린다
+    lidar_fov_deg: float = 240.0        # LIMO 라이다는 뒤쪽이 가려져 약 240도. '보여야 정상' 판단에만 씀
     cone_scan_radius_mm: float = 30.0   # TODO 실측: 라이다 높이에서 콘 단면 반지름 (보이는 면 -> 중심 보정)
     cone_base_radius_mm: float = 50.0   # TODO 실측: 콘 바닥 반지름 (부딪힘 여유 계산)
     # --- 추적 ---
@@ -200,7 +202,7 @@ def cone_candidates(points: np.ndarray, p: ConeParams,
         r = np.hypot(rel[:, 0], rel[:, 1])
         i = int(np.argmin(r))
         rng = float(r[i])
-        if rng > p.cone_max_range_mm or rng < 1.0:
+        if rng > p.cone_max_range_mm or rng < p.cone_min_range_mm:
             continue
         u = rel[i] / rng
         c = g[i] + u * p.cone_scan_radius_mm
@@ -277,14 +279,17 @@ class ConeTracker:
                                              float(dets[di, 1])))
                 self._next_id += 1
         # 보여야 하는데 안 보인 트랙 (이번에 새로 생긴 트랙은 제외)
+        # 시야 가장자리·옆·뒤 콘은 안 보여도 지우지 않는다 -> 지나간 콘은 기억으로 유지
         unmatched = [ti for ti in range(n_before) if ti not in used_t]
         if unmatched:
             pv = to_vehicle(pose, [[t.x, t.y] for t in self.tracks])
             rel = pv - np.array(lidar_xy)
             rng = np.hypot(rel[:, 0], rel[:, 1])
             brg = np.arctan2(rel[:, 1], rel[:, 0])
+            vis_half = math.radians(min(90.0, p.lidar_fov_deg / 2.0 - 15.0))
             for ti in unmatched:
-                if rng[ti] > p.visible_range_mm or rel[ti, 0] < 0.0:
+                if (rng[ti] > p.visible_range_mm or rng[ti] < p.cone_min_range_mm
+                        or abs(brg[ti]) > vis_half):
                     continue
                 if self._occluded(ti, rng, brg):
                     continue

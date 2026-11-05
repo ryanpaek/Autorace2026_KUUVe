@@ -17,8 +17,9 @@ import cone_sim as cs  # noqa: E402
 
 @pytest.mark.parametrize('name', list(cs.SCENARIOS))
 def test_scenarios_no_contact(name):
+    """LIMO 라이다처럼 정면 240도만 보이는 스캔으로 돈다."""
     cones = cs.SCENARIOS[name]()
-    res = cs.run(cones, axis_err=math.radians(2.0), lane_err_mm=30.0, seed=1)
+    res = cs.run(cones, axis_err=math.radians(2.0), lane_err_mm=30.0, seed=1, fov_deg=240.0)
     assert res.done, res.follower.state_dict()
     assert res.min_clear > 10.0, (name, res.clear_by_cone)
     assert res.exit_x_err is not None and abs(res.exit_x_err) < 150.0
@@ -31,6 +32,8 @@ def test_scenarios_no_contact(name):
     dict(r_scan=45.0),
     dict(steer_delay=0.45),
     dict(lidar_yaw_err=math.radians(1.0)),
+    dict(fov_deg=180.0),
+    dict(fov_deg=360.0),
 ])
 def test_robust_straight_and_wave(case):
     for name in ('straight_500', 'wave_460'):
