@@ -237,6 +237,9 @@ class LaneParams:
     route_ff_weight_lost: float = 0.0  # 놓쳤을 때(hold) 비율 (권장 0.8)
     route_ff_preview_mm: float = 300.0  # 앞바퀴에서 이만큼 앞의 도면 곡률을 쓴다
     route_ff_gate: float = 0.8        # 두 선이 다 잘 보이는데 도면과 이만큼(1/m) 넘게 다르면 도면 무시
+    route_ff_weight_both: float = 0.0  # 두 선이 다 잘 보일 때 비율. 모의 시험에서 섞으면 오히려 나빠져 기본 0
+    # 도면 복귀: 차선을 놓쳤을 때(기억도 없을 때) 미션이 보낸 도면 중심선 점(차 기준)으로 목표점
+    route_recover: bool = False
     # 코너 들어가기 전 감속: 앞에 보이는(또는 도면상) 곡률이 preview_kappa_ref면 이 비율만큼 감속
     preview_slowdown: float = 0.0     # 권장 0.25
     preview_kappa_ref: float = 1.5
@@ -1236,6 +1239,7 @@ class LaneFollower:
         # 노드가 매 프레임 넣는다 (오래되면 None).
         self.route_k: Optional[List[float]] = None
         self.route_step_mm: float = 100.0
+        self.route_pts: Optional[List[Tuple[float, float]]] = None   # 도면 중심선 (차 기준, 복귀용)
         self.reset()
 
     # --- 상태 ---------------------------------------------------------------
@@ -1427,6 +1431,15 @@ class LaneFollower:
                         self.hold_yaw_ref = wrap_angle(yaw + out.heading_rad)
             out.mem_pts = int(sum(len(it[1]) for it in self.memory.items))
         out.lookahead_mm = look
+        if (p.route_recover and self.route_pts and kappa_raw is None and source != 'coast'
+                and self.mode not in ('heading', 'zigzag')):
+            mt = memory_target(np.asarray(self.route_pts, float), look, 80.0)
+            if mt is not None:
+                tgt = mt[0]
+                k_r = pp_kappa_with_latency(tgt, self.kappa_cmd, speed, p.latency_comp_sec)
+                kappa_raw, source = -k_r, 'route'
+                out.target_mm, out.low_conf = tgt, True
+                self.prev_target_x = tgt[0]
 
         if self.mode == 'heading' and yaw is not None and self.yaw_ref is not None:
             kappa_raw, source = self._heading_kappa(yaw, self.yaw_ref, speed), 'heading'
@@ -1449,12 +1462,13 @@ class LaneFollower:
         if k_ff is not None and (p.route_ff_weight > 0.0 or p.route_ff_weight_lost > 0.0):
             out.ff_kappa = k_ff
             w = 0.0
+            strong = out.status == 'BOTH' and not out.low_conf
             if source in ('lane', 'memory'):
-                w = p.route_ff_weight
-                if (out.status == 'BOTH' and not out.low_conf
-                        and abs(k_ff - kappa_raw) > p.route_ff_gate):
+                # 선이 약할 때(한쪽만·짧음·기억)만 도면을 섞는다
+                w = p.route_ff_weight_both if strong else p.route_ff_weight
+                if strong and abs(k_ff - kappa_raw) > p.route_ff_gate:
                     w = 0.0                   # 차선이 확실한데 도면과 크게 다르면 위치 추정이 틀린 것
-            elif source == 'hold':
+            elif source in ('hold', 'route'):
                 w = p.route_ff_weight_lost
             kappa_raw = kappa_raw + w * (k_ff - kappa_raw)
         out.source = source

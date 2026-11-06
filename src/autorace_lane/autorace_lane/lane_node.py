@@ -230,6 +230,7 @@ class LaneNode(Node):
         fresh = (rp is not None and time.monotonic() - rp[0]
                  <= self.get_parameter('route_preview_timeout_sec').value)
         self.follower.route_k = rp[1].get('k') if fresh else None
+        self.follower.route_pts = (rp[1].get('pts') if fresh and rp[1].get('pose_ok') else None)
         if fresh:
             self.follower.route_step_mm = float(rp[1].get('step_mm', 100.0))
         out = self.follower.process(bgr, yaw=self.yaw, speed=speed, pose=self.pose.pose,

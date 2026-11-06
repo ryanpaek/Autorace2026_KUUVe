@@ -178,3 +178,16 @@ def test_lost_inner_arc_completes(mirror):
     ok, errs = drive(mirror=mirror, params=dict(lost_arc_mm=1000.0), delay_frames=5)
     assert ok
     assert max(errs) < 150.0 and min(errs) > -150.0
+
+
+def test_route_recover_when_lost():
+    """선이 하나도 안 보여도 도면 중심선 점이 있으면 그쪽으로 간다 (11/06)."""
+    cfg = _cfg()
+    f = LaneFollower(cfg, LaneParams(lane_color='yellow', route_recover=True))
+    f.route_pts = [(100.0 + 0.2 * y, float(y)) for y in range(0, 1400, 100)]   # 오른쪽 앞
+    out = f.process_bev(np.zeros((cfg.bev_h, cfg.bev_w), np.uint8), speed=0.3)
+    assert out.source == 'route'
+    assert out.kappa < 0.0                                   # 오른쪽으로
+    f2 = LaneFollower(cfg, LaneParams(lane_color='yellow'))
+    f2.route_pts = f.route_pts
+    assert f2.process_bev(np.zeros((cfg.bev_h, cfg.bev_w), np.uint8), speed=0.3).source == 'hold'
