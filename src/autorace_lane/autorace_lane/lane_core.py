@@ -203,7 +203,7 @@ class LaneParams:
     circle_min_points: int = 4
     # 선 따라 걷기 보강 (11/06, 두 번째 코너)
     walk_smooth_pts: int = 7          # 걸은 점(40mm 간격)을 이 개수로 이동 평균 -> 매트 주름 흔들림 줄임. 1이면 끔
-    walk_kink_deg: float = 35.0       # 120mm 사이 방향이 이만큼 넘게 꺾이면 거기서 끊음 (3차선 입구). 0이면 끔
+    walk_kink_deg: float = 0.0        # >0이면 120mm 사이 이만큼 넘게 꺾일 때 끊음 (3차선 입구용 35). 매트 이음매 어긋남도 끊어 코너가 늦어져서 기본 끔
     far_start_mm: float = 250.0       # 선 조각이 lookahead+이 거리보다 멀리서 시작하면 안 씀. 0이면 끔
     # 시간 필터 / 게이트
     kappa_alpha: float = 0.5          # 곡률 명령 EMA (1.0 = 필터 없음)
