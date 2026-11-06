@@ -3,23 +3,35 @@
 /scan -> 전방 관심 영역의 덩어리(클러스터) -> /obstacle/state (String JSON)
 미션 상태에 따라 /obstacle/cmd_vel을 낸다.
   M8_CONES   : 가장 가까운 좌/우 콘 사이 중점을 Pure Pursuit로 따라간다 (동작하는 초안)
-  M7_OBSTACLE: TODO. 차로 점유(lane_occupancy)로 빈 차로를 고르고 차선 변경.
-               갈림길 방향(/mission/state의 fork_choice)에 맞는 쪽 차로로 끝내야 한다.
-               방법 A: lane 노드의 target_offset_mm(±500)으로 옆 차로 중심을 따라가게 한다.
-               방법 B: 오도메트리로 미리 짠 S자 경로를 재생한다.
+  M7_OBSTACLE: 회피 주행은 limo_obstacle_avoid 패키지의 avoid_node가 한다 (그 출력은 launch에서
+               /obstacle/cmd_vel로 remap). 이 노드는 연결만 맡는다 (m7_link.py):
+                 시작선에서 /avoid/enable, 갈림길 방향 -> /fork_direction,
+                 /avoid/done -> /obstacle/state의 m7_done, 회피 중이면 m7_active.
+               그래서 M8 말고는 /obstacle/cmd_vel을 내지 않는다 (avoid_node와 한 토픽을 나눠 쓰므로).
 """
 
 import json
+import time
+from dataclasses import fields
 
 import rclpy
 from geometry_msgs.msg import Twist
+from rcl_interfaces.msg import Parameter as ParamMsg
+from rcl_interfaces.msg import ParameterType, ParameterValue
+from rcl_interfaces.srv import SetParameters
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import LaserScan
-from std_msgs.msg import String
+from std_msgs.msg import Bool, String
+
+from autorace_obstacle.m7_link import M7Link, M7LinkParams
 
 from autorace_obstacle.scan_utils import (cluster_points, cone_gate_target, lane_occupancy,
                                           pursuit_kappa, roi, scan_to_points)
+
+
+def g_name(name: str) -> str:
+    return name if name.startswith('/') else '/' + name
 
 
 class ObstacleNode(Node):
@@ -37,19 +49,76 @@ class ObstacleNode(Node):
         p('lane_centers_y', [500.0, 0.0, -500.0])   # 3차선 (왼쪽 +). TODO 실측
         p('lane_half_width', 230.0)
         p('cone_speed', 0.13)
+        # M7 연결 (m7_link.M7LinkParams 항목을 m7_ 접두어로 선언. 예: m7_start_s_mm)
+        p('m7_avoid_node', '/avoid_node')   # section_length를 넣을 회피 노드 이름
+        lp = M7LinkParams()
+        for f in fields(lp):
+            setattr(lp, f.name, p('m7_' + f.name, getattr(lp, f.name)).value)
+        self.link = M7Link(lp)
         self.mission = {}
+        self.lane = {}
         self.last = {}
         self.create_subscription(LaserScan, self.get_parameter('scan_topic').value,
                                  self._on_scan, qos_profile_sensor_data)
         self.create_subscription(String, '/mission/state', self._on_mission, 10)
         self.state_pub = self.create_publisher(String, '/obstacle/state', 10)
         self.cmd_pub = self.create_publisher(Twist, '/obstacle/cmd_vel', 10)
+        # M7 연결
+        self.create_subscription(String, '/lane/status', self._on_lane, 10)
+        self.create_subscription(Bool, '/avoid/active', lambda m: self.link.on_avoid_active(m.data), 10)
+        self.create_subscription(Bool, '/avoid/done', lambda m: self.link.on_avoid_done(m.data), 10)
+        self.create_subscription(String, '/avoid/state', self._on_avoid_state, 10)
+        self.enable_pub = self.create_publisher(Bool, '/avoid/enable', 10)
+        self.fork_pub = self.create_publisher(String, '/fork_direction', 10)
+        self.param_cli = self.create_client(
+            SetParameters, g_name(self.get_parameter('m7_avoid_node').value) + '/set_parameters')
+        self.create_timer(0.05, self._tick)
 
     def _on_mission(self, msg):
         try:
             self.mission = json.loads(msg.data)
         except json.JSONDecodeError:
             pass
+
+    def _on_lane(self, msg):
+        try:
+            self.lane = json.loads(msg.data)
+        except json.JSONDecodeError:
+            pass
+
+    def _on_avoid_state(self, msg):
+        try:
+            self.link.on_avoid_state(json.loads(msg.data))
+        except (json.JSONDecodeError, AttributeError):
+            pass
+
+    def _tick(self):
+        """20 Hz: M7 연결 + /obstacle/state 발행 (라이다가 없어도 m7_done이 FSM에 가게)."""
+        for act in self.link.update(time.monotonic(), self.mission, self.lane):
+            if act[0] == 'enable':
+                self._enable(act[1])
+            elif act[0] == 'disable':
+                self.enable_pub.publish(Bool(data=False))
+            elif act[0] == 'fork':
+                self.fork_pub.publish(String(data=act[1]))
+        for e in self.link.events:
+            self.get_logger().info(f'[M7] {e}')
+        self.link.events.clear()
+        state = dict(self.last)
+        state.update(self.link.state())
+        self.state_pub.publish(String(data=json.dumps(state)))
+
+    def _enable(self, section_m):
+        """회피 노드 section_length(원점 ~ 섬 끝)를 지금 위치로 맞춘 뒤 켠다."""
+        if not self.param_cli.service_is_ready():
+            self.get_logger().warning('[M7] 회피 노드 파라미터 서비스 없음 -> section_length 기본값으로 켬')
+            self.enable_pub.publish(Bool(data=True))
+            return
+        req = SetParameters.Request()
+        req.parameters = [ParamMsg(name='section_length', value=ParameterValue(
+            type=ParameterType.PARAMETER_DOUBLE, double_value=float(section_m)))]
+        self.param_cli.call_async(req).add_done_callback(
+            lambda _f: self.enable_pub.publish(Bool(data=True)))
 
     def _on_scan(self, msg: LaserScan):
         g = self.get_parameter
@@ -64,20 +133,17 @@ class ObstacleNode(Node):
         front = [c['near_x'] for c in clusters if abs(c['y']) < 150.0]
         state = {'clusters': clusters[:12], 'lane_occupancy': occ,
                  'front_min_mm': min(front) if front else None,
-                 'm7_done': False, 'cones_done': False}
-        tw = Twist()
-        mstate = self.mission.get('state')
-        if mstate == 'M8_CONES':
+                 'cones_done': False}
+        if self.mission.get('state') == 'M8_CONES':
+            tw = Twist()
             tgt = cone_gate_target(clusters)
             if tgt is not None:
                 v = g('cone_speed').value
                 tw.linear.x, tw.angular.z = v, v * pursuit_kappa(tgt)
                 state['cone_target'] = tgt
-        elif mstate == 'M7_OBSTACLE':
-            pass   # TODO: 빈 차로 선택 + 차선 변경 (모듈 설명 참고)
-        self.last = state
-        self.state_pub.publish(String(data=json.dumps(state)))
-        self.cmd_pub.publish(tw)
+            self.cmd_pub.publish(tw)
+        # M7은 avoid_node가 /obstacle/cmd_vel을 낸다. 여기서 0을 섞어 내면 안 된다.
+        self.last = state       # /obstacle/state는 _tick에서 m7 값과 합쳐 발행
 
 
 def main(args=None):

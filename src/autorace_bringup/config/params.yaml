@@ -51,6 +51,9 @@ mission_node:
     ped_wait_sec: 3.5
     obstacle_source_ready: false           # obstacle 노드 완성 후 true
     m7_len_mm: 6000.0                      # 도면 기준, 모의맵 실측으로 확인
+    m7_external_avoid: false               # launch의 m7_avoid:=true가 켬 (limo_obstacle_avoid로 회피)
+    m7_force_after_island_mm: 500.0        # 회피가 안 끝나도 섬 끝 + 이만큼에서 M2로
+    fork_from_m7_exit: true                # 갈림길 표지를 못 읽으면 회피가 끝난 차로를 씀
     cones_len_mm: 4300.0                   # 도면 기준, 모의맵 실측으로 확인
     fork_len_mm: 2300.0                    # 도면 기준, 모의맵 실측으로 확인
     fork_default: A
@@ -68,6 +71,14 @@ obstacle_node:
     lane_centers_y: [500.0, 0.0, -500.0]
     lane_half_width: 230.0
     cone_speed: 0.13
+    # M7 연결 (m7_link.py). 시작선·섬 위치는 track_route.yaml 기준 (test_m7_link가 확인)
+    m7_avoid_node: /avoid_node
+    m7_start_s_mm: 13589.0
+    m7_island_s_mm: 17973.0
+    m7_enable_at_mm: 0.0                   # 앞바퀴가 시작선 + 이만큼에서 회피 시작
+    m7_max_heading_deg: 3.0                # 차선 방향이 이보다 틀어져 있으면 켜기를 미룸
+    m7_heading_wait_mm: 300.0              # 그래도 시작선 + 이만큼에선 켬
+    m7_fork_fallback: auto                 # 켤 때까지 갈림길 표지를 못 읽으면: auto | A | B
 
 detector_node:
   ros__parameters:
