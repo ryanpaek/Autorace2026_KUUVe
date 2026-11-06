@@ -9,7 +9,8 @@
 | --- | --- | --- |
 | `autorace_lane` | `lane_node`, `bev_calib`, `offline_replay` | 초안 동작 (오프라인 테스트 통과, 실차 튜닝 필요) |
 | `autorace_mission` | `mission_node` (FSM + /cmd_vel 선택기), `parking_node` | FSM 동작, 미션별 거리값 TODO, 주차 계획 TODO |
-| `autorace_obstacle` | `obstacle_node` | 라이다 클러스터·라바콘 추종 초안, 3차선 회피 TODO |
+| `autorace_obstacle` | `obstacle_node` (+ `m7_link`) | 라이다 클러스터·라바콘 추종 초안. M7은 `limo_obstacle_avoid`를 켜고 끄는 연결 |
+| `limo_obstacle_avoid` | `avoid_node`, `cmd_mux`, 단계별 시험 `s0`~`s4` | M7 3차선 정차 LIMO 회피 (라이다 + odom/IMU 구간 좌표). `autorace.launch.py m7_avoid:=true`로 연결. 사용법은 그 폴더 README |
 | `autorace_perception` | `detector_node`, `image_collector` | ONNX/ultralytics 추론 틀, 모델 학습 TODO |
 | `training/lane_seg` | `autolabel.py`, `train_lane_seg.py` (PC에서 실행) | 차선 분할 모델 수집·라벨·학습·ONNX. 사용법은 그 폴더 README |
 | `autorace_bringup` | `autorace.launch.py`, `lane_test.launch.py`, 설정, 스크립트 | 실행 틀 |
@@ -23,7 +24,7 @@
 | `tools/` | 경로 기록·재생 등 `python3`로 직접 실행하는 도구 ([README](tools/README.md)) |
 | `training/` | PC에서 돌리는 학습 코드 |
 | `models/` | 학습된 ONNX 모델 |
-| `docs/` | 트랙 도면 등 자료 |
+| `docs/` | 트랙 도면, 변경 내역(`CHANGES_*.md`) |
 
 ## 빌드
 
@@ -60,6 +61,8 @@ source install/setup.bash
 | `/mission/state` | String(JSON) | mission_node → 모두 |
 | `/mission/start` / `/mission/estop` / `/mission/set_state` | Empty / Bool / String | 사람 → mission_node |
 | `/route/set_s` | Float32 | 사람 → mission_node: 경로 위치 s(mm) 직접 지정 (연습용) |
+| `/avoid/enable`, `/fork_direction` | Bool, String | obstacle_node → avoid_node (M7 시작선에서 켬, 갈림길 A/B) |
+| `/avoid/active`, `/avoid/done`, `/avoid/state` | Bool, Bool, String(JSON) | avoid_node → obstacle_node (→ `/obstacle/state`의 m7_*) |
 | `/limo/ack_cmd` | AckermannDrive | ackermann_bridge → LIMO 애커만 드라이버 (`/cmd_vel`을 변환) |
 | `/lane/debug/compressed`, `/perception/debug/compressed` | CompressedImage | 디버그 화면 (rqt_image_view, Foxglove) |
 
@@ -86,7 +89,7 @@ mission_node가 오도메트리로 경로상 위치 `s`(mm, 출발 체커 = 0)�
 
 ```bash
 cd ~/autorace_ws
-python3 -m pytest src -q          # 38개: 차선·정지선·지그재그·FSM·라이다·ONNX 디코딩
+python3 -m pytest src -q          # 102개: 차선·정지선·지그재그·FSM·라이다·ONNX 디코딩·M7 회피
 ```
 차선 알고리즘을 고치면 `src/autorace_lane/test/test_lane_core.py`에 합성 트랙 케이스를 추가해 확인한다.
 녹화한 주행으로 튜닝 전후를 비교하려면 `offline_replay`를 쓴다.

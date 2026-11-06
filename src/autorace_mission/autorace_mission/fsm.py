@@ -51,6 +51,12 @@ DEFAULT_PARAMS = {
     # M7 / M8
     'obstacle_source_ready': False,  # 장애물 노드가 완성되면 true. 그 전엔 차선 주행으로 통과
     'm7_len_mm': 6000.0,
+    # M7을 limo_obstacle_avoid(avoid_node)로 회피. obstacle_node가 시작선에서 켜고 m7_active/m7_done을 알려 준다.
+    #   켜져 있으면: 회피 노드가 실행 중일 때만 obstacle 명령을 쓰고(그 전 코너·시작선까지는 차선),
+    #   M7은 m7_done으로 끝낸다. 도면 위치는 안전용 최대값(섬 끝 + m7_force_after_island_mm)으로만 쓴다.
+    'm7_external_avoid': False,
+    'm7_force_after_island_mm': 500.0,
+    'fork_from_m7_exit': True,   # 갈림길 표지를 못 읽었으면 회피가 끝난 차로(A/B)를 그대로 쓴다 (섬을 건너지 않게)
     # 3차선: 차로 500mm, 바깥 실선은 노랑·안쪽 점선은 흰색(모의 맵 10/30 확인) -> 두 색 다 차선으로
     'three_lane_width_mm': 500.0,
     'three_lane_color': 'both',         # 도면: M3 종료 ~ 우하단 코너(약1.6m) + 3차선 약4.5m(섬 오른쪽 끝까지)
@@ -335,6 +341,8 @@ class MissionFSM:
         self._remember_fork(inp)
         _, d = self._since(inp)
         done = inp.obstacle.get('m7_done', False)
+        if self.p['m7_external_avoid']:
+            return self._m7_external(inp, d, done)
         end = self._past(inp, 'm7_island_tip', -self.p['route_island_margin_mm'])
         if done or ((d >= self.p['m7_len_mm']) if end is None else end):
             self._next(inp, 'obstacle zone done' if done else f'm7 end at {d:.0f}mm')
@@ -343,9 +351,26 @@ class MissionFSM:
                                        lane_width_mm=self.p['three_lane_width_mm'],
                                        lane_color=self.p['three_lane_color']))
 
+    def _m7_external(self, inp, d, done):
+        """limo_obstacle_avoid 회피. 회피 노드는 섬 끝을 약 30 cm 지나서 끝나므로
+        예전처럼 섬 끝 30 cm 앞에서 넘기면 마지막 차로 변경 도중에 차선 주행이 끼어든다 -> m7_done을 기다린다."""
+        force = self._past(inp, 'm7_island_tip', self.p['m7_force_after_island_mm'])
+        if force is None:
+            force = d >= self.p['m7_len_mm'] + self.p['m7_force_after_island_mm']
+        if done or force:
+            self._next(inp, 'obstacle zone done' if done else f'm7 forced end at {d:.0f}mm')
+            return Command('lane', self._lane(self.p['approach_speed']))
+        src = 'obstacle' if inp.obstacle.get('m7_active') else 'lane'
+        return Command(src, self._lane(self.p['approach_speed'],
+                                       lane_width_mm=self.p['three_lane_width_mm'],
+                                       lane_color=self.p['three_lane_color']))
+
     def _s_M2_FORK(self, inp):
         """A(왼쪽) / B(오른쪽): 한쪽 경계선만 따라가는 차선 모드로 분기."""
         self._remember_fork(inp)
+        exit_lane = inp.obstacle.get('m7_exit')
+        if self.fork_choice is None and self.p['fork_from_m7_exit'] and exit_lane in ('A', 'B'):
+            self.fork_choice = exit_lane          # 이미 그 차로에 있다
         if self.fork_choice is None:
             t, _ = self._since(inp)
             if t <= self.p['fork_seek_timeout_sec']:
