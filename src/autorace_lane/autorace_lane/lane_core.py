@@ -243,6 +243,14 @@ class LaneParams:
     # 속도에 따라 lookahead 늘리기: lookahead = lookahead_mm + 이 값 * (속도 - 0.3). 상한 750
     lookahead_per_mps: float = 0.0    # 권장 500 (0.4 m/s에서 +50mm)
     lookahead_max_mm: float = 750.0
+    # 한쪽 선만 보일 때 lookahead (0이면 같은 값). 모의 맵 코너는 바깥 선이 안쪽 선보다 60~70cm 늦게
+    # 휘어서, 바깥 선만 보일 때 650 앞은 아직 직선 -> 늦게 꺾는다 (11/06 두 번째 코너 이탈)
+    single_lookahead_mm: float = 0.0
+    # 사라진 안쪽 선 원 이어 쓰기: 두 선이 보일 때 한쪽 선이 자기 쪽으로 휘는 원(R350~1500)이면 기억했다가,
+    # 그 선이 시야 밖으로 나가 반대쪽(바깥) 선만 보이면 기억한 원을 안쪽 선으로 써서 가운데를 잡는다.
+    # 값 = 기억을 쓰는 최대 주행 거리(mm, 권장 1000). 위치(pose) 필요. 0이면 끔
+    lost_arc_mm: float = 0.0
+    lost_arc_max_turn_deg: float = 75.0   # 기억한 뒤 차가 이만큼 돌면(코너 끝) 그만 쓴다
 
     @classmethod
     def from_dict(cls, d: dict) -> 'LaneParams':
@@ -1223,6 +1231,7 @@ class LaneFollower:
         self.fit_order_override: Optional[int] = None
         self.yaw_ref: Optional[float] = None
         self.memory = LaneMemory()
+        self.arc_cand = {'L': None, 'R': None}   # 측면별 (중심 세계좌표, 반경, 거리, yaw)
         # 도면 곡률 미리보기: 앞바퀴에서 0, step, 2*step ... mm 앞의 곡률 (왼쪽 +, 1/m).
         # 노드가 매 프레임 넣는다 (오래되면 None).
         self.route_k: Optional[List[float]] = None
@@ -1244,6 +1253,7 @@ class LaneFollower:
         self._last_offset = 0.0
         if hasattr(self, 'memory'):
             self.memory.clear()
+        self.arc_cand = {'L': None, 'R': None}
 
     def set_mode(self, mode: str, yaw: Optional[float] = None,
                  yaw_ref: Optional[float] = None,
@@ -1328,14 +1338,34 @@ class LaneFollower:
 
         kappa_raw, source = None, 'lane'
         direct = None
+        if det.status in ('L', 'R') and p.single_lookahead_mm > look:
+            look = float(p.single_lookahead_mm)
+        lpix_mm = _line_pixels_mm(bev_lane, left, cfg)
+        rpix_mm = _line_pixels_mm(bev_lane, right, cfg)
+        arc_on = (p.lost_arc_mm > 0.0 and pose is not None and dist_mm is not None
+                  and self.mode not in ('zigzag', 'heading', 'left_only', 'right_only'))
+        if arc_on and det.status == 'BOTH':
+            for side, pix in (('L', lpix_mm), ('R', rpix_mm)):
+                self.arc_cand[side] = self._inner_arc(side, pix, pose, dist_mm)
         if (p.direct_target and det.status != 'NONE' and p.target_offset_mm == 0.0
                 and self.mode not in ('zigzag', 'heading')):
-            direct = direct_target(_line_pixels_mm(bev_lane, left, cfg),
-                                   _line_pixels_mm(bev_lane, right, cfg), det.status,
+            direct = direct_target(lpix_mm, rpix_mm, det.status,
                                    p.lane_width_mm / 2.0, look, p.lane_width_mm,
                                    p.corner_outer_extra_mm, p.walk_smooth_pts,
                                    p.walk_kink_deg, p.far_start_mm)
             out.debug['direct'] = direct[2] if direct is not None else None
+            if arc_on and det.status in ('L', 'R'):
+                at = self._lost_arc_target(det.status, pose, dist_mm, look)
+                if at is not None:
+                    out.debug['arc_tgt'] = at
+                    if direct is not None:
+                        t0 = direct[0]
+                        if math.hypot(t0[0] - at[0], t0[1] - at[1]) < p.lane_width_mm:
+                            # 두 선이 다 보일 때처럼 두 목표점의 가운데
+                            direct = ((0.5 * (t0[0] + at[0]), 0.5 * (t0[1] + at[1])), False,
+                                      direct[2])
+                    else:
+                        direct = (at, False, np.array([[0.0, cfg.ref_to_bev_bottom_mm], at]))
         if cl is None and direct is not None:
             # 원·다항식이 안 돼도 목표점은 있다 (코너 출구처럼 선이 옆으로 누운 경우)
             c = direct[2]
@@ -1507,6 +1537,57 @@ class LaneFollower:
         if side != det.status:
             det.left_x0, det.right_x0 = (x0, None) if side == 'L' else (None, x0)
             det.status = side
+
+    def _inner_arc(self, side: str, pix, pose, dist_mm: float):
+        """이 선이 자기 쪽으로 휘는 원이면 (중심 세계좌표, 반경, 거리, yaw). 아니면 None."""
+        if pix is None or len(pix) < 40:
+            return None
+        if np.ptp(pix[:, 1]) < 150.0:
+            return None
+        f = fit_circle(pix[:, 0], pix[:, 1])
+        if f is None:
+            return None
+        cx, cy, r, rms = f
+        if not (350.0 <= r <= 1500.0) or rms > 25.0:
+            return None
+        mx = float(np.mean(pix[:, 0]))
+        if (side == 'R' and cx <= mx) or (side == 'L' and cx >= mx):
+            return None                        # 반대쪽으로 휘면 안쪽 선이 아니다
+        cw = vehicle_to_world(np.array([[cx, cy]]), pose)[0]
+        return (cw, float(r), float(dist_mm), float(pose[2]))
+
+    def _lost_arc_target(self, seen: str, pose, dist_mm: float, look: float):
+        """안 보이는 쪽(seen 반대)의 기억한 원을 반폭만큼 바깥으로 넓힌 중앙선 원 위, lookahead 거리 점."""
+        p = self.p
+        lost = 'R' if seen == 'L' else 'L'
+        cand = self.arc_cand.get(lost)
+        if cand is None:
+            return None
+        cw, r, d0, yaw0 = cand
+        if dist_mm - d0 > p.lost_arc_mm or \
+                abs(wrap_angle(pose[2] - yaw0)) > math.radians(p.lost_arc_max_turn_deg):
+            self.arc_cand[lost] = None
+            return None
+        c = world_to_vehicle(np.array([cw]), pose)[0]
+        rc = r + p.lane_width_mm / 2.0
+        d = float(math.hypot(c[0], c[1]))
+        if d < 1e-3 or not (abs(rc - look) <= d <= rc + look):
+            return None
+        a = (look * look - rc * rc + d * d) / (2.0 * d)
+        h = math.sqrt(max(look * look - a * a, 0.0))
+        base = c * (a / d)
+        perp = np.array([-c[1], c[0]]) / d
+        sgn = -1.0 if lost == 'R' else 1.0     # 오른쪽 원: 시계 방향으로 진행
+        phi0 = math.atan2(-c[1], -c[0])        # 차에서 가장 가까운 원 위 점의 각
+        best = None
+        for q in (base + h * perp, base - h * perp):
+            if q[1] <= 0.0:
+                continue
+            th = math.atan2(q[1] - c[1], q[0] - c[0])
+            dth = (sgn * (th - phi0)) % (2.0 * math.pi)
+            if best is None or dth < best[0]:
+                best = (dth, (float(q[0]), float(q[1])))
+        return best[1] if best is not None else None
 
     def _route_kappa(self, d_mm: float, half_win_mm: float = 150.0) -> Optional[float]:
         """앞바퀴에서 d_mm 앞 도면 곡률 (앞뒤 half_win 평균 -> 코너 시작에서 계단 대신 경사)."""

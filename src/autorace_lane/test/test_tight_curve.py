@@ -170,3 +170,11 @@ def test_memory_better_than_hold_in_blackout():
     _, errs_h = drive(blackout=bo)
     _, errs_m = drive(blackout=bo, params=dict(memory_mm=600.0))
     assert max(map(abs, errs_m)) <= max(map(abs, errs_h)) + 5.0
+
+
+@pytest.mark.parametrize('mirror', [False, True], ids=['right_curve', 'left_curve'])
+def test_lost_inner_arc_completes(mirror):
+    """사라진 안쪽 선 원 이어 쓰기(11/06): 켜도 코너를 돌고 안쪽으로 파고들지 않는다."""
+    ok, errs = drive(mirror=mirror, params=dict(lost_arc_mm=1000.0), delay_frames=5)
+    assert ok
+    assert max(errs) < 150.0 and min(errs) > -150.0
