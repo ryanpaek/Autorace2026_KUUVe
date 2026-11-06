@@ -24,7 +24,7 @@
 | `tools/` | 경로 기록·재생 등 `python3`로 직접 실행하는 도구 ([README](tools/README.md)) |
 | `training/` | PC에서 돌리는 학습 코드 |
 | `models/` | 학습된 ONNX 모델 |
-| `docs/` | 트랙 도면 등 자료 |
+| `docs/` | 트랙 도면, 변경 내역(`CHANGES_*.md`) |
 
 ## 빌드
 
