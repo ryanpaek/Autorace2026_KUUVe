@@ -201,6 +201,10 @@ class LaneParams:
     # 넓어지므로 최대 약 100. 0이면 끔
     corner_outer_extra_mm: float = 75.0
     circle_min_points: int = 4
+    # 선 따라 걷기 보강 (11/06, 두 번째 코너)
+    walk_smooth_pts: int = 7          # 걸은 점(40mm 간격)을 이 개수로 이동 평균 -> 매트 주름 흔들림 줄임. 1이면 끔
+    walk_kink_deg: float = 35.0       # 120mm 사이 방향이 이만큼 넘게 꺾이면 거기서 끊음 (3차선 입구). 0이면 끔
+    far_start_mm: float = 250.0       # 선 조각이 lookahead+이 거리보다 멀리서 시작하면 안 씀. 0이면 끔
     # 시간 필터 / 게이트
     kappa_alpha: float = 0.5          # 곡률 명령 EMA (1.0 = 필터 없음)
     kappa_rate_max: float = 0.6       # 프레임당 곡률 변화 한계 (1/m)
@@ -681,11 +685,15 @@ def straight_centerline(pix: np.ndarray, side: str, half_mm: float,
     return float(c[0]), float(c[1]), float(big_mm), -1, 1
 
 
-def walk_line(pix: np.ndarray, step_mm: float = 40.0, max_steps: int = 80) -> Optional[np.ndarray]:
+def walk_line(pix: np.ndarray, step_mm: float = 40.0, max_steps: int = 80,
+              kink_deg: float = 0.0) -> Optional[np.ndarray]:
     """선 화소를 차에 가까운 끝부터 따라 걸어 일정 간격의 점열로 만든다 (진행 순서).
 
     슬라이딩 윈도우는 아래->위로만 움직여 옆으로 누운 선(코너 출구)을 못 따라간다.
     여기서는 방향과 상관없이 이웃 화소 덩어리를 따라간다.
+    kink_deg > 0: 3걸음(120mm) 사이 방향이 이만큼 넘게 바뀌면 거기서 멈춘다.
+      트랙 코너는 R580 이상이라 120mm에 12도 정도만 돈다. 3차선 입구 테이퍼(45도 꺾임)·
+      갈림길 섬 끝처럼 급하게 꺾인 선을 차로로 따라가지 않게 한다.
     """
     if pix is None or len(pix) < 20:
         return None
@@ -708,11 +716,30 @@ def walk_line(pix: np.ndarray, step_mm: float = 40.0, max_steps: int = 80) -> Op
         nv = float(np.hypot(v[0], v[1]))
         if nv < 1e-6:
             break
+        if kink_deg > 0.0 and len(pts) >= 4:
+            a_new = math.atan2(v[1], v[0])
+            back = pts[-1] - pts[-4]
+            a_old = math.atan2(back[1], back[0])
+            if abs(wrap_angle(a_new - a_old)) > math.radians(kink_deg):
+                break
         direc = 0.6 * direc + 0.4 * (v / nv)
         direc = direc / float(np.hypot(direc[0], direc[1]))
         pts.append(nxt)
         cur = nxt
     return np.array(pts) if len(pts) >= 4 else None
+
+
+def smooth_polyline(pts: np.ndarray, win: int) -> np.ndarray:
+    """점열 이동 평균 (양 끝은 남은 점만으로). 매트 주름으로 구불거리는 선을 편다."""
+    if win <= 1 or len(pts) < 3:
+        return pts
+    h = win // 2
+    out = np.empty_like(pts)
+    for i in range(len(pts)):
+        a, b = max(0, i - h), min(len(pts), i + h + 1)
+        k = min(i - a, b - 1 - i)                    # 대칭 창 (끝점은 덜 평균)
+        out[i] = pts[i - k:i + k + 1].mean(axis=0)
+    return out
 
 
 def offset_polyline(pts: np.ndarray, side: str, half_mm: float,
@@ -757,7 +784,8 @@ def polyline_target(cpts: np.ndarray, lookahead_mm: float) -> Tuple[Tuple[float,
 
 
 def direct_target(left_pix, right_pix, status: str, half_mm: float, lookahead_mm: float,
-                  lane_w_mm: float, outer_extra_mm: float = 0.0):
+                  lane_w_mm: float, outer_extra_mm: float = 0.0, smooth_win: int = 1,
+                  kink_deg: float = 0.0, far_start_mm: float = 0.0):
     """보이는 선을 따라 걸어 반폭 옮긴 점열 위에서 바로 목표점을 잡는다 (원·다항식 가정 없음).
 
     반환: (target(x, y), low_conf, centerline 점열) 또는 None.
@@ -767,9 +795,12 @@ def direct_target(left_pix, right_pix, status: str, half_mm: float, lookahead_mm
     for side, pix in (('L', left_pix), ('R', right_pix)):
         if status not in (side, 'BOTH') or pix is None:
             continue
-        w = walk_line(pix)
+        w = walk_line(pix, kink_deg=kink_deg)
         if w is None:
             continue
+        if far_start_mm > 0.0 and math.hypot(w[0, 0], w[0, 1]) > lookahead_mm + far_start_mm:
+            continue                     # 차 앞 가까운 부분 없이 멀리 떨어진 조각만 있는 선
+        w = smooth_polyline(w, smooth_win)
         # 두 선이 다 보이면 평균이 넓어진 차로를 알아서 반영하므로 보정은 한쪽 선만 보일 때만
         c = offset_polyline(w, side, half_mm, outer_extra_mm if status != 'BOTH' else 0.0)
         tgt, low = polyline_target(c, lookahead_mm)
@@ -1302,7 +1333,8 @@ class LaneFollower:
             direct = direct_target(_line_pixels_mm(bev_lane, left, cfg),
                                    _line_pixels_mm(bev_lane, right, cfg), det.status,
                                    p.lane_width_mm / 2.0, look, p.lane_width_mm,
-                                   p.corner_outer_extra_mm)
+                                   p.corner_outer_extra_mm, p.walk_smooth_pts,
+                                   p.walk_kink_deg, p.far_start_mm)
             out.debug['direct'] = direct[2] if direct is not None else None
         if cl is None and direct is not None:
             # 원·다항식이 안 돼도 목표점은 있다 (코너 출구처럼 선이 옆으로 누운 경우)

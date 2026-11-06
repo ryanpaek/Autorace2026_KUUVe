@@ -13,6 +13,7 @@
       --bags ~/bags/1106_*base_03 --t0 3 --t1 180 \\
       --cfg base: --cfg mem:memory_mm=600 --cfg mem_slow:memory_mm=600,preview_slowdown=0.25
   출력: 표 + --out 폴더에 설정별 프레임 CSV
+  기본값은 params.yaml의 lane_node 값 (차와 같은 설정). --params none이면 코드 기본값
 """
 
 import argparse
@@ -102,13 +103,24 @@ def find_corners(t, yaw_rate, v, k_min=0.8, min_len=1.0):
     return out
 
 
-def evaluate(bag, cfg, sets, speed, t0, t1, model=None, out_dir=None):
+def load_params_yaml(path):
+    """params.yaml의 lane_node 값 (차에서 쓰는 설정)을 LaneParams 사전으로."""
+    import yaml
+    with open(os.path.expanduser(path), encoding='utf-8') as f:
+        d = yaml.safe_load(f) or {}
+    d = (d.get('lane_node') or {}).get('ros__parameters') or {}
+    names = set(LaneParams().as_dict())
+    return {k: v for k, v in d.items() if k in names}
+
+
+def evaluate(bag, cfg, sets, speed, t0, t1, model=None, out_dir=None, base=None):
     pose = PoseIntegrator()
+    base = base or {}
     masker = None
     if model:
         from autorace_lane.seg_infer import SegMasker
         masker = SegMasker(os.path.expanduser(model))
-    fol = {n: LaneFollower(cfg, LaneParams.from_dict({**LaneParams().as_dict(), **d}),
+    fol = {n: LaneFollower(cfg, LaneParams.from_dict({**LaneParams().as_dict(), **base, **d}),
                            mask_fn=masker) for n, d in sets}
     rows = {n: [] for n, _ in sets}
     imu_t, imu_w, odom_t, odom_v = [], [], [], []
@@ -184,14 +196,18 @@ def main(argv=None):
     ap.add_argument('--t1', type=float, default=None, help='몇 초까지')
     ap.add_argument('--model', default=None)
     ap.add_argument('--out', default=None)
+    ap.add_argument('--params', default=os.path.join(os.path.dirname(__file__), '..', '..',
+                                                     'autorace_bringup', 'config', 'params.yaml'),
+                    help='차 설정 (lane_node 값을 기본으로 씀). none이면 코드 기본값')
     a = ap.parse_args(argv)
+    base = {} if a.params == 'none' else load_params_yaml(a.params)
     cfg = BevConfig.from_yaml(os.path.expanduser(a.bev))
     sets = [_cast_cfg(c) for c in (a.cfg or ['base:'])]
     bags = []
     for b in a.bags:
         bags += sorted(glob.glob(os.path.expanduser(b))) or [b]
     for bag in bags:
-        res, corners = evaluate(bag, cfg, sets, a.speed, a.t0, a.t1, a.model, a.out)
+        res, corners = evaluate(bag, cfg, sets, a.speed, a.t0, a.t1, a.model, a.out, base)
         print(f'\n== {bag}  (IMU 코너 {len(corners)}개: '
               + ', '.join(f'{tc:.1f}s{"L" if s > 0 else "R"}' for tc, s in corners) + ')')
         print(f'{"설정":14s} {"프레임":>6s} {"NONE%":>6s} {"hold%":>6s} {"mem%":>5s} {"low%":>5s} '
