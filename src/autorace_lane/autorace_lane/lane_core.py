@@ -204,6 +204,7 @@ class LaneParams:
     # 선 따라 걷기 보강 (11/06, 두 번째 코너)
     walk_smooth_pts: int = 7          # 걸은 점(40mm 간격)을 이 개수로 이동 평균 -> 매트 주름 흔들림 줄임. 1이면 끔
     walk_kink_deg: float = 0.0        # >0이면 120mm 사이 이만큼 넘게 꺾일 때 끊음 (3차선 입구용 35). 매트 이음매 어긋남도 끊어 코너가 늦어져서 기본 끔
+    pair_agree_ratio: float = 0.5     # 두 선 목표점 거리 < 이 비율 x 차로 폭이면 평균. 넘으면 긴 선 하나만
     far_start_mm: float = 250.0       # 선 조각이 lookahead+이 거리보다 멀리서 시작하면 안 씀. 0이면 끔
     # 시간 필터 / 게이트
     kappa_alpha: float = 0.5          # 곡률 명령 EMA (1.0 = 필터 없음)
@@ -796,7 +797,7 @@ def polyline_target(cpts: np.ndarray, lookahead_mm: float) -> Tuple[Tuple[float,
 
 def direct_target(left_pix, right_pix, status: str, half_mm: float, lookahead_mm: float,
                   lane_w_mm: float, outer_extra_mm: float = 0.0, smooth_win: int = 1,
-                  kink_deg: float = 0.0, far_start_mm: float = 0.0):
+                  kink_deg: float = 0.0, far_start_mm: float = 0.0, agree_ratio: float = 0.5):
     """보이는 선을 따라 걸어 반폭 옮긴 점열 위에서 바로 목표점을 잡는다 (원·다항식 가정 없음).
 
     반환: (target(x, y), low_conf, centerline 점열) 또는 None.
@@ -820,7 +821,7 @@ def direct_target(left_pix, right_pix, status: str, half_mm: float, lookahead_mm
         return None
     if len(cands) == 2:
         (ta, la, ca, na), (tb, lb, cb, nb) = cands
-        if math.hypot(ta[0] - tb[0], ta[1] - tb[1]) < 0.5 * lane_w_mm and not (la or lb):
+        if math.hypot(ta[0] - tb[0], ta[1] - tb[1]) < agree_ratio * lane_w_mm and not (la or lb):
             tgt = (0.5 * (ta[0] + tb[0]), 0.5 * (ta[1] + tb[1]))
             return tgt, False, ca if na >= nb else cb
         cands.sort(key=lambda c: (c[1], -c[3]))      # 끝까지 닿는 쪽, 더 긴 쪽 우선
@@ -1356,7 +1357,7 @@ class LaneFollower:
             direct = direct_target(lpix_mm, rpix_mm, det.status,
                                    p.lane_width_mm / 2.0, look, p.lane_width_mm,
                                    p.corner_outer_extra_mm, p.walk_smooth_pts,
-                                   p.walk_kink_deg, p.far_start_mm)
+                                   p.walk_kink_deg, p.far_start_mm, p.pair_agree_ratio)
             out.debug['direct'] = direct[2] if direct is not None else None
             if arc_on and det.status in ('L', 'R'):
                 at = self._lost_arc_target(det.status, pose, dist_mm, look)
