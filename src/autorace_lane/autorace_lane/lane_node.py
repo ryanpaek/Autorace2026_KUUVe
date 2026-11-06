@@ -3,6 +3,8 @@
 구독
   image_topic (sensor_msgs/Image 또는 .../compressed면 CompressedImage)
   imu_topic   (sensor_msgs/Imu) -- 헤딩 유지에 yaw 사용
+  odom_topic  (nav_msgs/Odometry) -- 차선 기억(memory_mm > 0)용 이동 거리
+  /route/preview (std_msgs/String, JSON) -- 미션이 보내는 도면 앞쪽 곡률 (route_ff_* > 0일 때)
   /lane/config (std_msgs/String, JSON) -- 미션이 구간별 모드·속도·차로 폭을 보냄
 발행
   /lane/cmd_vel (geometry_msgs/Twist) -- linear.x = v, angular.z = v * kappa
@@ -27,6 +29,7 @@ import cv2
 import numpy as np
 import rclpy
 from geometry_msgs.msg import Twist
+from nav_msgs.msg import Odometry
 from rcl_interfaces.msg import ParameterDescriptor, SetParametersResult
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
@@ -34,7 +37,7 @@ from sensor_msgs.msg import CompressedImage, Image, Imu
 from std_msgs.msg import String
 
 from autorace_lane.lane_core import (MODES, BevConfig, LaneFollower, LaneParams,
-                                     draw_debug)
+                                     PoseIntegrator, draw_debug)
 
 
 def yaw_from_quaternion(q) -> float:
@@ -68,6 +71,8 @@ class LaneNode(Node):
         # --- 노드 파라미터 ---
         self.declare_parameter('image_topic', '/camera/color/image_raw')
         self.declare_parameter('imu_topic', '/imu')
+        self.declare_parameter('odom_topic', '/odom')
+        self.declare_parameter('route_preview_timeout_sec', 0.5)
         self.declare_parameter('bev_config', '')
         self.declare_parameter('require_calibration', True)
         self.declare_parameter('base_speed', 0.30)      # m/s, 미션이 덮어씀
@@ -95,6 +100,8 @@ class LaneNode(Node):
                                      mask_fn=self._load_masker())
 
         self.yaw = None
+        self.pose = PoseIntegrator()
+        self.route_preview = None            # (받은 시각, dict)
         self.frame_count = 0
         self.last_image_time = None
         self._last_warn = 0.0
@@ -108,6 +115,9 @@ class LaneNode(Node):
         self.create_subscription(Imu, self.get_parameter('imu_topic').value,
                                  self._on_imu, qos_profile_sensor_data)
         self.create_subscription(String, '/lane/config', self._on_config, 10)
+        self.create_subscription(Odometry, self.get_parameter('odom_topic').value,
+                                 self._on_odom, qos_profile_sensor_data)
+        self.create_subscription(String, '/route/preview', self._on_preview, 10)
 
         self.cmd_pub = self.create_publisher(Twist, '/lane/cmd_vel', 10)
         self.status_pub = self.create_publisher(String, '/lane/status', 10)
@@ -182,6 +192,18 @@ class LaneNode(Node):
     # --- 콜백 ---------------------------------------------------------------
     def _on_imu(self, msg: Imu):
         self.yaw = yaw_from_quaternion(msg.orientation)
+        self.pose.on_imu_yaw(self.yaw)
+
+    def _on_odom(self, msg: Odometry):
+        p = msg.pose.pose.position
+        self.pose.on_odom(p.x, p.y, yaw_from_quaternion(msg.pose.pose.orientation),
+                          msg.twist.twist.linear.x)
+
+    def _on_preview(self, msg: String):
+        try:
+            self.route_preview = (time.monotonic(), json.loads(msg.data))
+        except json.JSONDecodeError:
+            pass
 
     def _on_compressed(self, msg: CompressedImage):
         bgr = cv2.imdecode(np.frombuffer(msg.data, np.uint8), cv2.IMREAD_COLOR)
@@ -204,7 +226,14 @@ class LaneNode(Node):
             return
         speed = (self.speed_override if self.speed_override is not None
                  else self.get_parameter('base_speed').value)
-        out = self.follower.process(bgr, yaw=self.yaw, speed=speed)
+        rp = self.route_preview
+        fresh = (rp is not None and time.monotonic() - rp[0]
+                 <= self.get_parameter('route_preview_timeout_sec').value)
+        self.follower.route_k = rp[1].get('k') if fresh else None
+        if fresh:
+            self.follower.route_step_mm = float(rp[1].get('step_mm', 100.0))
+        out = self.follower.process(bgr, yaw=self.yaw, speed=speed, pose=self.pose.pose,
+                                    dist_mm=self.pose.dist_mm)
         v = 0.0
         if speed > 0.0 and out.speed_scale > 0.0:
             v = max(speed * out.speed_scale, self.get_parameter('min_speed').value)

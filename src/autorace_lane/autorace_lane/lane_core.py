@@ -221,6 +221,24 @@ class LaneParams:
     bar_row_ratio: float = 0.3
     # 속도
     curve_slowdown: float = 0.3       # |kappa| = kappa_max일 때 속도를 30% 줄인다
+    # --- 11/06 고도화 (전부 기본 꺼짐: 0이면 예전과 똑같이 달린다) ---
+    # 차선 기억: 최근에 본 중앙선 점을 odom+IMU로 옮겨 쌓아 두고, 선을 놓치거나(lost)
+    # 중앙선이 lookahead까지 안 닿을 때(low_conf) 그 점들로 목표점을 잡는다.
+    # 값 = 기억할 주행 거리(mm). 권장 600. 위치(pose)가 안 들어오면 자동으로 안 쓴다.
+    memory_mm: float = 0.0
+    memory_ring_mm: float = 60.0
+    memory_on_low_conf: bool = True   # False면 완전히 놓쳤을 때만 기억을 쓴다      # 목표점: lookahead ± 이 거리 안의 기억 점 중앙값
+    # 도면 곡률 미리 넣기 (미션 노드가 /route/preview로 보냄). 0이면 끔.
+    route_ff_weight: float = 0.0      # 차선이 보일 때 도면 곡률 섞는 비율 (권장 0.3)
+    route_ff_weight_lost: float = 0.0  # 놓쳤을 때(hold) 비율 (권장 0.8)
+    route_ff_preview_mm: float = 300.0  # 앞바퀴에서 이만큼 앞의 도면 곡률을 쓴다
+    route_ff_gate: float = 0.8        # 두 선이 다 잘 보이는데 도면과 이만큼(1/m) 넘게 다르면 도면 무시
+    # 코너 들어가기 전 감속: 앞에 보이는(또는 도면상) 곡률이 preview_kappa_ref면 이 비율만큼 감속
+    preview_slowdown: float = 0.0     # 권장 0.25
+    preview_kappa_ref: float = 1.5
+    # 속도에 따라 lookahead 늘리기: lookahead = lookahead_mm + 이 값 * (속도 - 0.3). 상한 750
+    lookahead_per_mps: float = 0.0    # 권장 500 (0.4 m/s에서 +50mm)
+    lookahead_max_mm: float = 750.0
 
     @classmethod
     def from_dict(cls, d: dict) -> 'LaneParams':
@@ -269,10 +287,14 @@ class LaneOutput:
     low_conf: bool = False              # 중앙선이 lookahead까지 안 닿음
     stoplines_mm: List[float] = field(default_factory=list)  # 앞바퀴 -> 모든 흰 가로선 (가까운 순)
     crosswalk_lines_mm: List[float] = field(default_factory=list)  # 그중 횡단보도 막대가 뒤따르는 선
+    mem_pts: int = 0                    # 기억 점 수 (차선 기억이 켜졌을 때)
+    ff_kappa: Optional[float] = None    # 도면 곡률 (왼쪽 +, 1/m). 미리 넣기가 켜졌을 때
+    lookahead_mm: Optional[float] = None
     debug: dict = field(default_factory=dict)
 
     def status_dict(self) -> dict:
         d = {k: getattr(self, k) for k in (
+            'mem_pts', 'ff_kappa', 'lookahead_mm',
             'kappa', 'speed_scale', 'status', 'source', 'offset_mm',
             'heading_rad', 'path_kappa', 'low_conf', 'stoplines_mm',
             'crosswalk_lines_mm')}
@@ -1043,6 +1065,114 @@ def detect_stoplines(bev_white: np.ndarray, center_col: float, cfg: BevConfig,
 
 
 # ---------------------------------------------------------------------------
+# 차량 위치 적분 / 차선 기억
+# ---------------------------------------------------------------------------
+class PoseIntegrator:
+    """odom 이동 거리 + IMU 방향으로 평면 위치를 쌓는다 (mm, rad).
+
+    11/02 캘리브레이션: odom 거리는 정확(1.006), odom 방향은 조향 중 틀릴 수 있어 방향은 IMU.
+    IMU가 없으면 odom 방향을 쓴다.
+    """
+
+    def __init__(self):
+        self.x = self.y = 0.0
+        self.yaw: Optional[float] = None
+        self.imu_yaw: Optional[float] = None
+        self._last_xy = None
+        self.dist_mm = 0.0
+
+    def on_imu_yaw(self, yaw: float) -> None:
+        self.imu_yaw = float(yaw)
+
+    def on_odom(self, x_m: float, y_m: float, odom_yaw: float, v: float = 1.0) -> None:
+        yaw = self.imu_yaw if self.imu_yaw is not None else odom_yaw
+        if self._last_xy is not None:
+            ds = 1000.0 * math.hypot(x_m - self._last_xy[0], y_m - self._last_xy[1])
+            if v < 0.0:
+                ds = -ds
+            self.x += ds * math.cos(yaw)
+            self.y += ds * math.sin(yaw)
+            self.dist_mm += abs(ds)
+        self._last_xy = (x_m, y_m)
+        self.yaw = yaw
+
+    @property
+    def pose(self) -> Optional[Tuple[float, float, float]]:
+        if self.yaw is None:
+            return None
+        return self.x, self.y, self.yaw
+
+
+def vehicle_to_world(pts: np.ndarray, pose) -> np.ndarray:
+    """차량 좌표(x 오른쪽+, y 전방+, mm) -> 세계 좌표. pose = (X, Y, yaw 반시계+)."""
+    X, Y, yaw = pose
+    c, s = math.cos(yaw), math.sin(yaw)
+    # 전방 = (c, s), 오른쪽 = (s, -c)
+    return np.stack([X + pts[:, 1] * c + pts[:, 0] * s,
+                     Y + pts[:, 1] * s - pts[:, 0] * c], axis=1)
+
+
+def world_to_vehicle(pts: np.ndarray, pose) -> np.ndarray:
+    X, Y, yaw = pose
+    c, s = math.cos(yaw), math.sin(yaw)
+    dx, dy = pts[:, 0] - X, pts[:, 1] - Y
+    return np.stack([dx * s - dy * c, dx * c + dy * s], axis=1)
+
+
+class LaneMemory:
+    """최근 중앙선 점(세계 좌표)을 주행 거리 기준으로 보관한다."""
+
+    def __init__(self):
+        self.items = []          # [(dist_mm, pts_world)]
+
+    def clear(self) -> None:
+        self.items = []
+
+    def add(self, pts_vehicle: np.ndarray, pose, dist_mm: float, step_mm: float = 30.0) -> None:
+        if pts_vehicle is None or len(pts_vehicle) < 2:
+            return
+        p = pts_vehicle[np.hypot(pts_vehicle[:, 0], pts_vehicle[:, 1]) < 1300.0]
+        if len(p) < 2:
+            return
+        # 점 간격을 일정하게 (원호 샘플·보행 점열 모두)
+        seg = np.hypot(*np.diff(p, axis=0).T)
+        s = np.r_[0.0, np.cumsum(seg)]
+        if s[-1] < step_mm:
+            return
+        q = np.arange(0.0, s[-1], step_mm)
+        p = np.stack([np.interp(q, s, p[:, 0]), np.interp(q, s, p[:, 1])], axis=1)
+        self.items.append((dist_mm, vehicle_to_world(p, pose)))
+
+    def prune(self, dist_mm: float, keep_mm: float) -> None:
+        self.items = [it for it in self.items if dist_mm - it[0] <= keep_mm]
+
+    def points(self, pose) -> Optional[np.ndarray]:
+        if not self.items:
+            return None
+        return world_to_vehicle(np.vstack([it[1] for it in self.items]), pose)
+
+
+def memory_target(pts: np.ndarray, lookahead_mm: float, ring_mm: float):
+    """기억 점(차량 좌표) 중 기준점에서 lookahead 거리 근처, 앞쪽 점들의 중앙값.
+
+    반환 ((x, y), low_conf) 또는 None. 고리에 점이 없으면 앞쪽 가장 먼 점(0.6L 이상)."""
+    if pts is None or len(pts) == 0:
+        return None
+    fwd = pts[pts[:, 1] > 50.0]
+    if len(fwd) == 0:
+        return None
+    r = np.hypot(fwd[:, 0], fwd[:, 1])
+    ring = fwd[np.abs(r - lookahead_mm) <= ring_mm]
+    if len(ring) >= 3:
+        m = np.median(ring, axis=0)
+        return (float(m[0]), float(m[1])), False
+    i = int(np.argmax(r))
+    if r[i] >= 0.6 * lookahead_mm:
+        return (float(fwd[i, 0]), float(fwd[i, 1])), True
+    return None
+
+
+# ---------------------------------------------------------------------------
 # 상태를 가진 추종기
 # ---------------------------------------------------------------------------
 class LaneFollower:
@@ -1061,6 +1191,11 @@ class LaneFollower:
         self.mode = 'normal'
         self.fit_order_override: Optional[int] = None
         self.yaw_ref: Optional[float] = None
+        self.memory = LaneMemory()
+        # 도면 곡률 미리보기: 앞바퀴에서 0, step, 2*step ... mm 앞의 곡률 (왼쪽 +, 1/m).
+        # 노드가 매 프레임 넣는다 (오래되면 None).
+        self.route_k: Optional[List[float]] = None
+        self.route_step_mm: float = 100.0
         self.reset()
 
     # --- 상태 ---------------------------------------------------------------
@@ -1076,6 +1211,8 @@ class LaneFollower:
         self.last_good_kappa = 0.0
         self.hold_yaw_ref = None
         self._last_offset = 0.0
+        if hasattr(self, 'memory'):
+            self.memory.clear()
 
     def set_mode(self, mode: str, yaw: Optional[float] = None,
                  yaw_ref: Optional[float] = None,
@@ -1092,7 +1229,8 @@ class LaneFollower:
 
     # --- 메인 ---------------------------------------------------------------
     def process(self, bgr: np.ndarray, yaw: Optional[float] = None,
-                speed: float = 0.3) -> LaneOutput:
+                speed: float = 0.3, pose=None, dist_mm: Optional[float] = None) -> LaneOutput:
+        """pose = (X mm, Y mm, yaw rad 반시계+), dist_mm = 누적 주행 거리. 차선 기억에만 쓴다."""
         cfg, p = self.cfg, self.p
         if bgr.shape[1] != cfg.image_width or bgr.shape[0] != cfg.image_height:
             bgr = cv2.resize(bgr, (cfg.image_width, cfg.image_height),
@@ -1106,11 +1244,17 @@ class LaneFollower:
                 lane, white = self.mask_fn(bgr)
         bev_lane = cfg.warp(lane)
         bev_white = cfg.warp(white)
-        return self.process_bev(bev_lane, bev_white, yaw=yaw, speed=speed)
+        return self.process_bev(bev_lane, bev_white, yaw=yaw, speed=speed, pose=pose,
+                                dist_mm=dist_mm)
 
     def process_bev(self, bev_lane: np.ndarray, bev_white: Optional[np.ndarray] = None,
-                    yaw: Optional[float] = None, speed: float = 0.3) -> LaneOutput:
+                    yaw: Optional[float] = None, speed: float = 0.3,
+                    pose=None, dist_mm: Optional[float] = None) -> LaneOutput:
         cfg, p = self.cfg, self.p
+        look = p.lookahead_mm
+        if p.lookahead_per_mps:
+            look = float(np.clip(p.lookahead_mm + p.lookahead_per_mps * (speed - 0.3),
+                                 min(p.lookahead_mm, 450.0), p.lookahead_max_mm))
         if p.dilate_px > 0:
             k = 2 * int(p.dilate_px) + 1
             bev_lane = cv2.dilate(bev_lane, np.ones((k, k), np.uint8))
@@ -1157,7 +1301,7 @@ class LaneFollower:
                 and self.mode not in ('zigzag', 'heading')):
             direct = direct_target(_line_pixels_mm(bev_lane, left, cfg),
                                    _line_pixels_mm(bev_lane, right, cfg), det.status,
-                                   p.lane_width_mm / 2.0, p.lookahead_mm, p.lane_width_mm,
+                                   p.lane_width_mm / 2.0, look, p.lane_width_mm,
                                    p.corner_outer_extra_mm)
             out.debug['direct'] = direct[2] if direct is not None else None
         if cl is None and direct is not None:
@@ -1181,7 +1325,7 @@ class LaneFollower:
                 tgt, low = direct[0], direct[1]
                 k_r = pp_kappa_with_latency(tgt, self.kappa_cmd, speed, p.latency_comp_sec)
             else:
-                k_r, tgt, low = pure_pursuit(cl, p.lookahead_mm, -p.target_offset_mm)
+                k_r, tgt, low = pure_pursuit(cl, look, -p.target_offset_mm)
                 k_r = pp_kappa_with_latency(tgt, self.kappa_cmd, speed, p.latency_comp_sec)
             out.target_mm, out.low_conf = tgt, low
             # 중앙 점프 게이트: 목표점 횡위치가 갑자기 튀면 그 프레임은 버린다
@@ -1200,6 +1344,28 @@ class LaneFollower:
                     # 차로 방향(월드 yaw)을 기억해 두었다가 놓치면 그 방향을 붙잡는다
                     self.hold_yaw_ref = wrap_angle(yaw + out.heading_rad)
 
+        # 차선 기억: 좋은 프레임의 중앙선을 쌓고, 놓쳤거나 짧을 때 꺼내 쓴다
+        use_mem = p.memory_mm > 0.0 and pose is not None and dist_mm is not None
+        if use_mem:
+            if kappa_raw is not None and source == 'lane' and cl is not None:
+                self.memory.add(direct[2] if direct is not None else cl.pts_mm, pose, dist_mm)
+            self.memory.prune(dist_mm, p.memory_mm)
+            need = (self.mode not in ('heading', 'zigzag')
+                    and (kappa_raw is None and source != 'coast'
+                         or (p.memory_on_low_conf and source == 'lane' and out.low_conf)))
+            if need:
+                mt = memory_target(self.memory.points(pose), look, p.memory_ring_mm)
+                if mt is not None and (kappa_raw is None or not mt[1]):
+                    tgt, low = mt
+                    k_r = pp_kappa_with_latency(tgt, self.kappa_cmd, speed, p.latency_comp_sec)
+                    kappa_raw, source = -k_r, 'memory'
+                    out.target_mm, out.low_conf = tgt, low
+                    self.prev_target_x = tgt[0]
+                    if yaw is not None and self.lost_frames == 0 and out.heading_rad is not None:
+                        self.hold_yaw_ref = wrap_angle(yaw + out.heading_rad)
+            out.mem_pts = int(sum(len(it[1]) for it in self.memory.items))
+        out.lookahead_mm = look
+
         if self.mode == 'heading' and yaw is not None and self.yaw_ref is not None:
             kappa_raw, source = self._heading_kappa(yaw, self.yaw_ref, speed), 'heading'
         elif source == 'coast':
@@ -1216,6 +1382,19 @@ class LaneFollower:
             else:
                 source = 'hold'
                 kappa_raw = self.last_good_kappa * (p.lost_decay ** self.lost_frames)
+        # 도면 곡률 미리 넣기
+        k_ff = self._route_kappa(p.route_ff_preview_mm + speed * p.latency_comp_sec * 1000.0)
+        if k_ff is not None and (p.route_ff_weight > 0.0 or p.route_ff_weight_lost > 0.0):
+            out.ff_kappa = k_ff
+            w = 0.0
+            if source in ('lane', 'memory'):
+                w = p.route_ff_weight
+                if (out.status == 'BOTH' and not out.low_conf
+                        and abs(k_ff - kappa_raw) > p.route_ff_gate):
+                    w = 0.0                   # 차선이 확실한데 도면과 크게 다르면 위치 추정이 틀린 것
+            elif source == 'hold':
+                w = p.route_ff_weight_lost
+            kappa_raw = kappa_raw + w * (k_ff - kappa_raw)
         out.source = source
 
         # 곡률 명령 필터: EMA -> 변화율 제한 -> 클램프
@@ -1226,6 +1405,16 @@ class LaneFollower:
         out.kappa = self.kappa_cmd
         if source != 'stop':
             out.speed_scale = 1.0 - p.curve_slowdown * min(1.0, abs(out.kappa) / p.kappa_max)
+            if p.preview_slowdown > 0.0:
+                # 꺾기 전에 감속: 앞에 보이는 원호 곡률, 도면상 1 m 안 최대 곡률
+                kp = 0.0
+                if cl is not None and cl.circle is not None:
+                    kp = 1000.0 / max(cl.circle[2], 1.0)
+                if self.route_k:
+                    n = int(1000.0 / self.route_step_mm) + 1
+                    kp = max(kp, max(abs(k) for k in self.route_k[:n]))
+                out.speed_scale = min(out.speed_scale, 1.0 - p.preview_slowdown
+                                      * min(1.0, kp / max(p.preview_kappa_ref, 1e-3)))
 
         # 정지선 (흰색 마스크 기준, 차로 안쪽만)
         if bev_white is not None:
@@ -1286,6 +1475,15 @@ class LaneFollower:
         if side != det.status:
             det.left_x0, det.right_x0 = (x0, None) if side == 'L' else (None, x0)
             det.status = side
+
+    def _route_kappa(self, d_mm: float, half_win_mm: float = 150.0) -> Optional[float]:
+        """앞바퀴에서 d_mm 앞 도면 곡률 (앞뒤 half_win 평균 -> 코너 시작에서 계단 대신 경사)."""
+        if not self.route_k:
+            return None
+        ks = np.asarray(self.route_k, float)
+        ds = np.arange(len(ks)) * self.route_step_mm
+        q = np.linspace(d_mm - half_win_mm, d_mm + half_win_mm, 7)
+        return float(np.mean(np.interp(q, ds, ks)))
 
     def _heading_kappa(self, yaw: float, yaw_ref: float, speed: float) -> float:
         """yaw_ref를 향하도록 하는 곡률 (왼쪽 +). omega = -kp*err, kappa = omega/v."""

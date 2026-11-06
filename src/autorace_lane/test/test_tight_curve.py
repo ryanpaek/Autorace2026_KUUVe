@@ -74,8 +74,13 @@ class Track:
         return float((_dist_outer(X, Y) - _dist_inner(X, Y))[0] / 2.0)
 
 
-def drive(mirror=False, v=0.25, x0=0.0, params=None, delay_frames=0):
-    """delay_frames: 명령이 바퀴에 반영되기까지의 지연 (프레임, 1프레임 = 40ms)."""
+def drive(mirror=False, v=0.25, x0=0.0, params=None, delay_frames=0, blackout=None,
+          route_k=None):
+    """delay_frames: 명령이 바퀴에 반영되기까지의 지연 (프레임, 1프레임 = 40ms).
+
+    blackout: (시작 프레임, 프레임 수) 동안 카메라에 선이 안 보이게 한다 (조명·반사로 놓친 상황).
+    route_k: 함수 (x, y) -> 앞바퀴 기준 앞쪽 곡률 리스트. 도면 미리보기 시험용.
+    """
     from collections import deque
     q = deque([0.0] * delay_frames)
     cfg = _cfg()
@@ -84,9 +89,17 @@ def drive(mirror=False, v=0.25, x0=0.0, params=None, delay_frames=0):
     x, y, hd, dt = x0, -1200.0, 0.0, 1.0 / 25.0
     errs = []
     sign = 1.0 if mirror else -1.0     # 반전 장면이면 왼쪽 곡선이므로 곡률 부호도 반전
-    for _ in range(500):
+    dist = 0.0
+    for i in range(500):
         bev = tr.render(x, y, hd, mirror)
-        out = f.process_bev(bev.copy(), bev.copy(), speed=v)
+        if blackout and blackout[0] <= i < blackout[0] + blackout[1]:
+            bev[:] = 0
+        # 차가 보는 세계 기준 위치 (반전 장면이면 세계도 좌우 반전)
+        pose = ((-x if mirror else x), y, (math.pi / 2 + hd) if mirror else (math.pi / 2 - hd))
+        f.route_k = route_k(x, y) if route_k else None
+        out = f.process_bev(bev.copy(), bev.copy(), speed=v, yaw=pose[2], pose=pose,
+                            dist_mm=dist)
+        dist += v * 1000.0 * dt
         if out.source == 'stop':
             return False, errs
         q.append(out.kappa)
@@ -136,3 +149,24 @@ def test_single_line_corner_center(which):
     # 안쪽 선이면 중심이 바깥(왼쪽 위)으로, 바깥 선이면 안쪽(오른쪽 아래)으로 옮겨진다
     moved_out = circ[0] < c[0]
     assert moved_out == (which == 'inner')
+
+
+def _blackout_start():
+    """코너 진입 직후(안쪽 선이 시야에서 빠지기 시작할 때) 프레임 번호."""
+    return 70
+
+
+@pytest.mark.parametrize('mirror', [False, True], ids=['right_curve', 'left_curve'])
+def test_memory_survives_corner_blackout(mirror):
+    """코너 한가운데서 0.6초 동안 선이 안 보여도 기억한 중앙선으로 계속 돈다."""
+    bo = (_blackout_start(), 15)
+    ok_m, errs_m = drive(mirror=mirror, blackout=bo, params=dict(memory_mm=600.0))
+    assert ok_m, f'기억 켜고도 정지 (최대 횡오차 {max(map(abs, errs_m)):.0f}mm)'
+    assert max(map(abs, errs_m)) < 200.0
+
+
+def test_memory_better_than_hold_in_blackout():
+    bo = (_blackout_start(), 15)
+    _, errs_h = drive(blackout=bo)
+    _, errs_m = drive(blackout=bo, params=dict(memory_mm=600.0))
+    assert max(map(abs, errs_m)) <= max(map(abs, errs_h)) + 5.0

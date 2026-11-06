@@ -130,6 +130,8 @@ class MissionNode(Node):
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.cfg_pub = self.create_publisher(String, '/lane/config', 10)
         self.state_pub = self.create_publisher(String, '/mission/state', 10)
+        # 차선 노드의 도면 곡률 미리 넣기용: 앞바퀴에서 0~1300mm 앞 곡률 (왼쪽 +, 1/m)
+        self.preview_pub = self.create_publisher(String, '/route/preview', 10)
         self.create_timer(1.0 / float(self.get_parameter('tick_hz').value), self._tick)
 
     # --- 입력 ---------------------------------------------------------------
@@ -236,6 +238,11 @@ class MissionNode(Node):
                 out.linear.x = max(-vmax, min(vmax, tw.linear.x))
                 out.angular.z = max(-wmax, min(wmax, tw.angular.z))
         self.cmd_pub.publish(out)
+        if self.route_active and inp.route_s is not None:
+            step = 100.0
+            ks = [round(self.route.curvature(inp.route_s + i * step), 4) for i in range(14)]
+            self.preview_pub.publish(String(data=json.dumps(
+                {'s': round(inp.route_s), 'step_mm': step, 'k': ks})))
 
         state = {'state': self.fsm.state, 'sub': self.fsm.sub, 'source': cmd.source,
                  'fork_choice': self.fsm.fork_choice, 'dist_mm': round(self.dist_mm),
