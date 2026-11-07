@@ -57,15 +57,20 @@ mission_node ──/mission/state──▶ obstacle_node (m7_link.py)
 | FSM이 섬 끝 30 cm 앞에서 M2로 넘어감 (회피는 섬 끝 30 cm 뒤에 끝남) | M7은 `m7_done`으로 끝냄. 안 오면 섬 끝 + 50 cm에서 강제로 넘기고 회피 노드를 끔 |
 | 갈림길 방향 | FSM 투표 결과를 `/fork_direction`으로. 끝까지 못 읽으면 회피가 끝난 차로를 M2가 그대로 씀 (`fork_from_m7_exit`) |
 | 회피 노드가 켜지기 전 명령 | M7이어도 회피 노드가 실행 중(`m7_active`)일 때만 그 명령을 쓰고, 그 전엔 차선 주행 |
+| 회피 노드가 도중에 멈춤 (Ctrl+C·죽음) | 단독 시험에선 `cmd_mux`의 `failsafe_hold`가 막지만 팀 스택은 `cmd_mux`를 안 씀 → `m7_link`가 `m7_hold`를 내고 FSM이 정지. 제어를 잡았다가 `done` 없이 놓으면 즉시, `/avoid/active`가 0.5초 끊기면 정지. 풀려면 `/mission/set_state`로 다른 상태 |
 
 설정은 `autorace_bringup/config/params.yaml`의 `obstacle_node: m7_*`, `mission_node: m7_*`.
 상태 보기: `ros2 topic echo /obstacle/state` → `m7_phase`(idle→armed→running→done), `m7_how`(line/route/distance), `m7_section_m`.
+
+**옮겨 갈 때 주의**: 단독 시험(s4~s6)에서 따로 켠 브리지와 `s6_avoid_run`(`cmd_mux` 포함)은 팀 스택을 켜기 전에 반드시 끈다.
+`autorace.launch.py`도 브리지를 켜므로, 그대로 두면 브리지가 둘, `/cmd_vel` 발행자가 둘이 된다.
 
 **실측해서 맞출 값**
 - 3차선 한 칸 폭: 이 패키지 `lane_width`(0.55)와 팀 FSM `three_lane_width_mm`(500)을 같은 실측값으로.
   0.50인데 0.55로 두면 바깥 차로 중심을 5 cm 바깥으로 잡는다 (차 바깥 끝 ~ 노란 선 8 cm). 정렬 보정은 폭 비율 오차를 못 고친다.
 - `autorace.launch.py`의 브리지는 `wheelbase`를 넘기지 않아 0.2로 돈다 (캘리브레이션 유효값 0.222).
-  회피 노드는 곡률(angular.z = v × κ)로 명령하므로 브리지 축거가 틀리면 실제 회전이 약 11% 커진다.
+  브리지는 조향각 = atan(축거 × angular.z / v)로 바꾸므로, 실제(0.222)보다 작은 0.2로 계산하면 **덜 꺾여** 회전 반경이 약 11% 커진다
+  (곡률은 약 10% 작음). `autorace_calib`의 `drive_test steer`로 실제/기대 비율을 재서 정할 것.
 
 **옆 여유 값에 대해 (시뮬레이션 확인)**: `side_margin`을 0.05~0.10으로 바꿔도 무작위 배치 140건 결과·최소 간격이 같았다
 (차로 판단에만 쓰이고 지나가는 간격은 차로 폭이 정함). `clear_back`을 0.05/0.10/0.15로 올리면 최소 간격이 4.6/7.9/5.3 cm,

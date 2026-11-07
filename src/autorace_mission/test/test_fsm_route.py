@@ -130,3 +130,16 @@ def test_m2_uses_avoid_exit_lane_when_sign_unread():
 def test_m7_external_off_keeps_old_behaviour():
     route, fsm, entered, stops = run_lap()
     assert entered['M2_FORK'] == pytest.approx(route.points['m7_island_tip'] - 300, abs=20)
+
+
+def test_m7_external_hold_stops():
+    """회피 노드가 도중에 멈추면(m7_hold) 차선 주행으로 넘기지 않고 정지."""
+    fsm = MissionFSM({'start_state': 'M7_OBSTACLE', 'm7_external_avoid': True,
+                      'route_points': {'m7_island_tip': 17973.0}})
+    run = fsm.step(Inputs(t=0.0, dist_mm=0.0, route_s=14000.0, obstacle={'m7_active': True}))
+    assert run.source == 'obstacle'
+    held = fsm.step(Inputs(t=0.1, dist_mm=20.0, route_s=14020.0,
+                           obstacle={'m7_active': False, 'm7_hold': True}))
+    assert held.source == 'stop' and fsm.state == 'M7_OBSTACLE'
+    lost = fsm.step(Inputs(t=0.2, dist_mm=20.0, route_s=14020.0, obstacle={'m7_active': False}))
+    assert lost.source == 'lane'                   # hold가 없으면 예전대로 (코너 구간 등)

@@ -92,7 +92,7 @@ ros2 topic pub --once /mission/set_state std_msgs/msg/String "{data: M7_OBSTACLE
 `start_state:=M7_OBSTACLE`로 시작하면 도면 위치가 안 맞춰져서 회피가 약 1.4 m 늦게 켜진다. 위처럼 `set_state`를 쓸 것.
 
 ```bash
-ros2 topic echo /obstacle/state          # m7_phase: idle→armed→running→done, m7_how: line/route/distance, m7_section_m
+ros2 topic echo /obstacle/state          # m7_phase: idle→armed→running→done, m7_how: line/route/distance, m7_section_m, m7_hold
 ros2 topic echo /mission/state           # state, source(lane/obstacle), fork_choice
 ros2 topic echo /avoid/state             # x, y, target(차로), align_deg, align_dy_cm
 ```
@@ -115,6 +115,11 @@ ros2 topic pub --once /mission/estop std_msgs/msg/Bool "{data: true}"      # 본
 ros2 topic pub --once /avoid/enable std_msgs/msg/Bool "{data: false}"      # 회피만 중단
 ros2 topic pub --once /avoid/active std_msgs/msg/Bool "{data: false}"      # 단독 시험에서 cmd_mux 정지 풀기
 ```
+
+- 본 주행 중 회피 노드가 끝나기 전에 멈추면(Ctrl+C·죽음) FSM이 정지를 유지한다 (`/obstacle/state`의 `m7_hold: true`).
+  다시 하려면: ① `set_state`로 `"{data: WAIT_START}"` (정지, 연결 초기화) ② 회피 노드를 다시 켜고 차를 시작선 30 cm 앞에 놓기
+  ③ `"{data: M7_OBSTACLE}"` (바로 출발). M7 상태에서 곧바로 `M7_OBSTACLE`을 다시 보내면 정지가 안 풀린다.
+  구간을 건너뛰려면 `"{data: M2_FORK}"`.
 
 - 실행 중인 창에서 `Ctrl+C` (정지 명령을 보내고 종료). 그래도 움직이면 T1 드라이버 `Ctrl+C` 또는 본체 전원.
 - ⑤단계부터는 차를 손으로 잡을 수 있는 거리에서.

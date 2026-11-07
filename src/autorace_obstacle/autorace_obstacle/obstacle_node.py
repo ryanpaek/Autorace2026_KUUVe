@@ -65,7 +65,8 @@ class ObstacleNode(Node):
         self.cmd_pub = self.create_publisher(Twist, '/obstacle/cmd_vel', 10)
         # M7 연결
         self.create_subscription(String, '/lane/status', self._on_lane, 10)
-        self.create_subscription(Bool, '/avoid/active', lambda m: self.link.on_avoid_active(m.data), 10)
+        self.create_subscription(Bool, '/avoid/active',
+                                 lambda m: self.link.on_avoid_active(m.data, time.monotonic()), 10)
         self.create_subscription(Bool, '/avoid/done', lambda m: self.link.on_avoid_done(m.data), 10)
         self.create_subscription(String, '/avoid/state', self._on_avoid_state, 10)
         self.enable_pub = self.create_publisher(Bool, '/avoid/enable', 10)
