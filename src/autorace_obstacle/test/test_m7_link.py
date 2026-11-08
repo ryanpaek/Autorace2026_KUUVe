@@ -233,3 +233,47 @@ def test_hold_released_by_leaving_m7_and_reentering():
     acts = drive(link, 13289.0, 13700.0, t0=t + 3.0)                   # set_state M7: s = 시작선 - 300
     assert link.state()['m7_hold'] is False
     assert [a for _, a in acts if a[0] == 'enable']
+
+
+# --- 3차선 입구에서 인식이 흔들릴 때 (11/08 실차) ----------------------------------
+def test_spurious_lines_do_not_keep_pushing_start_back():
+    """시작선을 본 뒤에도 입구 사선·점선 끝을 계속 '앞 400~500 mm 흰 선'으로 읽는 경우.
+
+    고치기 전: 볼 때마다 기준을 새로 잡아 '아직 시작선 앞'으로 계속 미뤄져 켜지지 않았다.
+    """
+    link = M7Link()
+    start = 13589.0
+    acts = []
+    for k in range(120):                       # 시작선 300 mm 앞에서 10 mm씩 1.2 m
+        s = start - 300.0 + 10.0 * k
+        lines = []
+        if start - s > 250.0:
+            lines.append(start - s)            # 진짜 시작선 (가까워지면 화면 아래로 사라짐)
+        lines.append(420.0 + 80.0 * (k % 2))   # 가짜 선: 늘 400~500 mm 앞에 보임
+        lines.sort()
+        for a in link.update(k * 0.05, mission(s, dist=s), {'stoplines_mm': lines}):
+            acts.append((s, a))
+    en = [s for s, a in acts if a[0] == 'enable']
+    assert en and abs(en[0] - start) <= 30.0, en[:1]
+
+
+def test_wild_heading_is_ignored():
+    """입구에서 차선 방향을 ±64°로 잘못 읽어도 시작선에서 켠다 (30 cm 미루지 않음)."""
+    link = M7Link()
+
+    def lane(s):
+        k = int(s) // 20
+        return {'status': 'BOTH' if k % 2 else 'R',
+                'heading_rad': math.radians(64.0 if k % 2 else -64.0)}
+
+    acts = drive(link, 13500.0, 14000.0, lane=lane)
+    en = [s for s, a in acts if a[0] == 'enable']
+    assert en and en[0] < 13589 + 20
+    assert link.state()['m7_heading_forced'] is False
+
+
+def test_state_reports_position():
+    link = M7Link()
+    drive(link, 13289.0, 13400.0)
+    st = link.state()
+    assert st['m7_pos_mm'] is not None and -300 <= st['m7_pos_mm'] <= 0
