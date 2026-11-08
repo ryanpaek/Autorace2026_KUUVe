@@ -47,7 +47,7 @@ ros2 topic list | grep -E "scan|odom|imu"                        # [T3] /scan /o
 | ② 라이다 방향 | `ros2 launch limo_obstacle_avoid s1_scan_check.launch.py` | 앞 물체가 "앞", 왼쪽이 "왼쪽" | 안 움직임 |
 | ③ 차선 판단 | `ros2 launch limo_obstacle_avoid s2_lane_view.launch.py` | 가운데 앞 LIMO면 "+1 또는 −1로 회피" | 안 움직임 |
 | ④ 위치·IMU | `ros2 launch limo_obstacle_avoid s3_local_pose.launch.py` + teleop | 3 m 직진에 x≈3.0, y≈0 | 손으로 조종 |
-| ⑤ 차선 변경 | `ros2 launch limo_obstacle_avoid s4_lane_change_test.launch.py change_lanes:=1` | 옆으로 0.55 m | **움직임** |
+| ⑤ 차선 변경 | `ros2 launch limo_obstacle_avoid s4_lane_change_test.launch.py change_lanes:=1` | 옆으로 0.52 m | **움직임** |
 | ⑥ 회피 판단 | `ros2 launch limo_obstacle_avoid s5_avoid_dryrun.launch.py` | LIMO 1 m 앞에서 "차선 0 → ±1" | 안 움직임 |
 | ⑦ 실제 회피 | `ros2 launch limo_obstacle_avoid s6_avoid_run.launch.py` | "회피 종료: 구간 통과" | **움직임** |
 
@@ -101,7 +101,7 @@ ros2 topic echo /avoid/state             # x, y, target(차로), align_deg, alig
 
 | 값 | 어디서 | 명령 / 파일 |
 | --- | --- | --- |
-| 3차선 한 칸 폭 (실측) | 회피 `lane_width` + FSM `three_lane_width_mm` | `limo_obstacle_avoid/config/avoid_params.yaml`, `autorace_bringup/config/params.yaml` (둘 다 같은 값) |
+| 3차선 한 칸 폭 | 회피 `lane_width` 0.52 + FSM `three_lane_width_mm` 520 (도면값, 11/08) | 대회장 실측이 다르면 `limo_obstacle_avoid/config/avoid_params.yaml`과 `autorace_mission/fsm.py`(또는 `params.yaml`에 추가) 둘 다 |
 | 회피 속도 | avoid_node | `ros2 param set /avoid_node v_cruise 0.2` |
 | 차로 변경 시작 거리 | avoid_node | `ros2 param set /avoid_node trigger_dist 1.1` |
 | 갈림길 직접 지정 | avoid_node | `ros2 topic pub --once /fork_direction std_msgs/msg/String "{data: A}"` |

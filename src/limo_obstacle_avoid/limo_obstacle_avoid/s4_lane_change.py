@@ -5,7 +5,7 @@
   ① 가운데 차선 중앙, 똑바로 세워두기 (팀 브리지를 쓰면 브리지 켜기 / out_mode:=ack 면 브리지 끄기)
   ② 실행 후 시작 신호:  ros2 topic pub -t 3 /avoid/enable std_msgs/msg/Bool "{data: true}"
   ③ change_at(0.5m) 지나면 change_lanes(+1=왼쪽) 만큼 옆 차선으로 옮기고 total_dist(3m)에서 정지
-  ④ 줄자로 실제 옆 이동량 재기 → 0.55m 근처인지, 몇 m 만에 옮겨졌는지(로그) 확인
+  ④ 줄자로 실제 옆 이동량 재기 → 0.52m 근처인지, 몇 m 만에 옮겨졌는지(로그) 확인
   멈추기:  Ctrl+C  (정지 명령을 보내고 끝남)  또는  /avoid/enable false
 
 튜닝: lookahead ↓ = 빨리/급하게 옮김, ↑ = 부드럽지만 길게.  min_turn_radius 는 실측값(0.53) 아래로 X

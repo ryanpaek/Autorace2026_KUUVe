@@ -43,7 +43,7 @@ def parse_exit(s):
 @dataclass
 class AvoidParams:
     # ── 트랙 ──
-    lane_width: float = 0.55          # 차선 폭 (규정 550mm)
+    lane_width: float = 0.52          # 이웃 차로 중심 간격 (도면: 선 사이 500 + 점선 20 mm)
     num_side_lanes: int = 1           # 가운데 기준 양옆 차선 수 → 3차선
     start_lane: int = 0               # enable 순간 로봇이 있는 차선
     section_length: float = 4.3       # enable 지점 ~ 3차선 끝(가운데 섬 시작)까지 거리 [실측!]

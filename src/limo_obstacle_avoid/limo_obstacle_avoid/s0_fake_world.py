@@ -29,7 +29,7 @@ class FakeWorld(Node):
     def __init__(self):
         super().__init__('s0_fake_world')
         d = self.declare_parameter
-        d('layout', 'mixed7'); d('lane_width', 0.55); d('start_lane', 0)
+        d('layout', 'mixed7'); d('lane_width', 0.52); d('start_lane', 0)
         d('lidar_x', 0.10); d('odom_scale', 1.0); d('imu_drift_deg', 0.0)
         d('scan_noise', 0.01); d('section_length', 4.3); d('island_length', 1.0)
         g = lambda n: self.get_parameter(n).value

@@ -66,8 +66,8 @@ mission_node ──/mission/state──▶ obstacle_node (m7_link.py)
 `autorace.launch.py`도 브리지를 켜므로, 그대로 두면 브리지가 둘, `/cmd_vel` 발행자가 둘이 된다.
 
 **실측해서 맞출 값**
-- 3차선 한 칸 폭: 이 패키지 `lane_width`(0.55)와 팀 FSM `three_lane_width_mm`(500)을 같은 실측값으로.
-  0.50인데 0.55로 두면 바깥 차로 중심을 5 cm 바깥으로 잡는다 (차 바깥 끝 ~ 노란 선 8 cm). 정렬 보정은 폭 비율 오차를 못 고친다.
+- 3차선 한 칸 폭: 도면(선 사이 500 + 점선 20 mm)대로 이 패키지 `lane_width` 0.52, 팀 FSM `three_lane_width_mm` 520으로 맞춤 (11/08).
+  대회장에서 줄자로 다르면 두 값을 같이 바꿀 것.
 - `autorace.launch.py`의 브리지는 `wheelbase`를 넘기지 않아 0.2로 돈다 (캘리브레이션 유효값 0.222).
   브리지는 조향각 = atan(축거 × angular.z / v)로 바꾸므로, 실제(0.222)보다 작은 0.2로 계산하면 **덜 꺾여** 회전 반경이 약 11% 커진다
   (곡률은 약 10% 작음). `autorace_calib`의 `drive_test steer`로 실제/기대 비율을 재서 정할 것.
@@ -147,7 +147,7 @@ ros2 run teleop_twist_keyboard teleop_twist_keyboard
 원점 다시 잡기(teleop 끄고): `ros2 topic pub -t 3 /avoid/reset std_msgs/msg/Empty`
 코너를 한 번 돌면 IMU 방향값 판별 로그가 나옵니다. 결과를 `imu_mode` 에 고정해 두면 가장 안전합니다.
 
-**⑤ 차선 변경만 (★ 바퀴 움직임) [T2][T3]** → 옆 이동 0.55m
+**⑤ 차선 변경만 (★ 바퀴 움직임) [T2][T3]** → 옆 이동 0.52m
 ```
 ros2 launch limo_obstacle_avoid s4_lane_change_test.launch.py change_lanes:=1
 ```
