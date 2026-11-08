@@ -360,6 +360,9 @@ class MissionFSM:
         if done or force:
             self._next(inp, 'obstacle zone done' if done else f'm7 forced end at {d:.0f}mm')
             return Command('lane', self._lane(self.p['approach_speed']))
+        if inp.obstacle.get('m7_hold'):
+            # 회피 노드가 도중에 멈춤: 차선 주행으로 넘기면 정차 LIMO 사이를 직진한다 -> 정지
+            return Command('stop', self._lane(0.0), note='M7_OBSTACLE/hold (avoid node lost)')
         src = 'obstacle' if inp.obstacle.get('m7_active') else 'lane'
         return Command(src, self._lane(self.p['approach_speed'],
                                        lane_width_mm=self.p['three_lane_width_mm'],

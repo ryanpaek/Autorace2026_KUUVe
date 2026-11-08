@@ -10,6 +10,9 @@ obstacle_node가 매 틱 update()를 부르고, 돌려받은 동작을 토픽으
   2) 갈림길 : FSM이 투표한 fork_choice(A/B)를 /fork_direction으로 넘긴다
   3) 끝     : /avoid/done → m7_done (FSM이 M2로 넘어감), 마지막 차로 → m7_exit(A/B)
   4) 중단   : 회피가 끝나기 전에 FSM이 M7을 벗어나면(강제 종료·수동 전환) /avoid/enable false
+  5) 정지 유지(m7_hold): 회피 노드가 제어를 잡은 뒤 끝나기 전에 놓거나(Ctrl+C) 소식이 끊기면(죽음)
+              FSM이 정지한다. 이게 없으면 Ctrl+C 때 차선 주행으로 넘어가 정차 LIMO 사이를 직진한다.
+              (단독 시험의 cmd_mux failsafe_hold와 같은 역할. 팀 스택은 cmd_mux를 안 쓰므로 여기서 한다)
 
 시작선 위치는 세 가지로 판단한다 (위에서부터 우선).
   a. 카메라 흰 가로선: 시작선 근처에서 본 선까지 거리 - 그 뒤 달린 거리 (StopApproach와 같은 방식.
@@ -46,6 +49,9 @@ class M7LinkParams:
     retry_sec: float = 0.5
     # 켤 때까지 갈림길 표지를 못 읽었으면: 'auto'(회피 노드가 고름) | 'A' | 'B'
     fork_fallback: str = 'auto'
+    # 정지 유지: 회피 노드는 실행 중 /avoid/active true를 20 Hz로 낸다
+    active_timeout_sec: float = 0.5     # 이보다 오래 안 오면 죽은 것으로 보고 정지
+    release_grace_sec: float = 0.3      # 정상 종료는 active false 직후 done이 온다 -> 이만큼 지나도 안 오면 '멈춤'으로 기록
 
 
 def lane_to_fork(lane) -> Optional[str]:
@@ -71,15 +77,26 @@ class M7Link:
         self.fork_sent = None
         self.exit_fork = None        # 회피가 끝난 차로 (A/B), M7을 벗어나도 유지 (FSM M2가 씀)
         self.avoid_active = False
+        self.active_t = None         # 마지막 /avoid/active true 시각
+        self.claimed = False         # 회피 노드가 제어를 잡았었나 (dry_run이면 끝까지 False)
+        self.release_t = None        # 끝나기 전에 active false를 받은 시각
+        self.hold = False
         self.avoid_running = False
         self.avoid_target = None
         self.events: List[str] = []
 
     # --- 회피 노드 쪽 입력 ----------------------------------------------------
-    def on_avoid_active(self, active: bool) -> None:
+    def on_avoid_active(self, active: bool, t: Optional[float] = None) -> None:
         self.avoid_active = bool(active)
-        if active and self.phase == 'armed':
-            self.phase = 'running'
+        if active:
+            self.active_t = t
+            self.release_t = None
+            if self.phase in ('armed', 'running'):
+                self.claimed = True
+            if self.phase == 'armed':
+                self.phase = 'running'
+        elif self.claimed and self.phase == 'running' and self.release_t is None:
+            self.release_t = t
 
     def on_avoid_state(self, st: dict) -> None:
         """/avoid/state (JSON). dry_run이면 active가 안 오므로 state로도 실행 여부를 안다."""
@@ -121,6 +138,8 @@ class M7Link:
             self.enable_t = self.section_m = self.how = None
             self.heading_forced = False
             self.fork_sent = None
+            self.claimed = self.hold = False
+            self.active_t = self.release_t = None
 
         fork = mission.get('fork_choice')
         if fork in ('A', 'B') and fork != self.fork_sent:
@@ -129,6 +148,7 @@ class M7Link:
 
         if self.phase in ('done', 'aborted'):
             return out
+        self._check_hold(t)
 
         route = mission.get('route') or {}
         s = route.get('s_mm')
@@ -161,6 +181,19 @@ class M7Link:
         return out
 
     # --- 내부 -------------------------------------------------------------------
+    def _check_hold(self, t: float) -> None:
+        if self.hold or not self.claimed or self.phase != 'running':
+            return
+        why = None
+        if self.release_t is not None and t - self.release_t >= self.p.release_grace_sec:
+            why = '회피 노드가 끝나기 전에 제어를 놓음 (Ctrl+C 등)'
+        elif (self.release_t is None and self.active_t is not None
+              and t - self.active_t >= self.p.active_timeout_sec):
+            why = f'회피 노드 소식이 {self.p.active_timeout_sec:.1f}초 끊김'
+        if why:
+            self.hold = True
+            self.events.append(f'{why} -> 정지 유지 (풀려면 /mission/set_state로 다른 상태)')
+
     def _watch_line(self, lane: dict, s, dist: float) -> None:
         if self.phase != 'idle':
             return
@@ -201,7 +234,9 @@ class M7Link:
     def state(self) -> dict:
         """/obstacle/state에 합쳐 FSM에 넘길 값."""
         return {'m7_phase': self.phase,
-                'm7_active': self.avoid_active and self.phase == 'running',
+                'm7_active': self.avoid_active and self.phase == 'running' and not self.hold,
+                # 끝나기 전에 놓으면 바로 정지 (done이 곧 오면 FSM이 done을 먼저 보고 넘어간다)
+                'm7_hold': self.hold or (self.phase == 'running' and self.release_t is not None),
                 'm7_done': self.phase == 'done',
                 'm7_exit': self.exit_fork,
                 'm7_section_m': self.section_m,

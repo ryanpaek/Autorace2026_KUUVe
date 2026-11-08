@@ -160,3 +160,76 @@ def test_no_route_uses_distance_since_entry():
 def test_lane_to_fork():
     assert lane_to_fork(1) == 'A' and lane_to_fork(-1) == 'B'
     assert lane_to_fork(0) is None and lane_to_fork(None) is None
+
+
+# --- 회피 노드가 도중에 멈출 때 (m7_hold) -------------------------------------------
+def start_running(link, t_end=1.0):
+    """시작선에서 켜고 회피 노드가 20 Hz로 active true를 내는 상태까지."""
+    drive(link, 13500.0, 13700.0)
+    t = 0.0
+    while t < t_end:
+        link.on_avoid_active(True, t)
+        link.update(t, mission(14000.0), {})
+        t += 0.05
+    return t
+
+
+def test_hold_when_avoid_node_ctrl_c():
+    link = M7Link()
+    t = start_running(link)
+    assert link.state()['m7_active'] is True and link.state()['m7_hold'] is False
+    link.on_avoid_active(False, t)                 # Ctrl+C: active=false 보내고 끝, done 없음
+    link.update(t + 0.02, mission(14000.0), {})
+    assert link.state()['m7_hold'] is True         # 놓는 즉시 정지 (차선 주행으로 안 넘어감)
+    assert link.hold is False                      # '멈춤' 기록은 done을 잠깐 기다린 뒤
+    link.update(t + 0.35, mission(14000.0), {})
+    assert link.hold is True
+    st = link.state()
+    assert st['m7_hold'] is True and st['m7_active'] is False and st['m7_done'] is False
+
+
+def test_hold_when_avoid_node_dies_silently():
+    link = M7Link()
+    t = start_running(link)                        # 마지막 active true = t - 0.05
+    link.update(t + 0.3, mission(14000.0), {})
+    assert link.state()['m7_hold'] is False
+    link.update(t + 0.5, mission(14000.0), {})
+    assert link.state()['m7_hold'] is True and link.state()['m7_active'] is False
+
+
+def test_no_hold_on_normal_finish():
+    """회피 노드는 끝날 때 active false -> done true 순서로 보낸다."""
+    link = M7Link()
+    t = start_running(link)
+    link.on_avoid_state({'state': 'RUN', 'target': 1})
+    link.on_avoid_active(False, t)
+    link.update(t + 0.02, mission(18300.0), {})
+    link.on_avoid_done(True)
+    link.update(t + 1.0, mission(18300.0), {})
+    st = link.state()
+    assert st['m7_done'] is True and st['m7_hold'] is False and st['m7_exit'] == 'A'
+
+
+def test_no_hold_in_dry_run():
+    """dry_run 회피 노드는 active를 안 낸다 -> 제어를 잡은 적이 없으니 정지하지 않는다."""
+    link = M7Link()
+    drive(link, 13500.0, 13700.0)
+    link.on_avoid_state({'state': 'RUN', 'target': 0})
+    for k in range(40):
+        link.update(10.0 + k * 0.05, mission(14000.0), {})
+    assert link.phase == 'running' and link.state()['m7_hold'] is False
+
+
+def test_hold_released_by_leaving_m7_and_reentering():
+    """정지 유지는 M7을 벗어났다가(WAIT_START 등) 다시 들어오면 풀리고, 시작선에서 새로 켠다."""
+    link = M7Link()
+    t = start_running(link)
+    link.on_avoid_active(False, t)
+    link.update(t + 0.5, mission(14000.0), {})
+    assert link.hold is True
+    link.update(t + 1.0, mission(14000.0, state='M7_OBSTACLE'), {})   # M7 그대로면 계속 정지
+    assert link.state()['m7_hold'] is True
+    link.update(t + 2.0, mission(14000.0, state='WAIT_START'), {})
+    acts = drive(link, 13289.0, 13700.0, t0=t + 3.0)                   # set_state M7: s = 시작선 - 300
+    assert link.state()['m7_hold'] is False
+    assert [a for _, a in acts if a[0] == 'enable']

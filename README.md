@@ -89,7 +89,7 @@ mission_node가 오도메트리로 경로상 위치 `s`(mm, 출발 체커 = 0)�
 
 ```bash
 cd ~/autorace_ws
-python3 -m pytest src -q          # 102개: 차선·정지선·지그재그·FSM·라이다·ONNX 디코딩·M7 회피
+python3 -m pytest src -q          # 108개: 차선·정지선·지그재그·FSM·라이다·ONNX 디코딩·M7 회피
 ```
 차선 알고리즘을 고치면 `src/autorace_lane/test/test_lane_core.py`에 합성 트랙 케이스를 추가해 확인한다.
 녹화한 주행으로 튜닝 전후를 비교하려면 `offline_replay`를 쓴다.
