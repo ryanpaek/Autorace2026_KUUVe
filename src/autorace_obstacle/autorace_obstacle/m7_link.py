@@ -41,6 +41,8 @@ class M7LinkParams:
     line_gate_mm: float = 400.0         # 카메라 선을 시작선으로 인정하는 도면 위치 오차
     line_min_entry_mm: float = 900.0    # 경로 정보가 없을 때: M7 진입 후 이만큼 달린 뒤 본 선만 인정 (코너 전 오검출 방지)
     max_heading_deg: float = 3.0        # 차선 방향이 이보다 틀어져 있으면 켜기를 잠시 미룸
+    heading_valid_deg: float = 20.0     # 이보다 큰 차선 방향은 잘못 읽은 값으로 보고 무시 (3차선 입구 사선 등, 11/08 실차 ±64°)
+    line_track_mm: float = 150.0        # 처음 잡은 선 뒤로는, 달린 거리로 예측한 거리와 이만큼 안에서만 이어 받음
     heading_wait_mm: float = 300.0      # 방향이 계속 틀어져 있어도 시작선 + 이만큼에선 켬 (정렬 보정이 ±5°까지 처리)
     # 회피 노드에 넘길 section_length 범위 (m)
     section_min_m: float = 3.5
@@ -70,6 +72,7 @@ class M7Link:
         self.in_m7 = False
         self.entry_dist = None       # M7 진입 때 누적 거리 (mission dist_mm)
         self.line = None             # (본 선까지 거리, 그때 누적 거리)
+        self.pos = None              # 마지막으로 계산한 앞바퀴 - 시작선 (mm), 진단용
         self.enable_t = None
         self.section_m = None
         self.heading_forced = False
@@ -154,6 +157,7 @@ class M7Link:
         s = route.get('s_mm')
         self._watch_line(lane, s, dist)
         pos = self._front_from_start(s, dist)   # 앞바퀴 - 시작선 (mm, +면 지남)
+        self.pos = pos
 
         if self.phase == 'idle':
             if pos is None or pos < self.p.enable_at_mm:
@@ -200,6 +204,15 @@ class M7Link:
         lines = lane.get('stoplines_mm') or []
         if not lines:
             return
+        if self.line is not None:
+            # 이미 잡은 선: 달린 거리로 예측한 위치와 맞는 검출만 이어 받는다
+            # (입구 사선·점선 끝을 흰 선으로 잘못 읽어 기준이 계속 앞으로 밀리는 것을 막음)
+            d0, at = self.line
+            pred = d0 - (dist - at)
+            near = [float(x) for x in lines if abs(float(x) - pred) <= self.p.line_track_mm]
+            if near:
+                self.line = (min(near, key=lambda x: abs(x - pred)), dist)
+            return
         d = float(lines[0])
         if s is not None:
             ok = abs(float(s) + d - self.p.start_s_mm) <= self.p.line_gate_mm
@@ -209,10 +222,17 @@ class M7Link:
             self.line = (d, dist)
 
     def _front_from_start(self, s, dist: float) -> Optional[float]:
+        route_pos = float(s) - self.p.start_s_mm if s is not None else None
         if self.line is not None:
             d, at = self.line
-            self.how = 'line'
-            return (dist - at) - d
+            line_pos = (dist - at) - d
+            if route_pos is not None and route_pos - line_pos > self.p.line_gate_mm:
+                # 카메라 선 기준이 도면 위치보다 크게 늦다 -> 다른 선을 잡은 것. 도면 위치를 따른다
+                self.line = None
+                self.events.append(f'카메라 선 기준이 도면보다 {route_pos - line_pos:.0f} mm 늦어 버림 -> 도면 위치 사용')
+            else:
+                self.how = 'line'
+                return line_pos
         if s is not None:
             self.how = 'route'
             return float(s) - self.p.start_s_mm
@@ -225,7 +245,10 @@ class M7Link:
         h = lane.get('heading_rad')
         if h is None or lane.get('status') not in ('BOTH', 'L', 'R'):
             return True          # 차선 방향을 모르면 막지 않는다
-        return abs(math.degrees(float(h))) <= self.p.max_heading_deg
+        deg = abs(math.degrees(float(h)))
+        if deg > self.p.heading_valid_deg:
+            return True          # 말이 안 되게 큰 값은 잘못 읽은 것 (입구 사선) -> 막지 않음
+        return deg <= self.p.max_heading_deg
 
     def _section(self, pos: float) -> float:
         L = (self.p.island_s_mm - self.p.start_s_mm - pos) / 1000.0
@@ -241,4 +264,6 @@ class M7Link:
                 'm7_exit': self.exit_fork,
                 'm7_section_m': self.section_m,
                 'm7_how': self.how,
+                'm7_pos_mm': None if self.pos is None else round(self.pos),
+                'm7_line_d_mm': None if self.line is None else round(self.line[0]),
                 'm7_heading_forced': self.heading_forced}
