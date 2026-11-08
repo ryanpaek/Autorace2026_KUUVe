@@ -25,7 +25,7 @@
     scan_timeout: 0.5        # /scan 이 이만큼 끊기면 정지
 
     # ── 트랙 ──
-    lane_width: 0.55         # ★ 실측. 팀 FSM three_lane_width_mm(500)과 같은 값으로 맞출 것
+    lane_width: 0.52         # 이웃 차로 중심 간격. 도면: 선 사이 500 + 점선 20 = 520 mm (FSM three_lane_width_mm와 같게)
     num_side_lanes: 1
     start_lane: 0            # enable 순간 있는 차선 (0=가운데)
     section_length: 4.38     # ★ enable 지점 ~ 가운데 섬 앞 끝 거리. 도면 4384 mm, 대회장 실측

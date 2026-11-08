@@ -26,7 +26,7 @@ LAYOUTS = {
 }
 
 
-def layout_rects(name_or_list, lane_width=0.55, jitter=0.0, seed=None):
+def layout_rects(name_or_list, lane_width=0.52, jitter=0.0, seed=None):
     """→ [(cx, cy, L, W, yaw)]"""
     items = LAYOUTS[name_or_list] if isinstance(name_or_list, str) else name_or_list
     rnd = random.Random(seed)
