@@ -302,8 +302,9 @@ def make_marker(frame, ns, mid, mtype, stamp, color=(1.0, 1.0, 1.0, 1.0), scale=
     m.header.stamp = stamp
     m.ns, m.id, m.type, m.action = ns, mid, mtype, Marker.ADD
     m.pose.orientation.w = 1.0
-    m.scale.x, m.scale.y, m.scale.z = scale
-    m.color.r, m.color.g, m.color.b, m.color.a = color
+    # ROS 메시지는 float 칸에 int(0 등)를 넣으면 AssertionError로 노드가 죽는다 -> 전부 float로
+    m.scale.x, m.scale.y, m.scale.z = (float(v) for v in scale)
+    m.color.r, m.color.g, m.color.b, m.color.a = (float(v) for v in color)
     return m
 
 
