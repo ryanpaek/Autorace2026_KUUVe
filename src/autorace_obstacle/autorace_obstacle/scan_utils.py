@@ -33,21 +33,29 @@ def roi(points: np.ndarray, x_min: float, x_max: float, y_min: float,
     return points[m]
 
 
+def cluster_groups(points: np.ndarray, gap_mm: float = 60.0, min_pts: int = 3,
+                   origin=(0.0, 0.0)) -> List[np.ndarray]:
+    """각도 순으로 정렬된 점을 이웃 간격으로 끊어 묶은 점 묶음들 (스캔 순서 기반, 가볍다).
+
+    origin: 각도를 잴 기준점 (라이다 위치). 차 기준점과 달라도 순서가 거의 같지만
+            가까운 물체는 라이다 위치로 재는 편이 정확하다.
+    """
+    if len(points) == 0:
+        return []
+    ang = np.arctan2(points[:, 1] - origin[1], points[:, 0] - origin[0])
+    pts = points[np.argsort(ang)]
+    d = np.hypot(*np.diff(pts, axis=0).T) if len(pts) > 1 else np.array([])
+    breaks = np.nonzero(d > gap_mm)[0] + 1
+    return [g for g in np.split(pts, breaks) if len(g) >= min_pts]
+
+
 def cluster_points(points: np.ndarray, gap_mm: float = 60.0, min_pts: int = 3) -> List[dict]:
     """각도 순으로 정렬된 점을 이웃 간격으로 끊어 묶는다 (스캔 순서 기반, 가볍다).
 
     반환: [{'x', 'y' (중심), 'n', 'width' (y 방향 폭), 'depth' (x 방향 폭), 'near_x'}]
     """
-    if len(points) == 0:
-        return []
-    ang = np.arctan2(points[:, 1], points[:, 0])
-    pts = points[np.argsort(ang)]
-    d = np.hypot(*np.diff(pts, axis=0).T) if len(pts) > 1 else np.array([])
-    breaks = np.nonzero(d > gap_mm)[0] + 1
     out = []
-    for grp in np.split(pts, breaks):
-        if len(grp) < min_pts:
-            continue
+    for grp in cluster_groups(points, gap_mm, min_pts):
         out.append({'x': float(grp[:, 0].mean()), 'y': float(grp[:, 1].mean()),
                     'n': int(len(grp)),
                     'width': float(np.ptp(grp[:, 1])), 'depth': float(np.ptp(grp[:, 0])),

@@ -1,0 +1,98 @@
+# 변경 내역 (2026-11-09): M4 T자 주차 — 두 리모 중점 + 재정렬
+
+브랜치 `claude/parking-two-limo-midpoint` (기준: `main` 362008f). 설계: 윤서. 시뮬레이션 결과: [parking_sim_20261106.pdf](parking_sim_20261106.pdf)
+
+## 한 줄 요약
+
+뼈대만 있던 `parking_node.py`(구간 재생, 값 TODO)를 **라이다로 정차 리모 두 대를 보고 그 사이 칸에 들어가는 노드**로 바꿨다.
+`params.yaml`의 `parking_node.enabled`는 **false 그대로**다. 실차 시험(아래)을 마친 뒤 true로 바꾼다. false면 예전처럼 주차 명령은 0.
+
+**실차·ROS에서는 아직 안 돌려 봤다 (미검증).** 가상 트랙 시뮬레이션과 단위 시험만 통과.
+
+## 미션 (규정집 미션 4)
+
+```
+흰 선 ─ 440 ─┬───┬───┬───┐        정차 리모가 1·3 → 2번에 주차
+   (차로)    │ 1 │ 2 │ 3 │ 600    정차 리모가 4·6 → 5번에 주차
+             ├───┼───┼───┤
+             │ 4 │ 5 │ 6 │ 600    칸 폭 500, 선 20 (2026Track 도면)
+             └───┴───┴───┘
+```
+
+## 동작
+
+```
+① WAIT_LINE  차선 노드 명령 그대로 넘기며 흰 선 기다림 (FSM은 신호등 직후부터 M4라서)
+│
+├─② FOLLOW   흰 선 뒤: 차로 중심에서 왼쪽 50mm(왼쪽 차선과 약 8cm)로 차선 추종 (/lane/config target_offset_mm)
+│   └─③ 라이다로 오른쪽 리모 두 대 "짝" 찾기 (같은 줄, 사이 1040±150mm) → 중점 = 목표 칸 가운데
+│       └─ 중점이 앞바퀴보다 320mm 앞 → PAUSE (1초)
+│
+├─④ TURN     오른쪽 최대 조향 → 87° 돌면 바퀴 펴기
+│   └─ 꺾은 뒤 양옆 리모 옆면으로 칸 가운데 선 → 차체 중심이 칸 가운데에 오면 멈춤
+│
+├─⑤ CHECK    네 모서리가 칸 선에서 2.5cm 안쪽? (옆·앞뒤)
+│   └─ 아니면 재정렬: 바퀴 똑바로 450mm 후진(PULLOUT) → 칸 가운데 선을 pure pursuit로 따라 진입(ENTER). 최대 2번
+│
+└─⑥ DONE     /parking/state done=true → FSM이 다음으로
+```
+
+## 왜 이렇게 했나
+
+| # | 처음 계획/문제 | 바꾼 것 | 근거 |
+| --- | --- | --- | --- |
+| ① | 리모 한 대가 앞바퀴 옆에 오면 꺾기 | 두 대의 **중점**으로 꺾는 시점을 정함 | 한 대 기준은 약 20cm 일러서 0점. 중점은 칸 가운데 그 자체 |
+| ② | 엉뚱한 물체를 리모로 착각 | 짝 = 같은 줄 + 사이 1040±150mm일 때만 | 칸 1개(520)·3개 간격과 안 헷갈림 |
+| ③ | 짝으로 멈출 깊이까지 정하면 너무 일찍 멈춤 | 깊이는 꺾은 뒤 보이는 **양옆 옆면**으로 | 차선에서 보면 리모 끝면만 보여 깊이가 80~170mm 얕게 나옴 (시뮬레이션) |
+| ④ | 늦게 꺾으면 옆 칸 쪽으로 들어가 갇힘 | 바퀴 편 뒤 막히면 짝으로 기억한 선으로 재정렬 | 40cm 늦게 꺾어도 15점 |
+| ⑤ | 5cm 후진 → 다시 꺾기 반복 | 재정렬(나갔다 다시 들어오기) | 후진+꺾기는 방향만 바꾸고 옆으로 밀린 건 못 고침 |
+| ⑥ | 재정렬 후진 중 꺾으면 옆 리모와 충돌 | 후진은 바퀴 똑바로 (`pullout_steer: false`) | 꺾고 후진하면 앞이 옆으로 휘둘림 |
+| ⑦ | 최대 조향 명령 | 곡률 −3.0 (1/m) | 브리지가 최대 0.40rad로 자름. 축거 0.2든 0.222든 최대 조향 |
+
+## 시뮬레이션 결과 (가상 트랙, 실제 노드 코드를 돌림)
+
+| 조건 | 15점 개수 |
+| --- | --- |
+| 오차 16가지 (라이다 위치 ±5cm, 라이다 잡음 1cm+10% 빠짐, 조향 ±7%, 출발 좌우 ±4cm, 옆 리모 6cm 비킴, 리모 놓침 × 2·5번) | 14 / 16 |
+| 꺾는 시점 −20 ~ +40cm × 2·5번 | 14 / 14 |
+| 충돌 | 0번 |
+
+실패 2개는 모두 **라이다가 첫 리모(1·4번)를 놓친 경우** (짝이 안 생겨 예비 방식이 3·6번 리모를 보고 약 1m 늦게 꺾음).
+실제로 놓치는지는 모름 → 실차 시험 2번에서 확인. 재정렬 1번에 약 10초 더 걸림 (기본 16~22초, 최대 43초).
+
+가정: 정차 리모는 칸 가운데에 반듯하게, 센서 지연·미끄러짐 없음, 주차 표지판 같은 다른 물체 없음.
+
+## 바뀐 파일
+
+| 파일 | 내용 |
+| --- | --- |
+| `src/autorace_mission/autorace_mission/parking_node.py` | 전부 새로 씀. 노드 이름·토픽(`/parking/cmd_vel`, `/parking/state`)은 그대로 + `/lane/config`(오프셋) 발행 |
+| `src/autorace_bringup/config/params.yaml` | `parking_node`에 실측 필요 값·주요 값 추가. `enabled: false` 유지 |
+| `src/autorace_mission/test/test_parking_node.py` (새 파일) | 계산 함수 7개 + 가상 트랙 4개 (1·3→2, 4·6→5, 40cm 늦게, 재정렬 끔). `pytest` 11개 통과 |
+| `tools/parking_scan_check.py` (새 파일) | 차 안 움직이고 `/scan`만 보고 덩어리·짝·정면 각도 출력 |
+| `docs/parking_sim_20261106.pdf` (새 파일) | 시뮬레이션 그림·표 |
+
+## 실차 시험 순서
+
+비상 정지: `ros2 topic pub --once /mission/estop std_msgs/msg/Bool "{data: true}"`
+
+1. **줄자로 재서 `params.yaml`에** — `front_axle_from_lidar_mm`(라이다가 앞바퀴 축보다 앞이면 −), `front_bumper_from_axle_mm`,
+   `body_center_from_rear_mm`(차 길이/2 − 뒷바퀴 축→뒤범퍼), `target_offset_mm`(차로 안쪽 폭/2 − 80 − 110)
+2. **라이다 확인 (차 안 움직임)** — `python3 tools/parking_scan_check.py -47` (숫자 = 1번 값)
+   - 정면 50cm 물체 → 0° 근처인지 (`laser_yaw`)
+   - 흰 선 앞 차로에서 정차 리모 1·3번 → "짝: 있음", 4·6번 → "짝: 있음", 주차 표지판 추가해도 그대로인지
+   - **짝이 안 잡히면 여기서 멈춤** (라이다 높이·덩어리 기준 문제)
+3. **`enabled: true`로 바꾸고 바퀴 띄우고** — `ros2 launch autorace_bringup autorace.launch.py use_detector:=false`
+   (WAIT_START라 안 움직임) → `ros2 topic echo /parking/state` →
+   `ros2 topic pub --once /mission/set_state std_msgs/msg/String "{data: M4_PARKING}"` → 오류 없이 `"phase": "WAIT_LINE"`
+   (`start_state:=M4_PARKING`으로 바로 켜면 켜자마자 움직이니 쓰지 말 것)
+4. **바닥** — 흰 선 약 70cm 앞 차로 가운데에서 3번처럼 넘기기. 1·3 다섯 번, 4·6 다섯 번. 녹화:
+   `ros2 bag record -o park_13_1 /scan /odom /imu /cmd_vel /limo/ack_cmd /parking/cmd_vel /parking/state /mission/state /lane/status /lane/config /lane/cmd_vel`
+   (`scripts/record_bag.sh`에는 `/parking/*`이 없음)
+
+## 남은 일
+
+- [ ] 실측 4가지, 라이다 짝 확인, 실차 10회
+- [ ] 첫 리모를 놓치는 일이 실제로 있으면: 흰 선부터 odom 거리로 "리모가 있어야 할 위치" 안전장치 추가
+- [ ] 재정렬 깊이 판단은 "정차 리모가 칸 가운데"가 기준 → 대회 때 어떻게 놓는지 주최측 확인
+- [ ] 브리지 축거 0.2 → 0.222 반영 전까지 ENTER(pure pursuit) 조향이 약 11% 덜 들어감 (calib/README.md 7번)

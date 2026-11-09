@@ -184,3 +184,51 @@ def test_state_distance_limit_prevents_stall():
         if fsm.state != 'M3_PEDESTRIAN':
             break
     assert fsm.state == 'M7_OBSTACLE'
+
+
+def test_cones_approach_cones_handover_then_traffic():
+    """M8: 접근(차선) -> cones(obstacle) -> done -> handover(obstacle, 차선 normal) -> 차선 잡히면 M1."""
+    fsm = MissionFSM({'start_state': 'M8_CONES', 'cones_source_ready': True,
+                      'cones_approach_mm': 300.0})
+    sim = Sim(fsm)
+    cmd = sim.tick()
+    assert fsm.sub == '' and cmd.source == 'lane'
+    for _ in range(200):
+        cmd = sim.tick()
+        if fsm.sub == 'cones':
+            break
+    assert cmd.source == 'obstacle' and cmd.lane['mode'] == 'heading'
+    for _ in range(20):
+        cmd = sim.tick(obstacle={'cones_done': False})
+    assert fsm.sub == 'cones'
+    sim.tick(obstacle={'cones_done': True})
+    assert fsm.sub == 'handover'
+    cmd = sim.tick(obstacle={'cones_done': True}, lane={'status': 'NONE'})
+    assert cmd.source == 'obstacle' and cmd.lane['mode'] == 'normal'   # 차선 노드 초기화
+    for _ in range(fsm.p['cones_handover_frames']):
+        cmd = sim.tick(lane={'status': 'BOTH', 'low_conf': False})
+    assert fsm.state == 'M1_TRAFFIC' and cmd.source == 'lane'
+
+
+def test_cones_enter_early_when_cone_close():
+    fsm = MissionFSM({'start_state': 'M8_CONES', 'cones_source_ready': True,
+                      'cones_approach_mm': 2000.0})
+    sim = Sim(fsm)
+    for _ in range(300):
+        sim.tick(obstacle={'cone_ahead_mm': 400.0})
+        if fsm.sub == 'cones':
+            break
+    assert fsm.sub == 'cones'
+    assert 1500.0 - 50 <= sim.dist < 2000.0                # 끝까지 안 기다리고 조금 일찍 (armed 이후)
+
+
+def test_cones_handover_times_out_without_lane():
+    fsm = MissionFSM({'start_state': 'M8_CONES', 'cones_source_ready': True,
+                      'cones_approach_mm': 100.0, 'cones_zone_mm': 300.0})
+    sim = Sim(fsm)
+    for _ in range(1000):
+        sim.tick(lane={'status': 'NONE'})
+        if fsm.state != 'M8_CONES':
+            break
+    assert fsm.state == 'M1_TRAFFIC'
+    assert any('distance' in s for s in fsm.log)

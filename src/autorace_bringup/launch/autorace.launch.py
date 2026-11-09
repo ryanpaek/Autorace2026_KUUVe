@@ -69,7 +69,7 @@ def generate_launch_description():
         Node(package='autorace_mission', executable='parking_node', name='parking_node',
              parameters=[params], output='screen'),
         Node(package='autorace_obstacle', executable='obstacle_node', name='obstacle_node',
-             parameters=[params], output='screen'),
+             parameters=[params, {'bev_config': bev}], output='screen'),
         Node(package='limo_obstacle_avoid', executable='avoid_node', name='avoid_node',
              parameters=[LaunchConfiguration('m7_avoid_params'),
                          {'dry_run': ParameterValue(m7_dry, value_type=bool)}],

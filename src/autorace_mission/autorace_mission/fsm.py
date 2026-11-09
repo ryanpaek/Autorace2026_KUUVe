@@ -65,6 +65,15 @@ DEFAULT_PARAMS = {
     'three_lane_width_mm': 520.0,       # 도면: 선 사이 500 + 점선 20 = 선 가운데끼리 520 (회피 lane_width 0.52와 같게)
     'three_lane_color': 'both',         # 도면: M3 종료 ~ 우하단 코너(약1.6m) + 3차선 약4.5m(섬 오른쪽 끝까지)
     'cones_len_mm': 4300.0,      # 도면: M8 진입(갈림길 끝) ~ 좌하단 코너 ~ 라바콘 구간(약2.2m) 끝 + 여유
+    # M8 라바콘 (obstacle 노드의 ConeFollower). false면 위 cones_len_mm 동안 차선 주행으로 통과
+    'cones_source_ready': False,
+    'cones_enter_before_mm': 300.0,  # 시작선 이만큼 앞(앞바퀴)에서 라바콘 모드로 (코너 끝 약 120mm 앞)
+    'cones_enter_cone_mm': 500.0,    # 차 앞 차로 안 콘이 앞바퀴에서 이 안이면 조금 일찍 들어간다
+    'cones_approach_mm': 1550.0,     # 경로 지도 없을 때: M2 끝 -> 라바콘 모드 (도면 1854 - 300)
+    'cones_zone_mm': 2700.0,         # 라바콘 모드 최대 거리 (구간 2100 + 진입 300 + 여유)
+    'cones_end_after_mm': 150.0,     # 끝선(앞바퀴)을 이만큼 지나면 obstacle 노드 판단과 상관없이 복귀
+    'cones_handover_mm': 400.0,      # 차선을 다시 잡길 기다리는 최대 거리 (끝선 뒤 바로 코너)
+    'cones_handover_frames': 4,      # 차선이 연속 이만큼 틱 잡히면 차선 주행으로
     # M2 갈림길
     'fork_len_mm': 2300.0,       # 도면: 섬 오른쪽 끝부터 왼쪽 합류 테이퍼 끝까지 약 2.4m
     'fork_seek_timeout_sec': 12.0,  # 규정상 15초 안에 진입해야 함
@@ -209,6 +218,7 @@ class MissionFSM:
         self.enter_t = self.enter_dist = 0.0
         self.sub_t = self.sub_dist = 0.0
         self.stop: Optional[StopApproach] = None
+        self.count = 0                               # 서브 상태 안에서 쓰는 연속 카운터
         self.log = []
         self._goto(self.p['start_state'], Inputs(t=0.0, dist_mm=0.0), 'init')
 
@@ -230,9 +240,12 @@ class MissionFSM:
         i = SEQUENCE.index(self.state)
         self._goto(SEQUENCE[min(i + 1, len(SEQUENCE) - 1)], inp, why)
 
-    def _sub(self, name: str, inp: Inputs) -> None:
+    def _sub(self, name: str, inp: Inputs, why: str = '') -> None:
         self.sub = name
         self.sub_t, self.sub_dist = inp.t, inp.dist_mm
+        self.count = 0
+        if why:
+            self.log.append(f'{self.state}/{name} {why}')
 
     def _vote(self, inp: Inputs, *classes: str) -> bool:
         """classes 중 하나라도 다수결을 넘으면 True. 투표는 새 인식 프레임에서만."""
@@ -422,13 +435,57 @@ class MissionFSM:
         return Command('lane', self._lane(self.p['approach_speed'], mode))
 
     def _s_M8_CONES(self, inp):
-        _, d = self._since(inp)
-        done = inp.obstacle.get('cones_done', False)
-        end = self._past(inp, 'm8_end_line', 100.0)
-        if done or ((d >= self.p['cones_len_mm']) if end is None else end):
-            self._next(inp, 'cones done' if done else f'cones end at {d:.0f}mm')
-        src = 'obstacle' if self.p['obstacle_source_ready'] else 'lane'
-        return Command(src, self._lane(self.p['slow_speed']))
+        """라바콘: 접근(차선) -> cones(obstacle 노드가 콘 사이 경로 추종) -> handover -> M1.
+
+        approach : 갈림길 끝 ~ 좌하단 코너. 차선 주행. obstacle 노드는 콘을 미리 추적해 둔다.
+        cones    : 시작선 cones_enter_before_mm 앞(도면 위치) 또는 차로 안 콘이 가까우면 시작.
+                   차선 노드는 'heading' 모드로 두었다가(출력은 안 씀) handover에서 normal로 바꿔
+                   차선 노드 내부 상태를 초기화한다 (콘 때문에 꼬인 차선 추적을 버림).
+        handover : obstacle 노드가 구간 방향으로 차로 중심을 계속 따라가는 동안 차선이 다시 잡히면 넘긴다.
+        """
+        p = self.p
+        if not p['cones_source_ready']:
+            _, d = self._since(inp)
+            done = inp.obstacle.get('cones_done', False)
+            end = self._past(inp, 'm8_end_line', 100.0)
+            if done or ((d >= p['cones_len_mm']) if end is None else end):
+                self._next(inp, 'cones done' if done else f'cones end at {d:.0f}mm')
+            return Command('lane', self._lane(p['slow_speed']))
+
+        if self.sub == '':
+            near = self._past(inp, 'm8_start_line', -p['cones_enter_before_mm'])
+            if near is None:
+                _, d = self._since(inp)
+                near = d >= p['cones_approach_mm']
+                armed = d >= p['cones_approach_mm'] - 500.0
+            else:
+                armed = bool(self._past(inp, 'm8_start_line', -800.0))
+            ahead = inp.obstacle.get('cone_ahead_mm')
+            close = ahead is not None and ahead <= p['cones_enter_cone_mm']
+            if near or (armed and close):
+                self._sub('cones', inp, 'start line' if near else f'cone ahead {ahead:.0f}mm')
+            else:
+                return Command('lane', self._lane(p['slow_speed']))
+        if self.sub == 'cones':
+            _, d = self._since(inp, sub=True)
+            done = inp.obstacle.get('cones_done', False)
+            end = self._past(inp, 'm8_end_line', p['cones_end_after_mm'])
+            if done or end or d >= p['cones_zone_mm']:
+                why = 'obstacle done' if done else ('end line' if end else f'distance {d:.0f}mm')
+                self._sub('handover', inp, why)
+            else:
+                return Command('obstacle', self._lane(p['slow_speed'], 'heading'))
+        # handover
+        st = inp.lane.get('status')
+        if st in ('BOTH', 'L', 'R') and not inp.lane.get('low_conf', False):
+            self.count += 1
+        else:
+            self.count = 0
+        _, d = self._since(inp, sub=True)
+        if self.count >= p['cones_handover_frames'] or d >= p['cones_handover_mm']:
+            self._next(inp, f'lane back ({st}, {d:.0f}mm)')
+            return Command('lane', self._lane(p['slow_speed']))
+        return Command('obstacle', self._lane(p['slow_speed']))
 
     def _s_M1_TRAFFIC(self, inp):
         """신호등: 정지선 ±5cm 정지, 녹색 인지 후 15초 안에 출발."""
