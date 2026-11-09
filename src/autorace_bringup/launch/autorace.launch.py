@@ -8,6 +8,7 @@ LIMO 드라이버·카메라·라이다를 먼저 띄운 뒤 실행한다 (애�
   ros2 launch autorace_bringup autorace.launch.py start_state:=M3_PEDESTRIAN use_detector:=false
   ros2 launch autorace_bringup autorace.launch.py m7_avoid:=true            # M7을 limo_obstacle_avoid로
   ros2 launch autorace_bringup autorace.launch.py m7_avoid:=true m7_dry_run:=true   # 판단만 (바퀴는 차선)
+  ros2 launch autorace_bringup autorace.launch.py m7_avoid:=true use_fork_node:=true  # + 갈림길 판단 노드
 출발: ros2 topic pub --once /mission/start std_msgs/msg/Empty
 """
 
@@ -27,6 +28,14 @@ def _avoid_params() -> str:
     try:
         return os.path.join(get_package_share_directory('limo_obstacle_avoid'),
                             'config', 'avoid_params.yaml')
+    except Exception:
+        return ''
+
+
+def _fork_params() -> str:
+    """autorace_fork가 빌드돼 있지 않아도 (use_fork_node:=false) launch가 깨지지 않게."""
+    try:
+        return os.path.join(get_package_share_directory('autorace_fork'), 'config', 'fork_params.yaml')
     except Exception:
         return ''
 
@@ -58,6 +67,10 @@ def generate_launch_description():
         DeclareLaunchArgument('m7_avoid', default_value='false'),
         DeclareLaunchArgument('m7_dry_run', default_value='false'),
         DeclareLaunchArgument('m7_avoid_params', default_value=_avoid_params()),
+        # M2 갈림길 판단 노드(autorace_fork): YOLO fork_a/fork_b 투표 + 지금 차선 기준 이동 차선 수 판단 -> /fork_direction.
+        #   FSM이 이미 정했으면 그걸 따르므로 켜도 결정이 엇갈리지 않는다. /fork/state 로 상황을 볼 수 있다.
+        DeclareLaunchArgument('use_fork_node', default_value='false'),
+        DeclareLaunchArgument('fork_params', default_value=_fork_params()),
         Node(package='autorace_mission', executable='ackermann_bridge', name='ackermann_bridge',
              output='screen', condition=IfCondition(use_bridge)),
         Node(package='autorace_lane', executable='lane_node', name='lane_node',
@@ -75,6 +88,9 @@ def generate_launch_description():
                          {'dry_run': ParameterValue(m7_dry, value_type=bool)}],
              remappings=[('/avoid/cmd_vel', '/obstacle/cmd_vel')],
              output='screen', condition=IfCondition(m7_avoid)),
+        Node(package='autorace_fork', executable='fork_node', name='fork_node',
+             parameters=[LaunchConfiguration('fork_params')], output='screen',
+             condition=IfCondition(LaunchConfiguration('use_fork_node'))),
         Node(package='autorace_perception', executable='detector_node', name='detector_node',
              parameters=[params], output='screen', condition=IfCondition(use_detector)),
     ])

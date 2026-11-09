@@ -2,7 +2,7 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>limo_obstacle_avoid</name>
-  <version>0.2.0</version>
+  <version>0.3.0</version>
   <description>Autorace 2026 - 3차선 정차 LIMO 라이다 기반 차선변경 회피 (단계별 테스트)</description>
   <maintainer email="yunxeo072@gmail.com">yunseo</maintainer>
   <license>MIT</license>

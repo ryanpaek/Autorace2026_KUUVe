@@ -218,3 +218,18 @@ python3 tools/stress_sim.py --only 6          # 복합 오차 조건만
 - 회피 노드가 죽으면 cmd_mux 가 정지를 유지함 → 풀려면 `ros2 topic pub --once /avoid/active std_msgs/msg/Bool "{data: false}"`
 - cmd_mux 까지 죽으면 드라이버가 마지막 속도를 유지할 수 있음 → 드라이버 창 Ctrl+C 또는 조종기
 - `-t 3` 은 1초 간격으로 3번 보내므로 명령이 들어가기까지 최대 1초 정도 걸릴 수 있음
+
+## v0.3: 갈림길(미션 2) 출구 차선 이동
+
+`/fork_direction`(A/B)을 받으면 **가운데 섬 앞 끝 전에 출구 차선으로 미리** 옮깁니다 (`fork_shift: true`).
+A = 1차선(+1, 왼쪽), B = 3차선(-1, 오른쪽). 1차선에서 B면 **2차선을 한 번에** 옮깁니다.
+
+- 예전: 출구 방향을 받아도 지금 차선이 막혀야만 움직였고, 2차선 이동은 섬 바로 앞에서 판단해 항상 포기했음
+- 지금: 매 주기 `exit_plan()`으로 판단
+  - `go`: 지나갈 차선(옆·앞)과 출구 차선(섬 앞 끝까지)이 비었고, 섬까지 거리 ≥ 필요 거리 + `exit_margin` → 바로 이동
+  - `wait`: 정차 LIMO가 막음 → 지나갈 때까지 기다림 (확정 전 장애물도 막힌 것으로 봄)
+  - `too_late`: 거리 부족 → 지금 쪽 유지 (로그 한 번)
+- 필요 거리는 `fork_exit.shift_distance()`가 회피 노드와 같은 제어식으로 모의해 계산 (1차선 약 0.74m, 2차선 약 1.32m: 차체가 섬 구역을 벗어날 때까지)
+- `/avoid/state`에 `exit_plan`, `exit_need_lanes`, `exit_need_m`, `exit_rem_m`, `section_length` 추가
+- 판단 노드: `autorace_fork` 패키지 (`/fork/state`로 상황 확인)
+- 시험: `python3 tools/fork_sim.py --gap 2.5` (표지 인식 시점별 비교)

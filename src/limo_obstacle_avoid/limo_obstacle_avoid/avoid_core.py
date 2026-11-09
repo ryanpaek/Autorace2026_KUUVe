@@ -19,6 +19,8 @@ avoid_core.py  —  3차선 정적 장애물(정차 LIMO) 회피 핵심 로직
 import math
 from dataclasses import dataclass
 
+from limo_obstacle_avoid.fork_exit import shift_distance, lane_name
+
 INF = float('inf')
 
 
@@ -85,6 +87,10 @@ class AvoidParams:
     min_turn_radius: float = 0.53     # LIMO 아커만 최소 회전반경 실측값 (이보다 작게 두면 못 도는 경로를 계획)
     max_heading_deg: float = 40.0     # 이 이상 비틀어지면 더 꺾지 않음
     reach_tol: float = 0.08           # 차선 중심에서 이 안이면 '도착'
+    # ── 갈림길(미션 2) 출구 차선 미리 이동 ──
+    fork_shift: bool = True           # 갈림길 방향을 알면 섬 앞 끝 전에 출구 차선(A=+1, B=-1)으로 미리 옮김 (0/1/2차선)
+    exit_margin: float = 0.20         # 섬 앞 끝까지 남겨 둘 여유 [m] (조향 지연·차체 모서리)
+    exit_min_time: float = 0.6        # 시작 후 이 시간 동안은 미리 이동 안 함 (라이다 지도가 쌓일 때까지)
     # ── 정렬 보정 (정차 LIMO 중심이 차선 중심선에 오도록 내 좌표를 돌리고 옮김) ──
     lane_align: bool = True           # 출발 방향/위치 오차 보정 (라이다만 사용)
     align_gain: float = 0.5           # 한 번에 반영하는 비율 (0~1)
@@ -174,6 +180,7 @@ class AvoidPlanner:
     # ---------- 상태 ----------
     def reset(self):
         self.state = 'IDLE'          # IDLE → RUN → DONE
+        self.t_start = 0.0
         self.obs = []
         self.target = self.p.start_lane
         self.last_switch = -1e9
@@ -184,15 +191,24 @@ class AvoidPlanner:
         self.events = []             # (x, '설명') 기록
         self.align_dy = 0.0          # 누적 옆 보정 [m]
         self.align_th = 0.0          # 누적 방향 보정 [rad]
+        self.exit_info = {}          # 출구 이동 판단 (status 로 내보냄)
+        self._late_logged = False
+        self._given_up_for = None
 
     def start(self, ox, oy, yaw, t=0.0):
         self.reset()
+        self.t_start = t
         self.pose.reset(ox, oy, yaw, y0=self.p.start_lane * self.p.lane_width)
         self.state = 'RUN'
         self.last_switch = t - self.p.hold_time
 
     def set_exit(self, s):
-        self.exit_pref = parse_exit(s)
+        new = parse_exit(s)
+        if new is not None and self.exit_info.get('plan') == 'given_up' and new == self._given_up_for:
+            return                                   # 이미 포기한 방향을 다시 받아도 또 시도하지 않음
+        if self.exit_info.get('plan') == 'given_up':
+            self.exit_info = {}
+        self.exit_pref = new
 
     @property
     def lanes(self):
@@ -392,6 +408,44 @@ class AvoidPlanner:
                 best, best_key = lane, key
         return best
 
+    # ---------- 갈림길 출구 차선 이동 ----------
+    def _lanes_between(self, frm, to):
+        """frm 에서 to 로 갈 때 새로 지나가는 차선들 (frm 제외, to 포함)"""
+        step = 1 if to > frm else -1
+        return list(range(frm + step, to + step, step))
+
+    def exit_plan(self, obs):
+        """출구 차선으로 지금 옮겨도 되나 → ('keep'|'go'|'wait'|'too_late', 정보)
+        keep    : 이미 출구 차선 (또는 방향 모름)
+        go      : 지금 옮기기 시작 (지나갈 차선이 비었고, 섬 앞 끝까지 거리가 충분)
+        wait    : 장애물 때문에 아직 못 옮김 (계속 다시 봄)
+        too_late: 섬 앞 끝까지 남은 거리가 이동에 필요한 거리보다 짧음"""
+        p = self.p
+        ex, cur = self.exit_pref, self.target
+        if ex is None or cur == ex:
+            return 'keep', {'need_lanes': 0}
+        n = ex - cur
+        clear, settle = shift_distance(p, n)
+        x = self.pose.x
+        rem = p.section_length - (x + p.robot_front)
+        info = {'need_lanes': n, 'need_m': round(clear + p.exit_margin, 2), 'rem_m': round(rem, 2)}
+        if rem < clear + p.exit_margin:
+            return 'too_late', info
+        # 미리 옮기는 판단은 보수적으로: 아직 확정 전(1~2번 본) 장애물도 막힌 것으로 본다
+        real = [o for o in self.obs if not o.virtual]
+        back = x - p.robot_rear - p.clear_back
+        ahead = x + p.robot_front + settle
+        for lane in self._lanes_between(cur, ex):          # 지나갈 차선: 옮기는 동안 옆·앞이 비어야 함
+            for o in real:
+                if self._in_corridor(o, lane) and o.xmin < ahead and o.x_end(p.obs_min_len) > back:
+                    info['blocked_by'] = lane
+                    return 'wait', info
+        for o in real:                                      # 출구 차선: 섬 앞 끝까지 쭉 비어야 함 (옮긴 뒤 또 막히지 않게)
+            if self._in_corridor(o, ex) and o.x_end(p.obs_min_len) > back and o.xmin < p.section_length:
+                info['blocked_by'] = ex
+                return 'wait', info
+        return 'go', info
+
     # ---------- 한 주기 ----------
     def step(self, t):
         """→ (v, w).  20Hz 정도로 호출"""
@@ -411,20 +465,41 @@ class AvoidPlanner:
                 obs2 = self.obstacles(False)            # 출구 선호 때문에 막혔으면 선호 포기
                 nxt = self.choose(cur, obs2)
                 if nxt is not None:
+                    self._given_up_for = self.exit_pref
                     self.exit_pref = None
+                    self.exit_info = {'plan': 'given_up'}
                     self.events.append((x, '출구선호 포기'))
                     obs = obs2
             if nxt is None and self.exit_pref is not None:
                 # 지금 차선이 '출구 선호' 가상벽 때문에만 막힌 거면 → 선호 포기하고 그대로 직진
                 obs2 = self.obstacles(False)
                 if self.free_ahead(cur, obs2) > self.free_ahead(cur, obs) + 1e-6:
+                    self._given_up_for = self.exit_pref
                     self.exit_pref = None
+                    self.exit_info = {'plan': 'given_up'}
                     self.events.append((x, '출구선호 포기(현재 차선 유지)'))
                     obs = obs2
             if nxt is not None:
                 self.events.append((x, f'차선 {cur:+d} → {nxt:+d}  (앞 {f_cur:.2f}m)'))
                 self.target = nxt
                 self.last_switch = t
+
+        # ②' 갈림길 방향을 알면 섬 앞 끝 전에 출구 차선으로 미리 옮김 (0/1/2차선)
+        if p.fork_shift and self.exit_pref is not None and self.target != self.exit_pref \
+                and t - self.last_switch >= p.hold_time and t - self.t_start >= p.exit_min_time:
+            decision, info = self.exit_plan(obs)
+            self.exit_info = dict(info, plan=decision)
+            if decision == 'go':
+                self.events.append((x, f'갈림길 출구로 이동: {lane_name(self.target)} → {lane_name(self.exit_pref)} '
+                                        f'({abs(info["need_lanes"])}차선, 섬까지 {info["rem_m"]:.2f}m / 필요 {info["need_m"]:.2f}m)'))
+                self.target = self.exit_pref
+                self.last_switch = t
+            elif decision == 'too_late' and not self._late_logged:
+                self._late_logged = True
+                self.events.append((x, f'갈림길 출구 이동 불가: 섬까지 {info["rem_m"]:.2f}m < 필요 {info["need_m"]:.2f}m '
+                                        f'({lane_name(self.target)} 유지)'))
+        elif self.exit_pref is not None and self.target == self.exit_pref:
+            self.exit_info = {'need_lanes': 0, 'plan': 'keep'}
 
         # ③ 속도
         in_lane = abs(y - self.center(self.target)) < p.reach_tol
@@ -472,4 +547,9 @@ class AvoidPlanner:
             'n_obs': len([o for o in self.obs if o.hits >= self.p.confirm_hits]),
             'align_dy_cm': round(self.align_dy * 100, 1),
             'align_deg': round(math.degrees(self.align_th), 2),
+            'section_length': round(self.p.section_length, 3),
+            'exit_plan': self.exit_info.get('plan'),
+            'exit_need_lanes': self.exit_info.get('need_lanes'),
+            'exit_need_m': self.exit_info.get('need_m'),
+            'exit_rem_m': self.exit_info.get('rem_m'),
         }

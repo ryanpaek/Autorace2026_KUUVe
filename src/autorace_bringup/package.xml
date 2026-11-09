@@ -13,6 +13,7 @@
   <exec_depend>autorace_obstacle</exec_depend>
   <exec_depend>autorace_perception</exec_depend>
   <exec_depend>limo_obstacle_avoid</exec_depend>
+  <exec_depend>autorace_fork</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
 
