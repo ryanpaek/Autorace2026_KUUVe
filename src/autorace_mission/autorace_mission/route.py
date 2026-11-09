@@ -104,7 +104,9 @@ class RouteMap:
         self.landmarks: List[dict] = []
         for lm in data.get('landmarks', []):
             self.landmarks.append({'name': lm['name'], 's': self.s_of(lm['xy']),
-                                   'width': float(lm.get('width', 40.0))})
+                                   'width': float(lm.get('width', 40.0)),
+                                   # crosswalk: 뒤에 횡단보도 막대가 있는 정지선 (그런 선으로만 맞춘다)
+                                   'kind': str(lm.get('kind', 'line'))})
         self.landmarks.sort(key=lambda m: m['s'])
         self.points: Dict[str, float] = {k: self.s_of(v)
                                          for k, v in data.get('points', {}).items()}
@@ -156,7 +158,7 @@ class RouteTracker:
     def __init__(self, route: RouteMap, gate_mm: float = 250.0, gate_per_m: float = 60.0,
                  gate_max_mm: float = 800.0, max_range_mm: float = 900.0,
                  gain: float = 0.6, odom_scale: float = 1.0, ordered_gate_mm: float = 0.0,
-                 same_gate_mm: float = 200.0):
+                 same_gate_mm: float = 200.0, crosswalk_gate_mm: float = 400.0):
         self.route = route
         # 예측 위치와 도면 선이 gate 안이어야 같은 선으로 본다.
         # 마지막 보정 뒤 많이 달렸을수록 오도메트리 오차가 커지므로 m당 gate_per_m씩 넓힌다
@@ -172,6 +174,10 @@ class RouteTracker:
         # 최대 약 18% 길어져(11/02 실측 80cm) 일반 게이트로는 엉뚱한 선과 짝지어진다. 0이면 끔
         self.ordered_gate_mm = ordered_gate_mm
         self.same_gate_mm = same_gate_mm      # 같은 선을 다시 볼 때 허용 오차
+        # 횡단보도 정지선(kind=crosswalk) 앞 400~600mm에 '천천히' 글자가 있어 순서 짝짓기 범위(1200)로는
+        # 글자가 정지선이 됐다 (11/09). 글자는 정지선보다 앞(가까운 쪽)에 있으므로 "도면 선이 본 선보다
+        # 이만큼 넘게 뒤"인 짝은 버린다. 반대쪽(지그재그 odom 과대, 본 선이 예측보다 가까움)은 그대로 허용
+        self.crosswalk_gate_mm = crosswalk_gate_mm
         self.last_idx: Optional[int] = None
         self.s = 0.0
         self._dist_ref = None
@@ -191,44 +197,71 @@ class RouteTracker:
     def gate(self) -> float:
         return min(self.gate_max_mm, self.gate_mm + self.gate_per_m * self._since_fix / 1000.0)
 
-    def update(self, dist_mm: float, stoplines_mm: Optional[List[float]] = None) -> float:
+    def update(self, dist_mm: float, stoplines_mm: Optional[List[float]] = None,
+               crosswalk_mm: Optional[List[float]] = None) -> float:
+        """crosswalk_mm: 그중 횡단보도 막대가 뒤따르는 선 (lane 노드 crosswalk_lines_mm).
+        주면 kind=crosswalk 도면 선(정지선)은 이 선들로만 맞춘다. None이면 예전처럼 아무 선이나."""
         if self._dist_ref is None:
             self._dist_ref = dist_mm
         step = (dist_mm - self._dist_ref) * self.odom_scale
         self.s += step
         self._since_fix += abs(step)
         self._dist_ref = dist_mm
+        # 이 프레임의 선 중 도면 선과 가장 잘 맞는 것 하나만 쓴다.
+        # (11/09: 가장 가까운 선부터 쓰면 정지선 앞 '천천히' 글자가 순서 짝짓기로 정지선 자리를 먼저 차지했다)
+        best = None
         for d in sorted(stoplines_mm or []):
             if d < -50.0 or d > self.max_range_mm:
                 continue
-            lm = self.match(self.s + d)
+            is_xw = None if crosswalk_mm is None else any(abs(d - c) < 1.0 for c in crosswalk_mm)
+            lm = self.match(self.s + d, is_xw)
             if lm is not None:
                 err = lm['s'] - (self.s + d)
-                new_line = self.route.landmarks.index(lm) != self.last_idx
-                # 순서 짝짓기로 새 선을 처음 맞추면 한 번에 고친다 (오차는 odom 쪽이 원인).
-                # 남겨 두면 다음 프레임에 이웃 선(횡단보도 끝선 등)과 짝지어질 수 있다
-                g = 1.0 if (self.ordered_gate_mm > 0.0 and new_line) else self.gain
-                self.s += g * err
-                self.fixes += 1
-                if abs(err) * (1.0 - self.gain) < 100.0:
-                    self._since_fix = 0.0      # 남은 오차가 작으면 게이트를 다시 좁힌다
-                self.last_fix = {'name': lm['name'], 'err_mm': round(err), 'd_mm': round(d)}
-                self.last_idx = self.route.landmarks.index(lm)
-                break                     # 가장 가까운 선 하나만
+                if best is None or abs(err) < abs(best[2]):
+                    best = (d, lm, err)
+        if best is not None:
+            d, lm, err = best
+            new_line = self.route.landmarks.index(lm) != self.last_idx
+            # 순서 짝짓기로 새 선을 처음 맞추면 한 번에 고친다 (오차는 odom 쪽이 원인).
+            # 남겨 두면 다음 프레임에 이웃 선(횡단보도 끝선 등)과 짝지어질 수 있다
+            g = 1.0 if (self.ordered_gate_mm > 0.0 and new_line) else self.gain
+            self.s += g * err
+            self.fixes += 1
+            if abs(err) * (1.0 - self.gain) < 100.0:
+                self._since_fix = 0.0      # 남은 오차가 작으면 게이트를 다시 좁힌다
+            self.last_fix = {'name': lm['name'], 'err_mm': round(err), 'd_mm': round(d)}
+            self.last_idx = self.route.landmarks.index(lm)
         return self.s
 
-    def match(self, s_line: float) -> Optional[dict]:
+    def match(self, s_line: float, is_xw: Optional[bool] = None) -> Optional[dict]:
         lms = self.route.landmarks
+
+        def ok(lm):
+            # 정지선은 막대가 뒤따르는 선만, 도면 예측 가까이에서만 (글자·마름모 표시를 정지선으로 맞추지 않게, 11/09)
+            if lm.get('kind') == 'crosswalk':
+                if is_xw is False:
+                    return False
+                if self.crosswalk_gate_mm > 0.0 and lm['s'] - s_line > self.crosswalk_gate_mm:
+                    return False
+            return True
+
         if self.ordered_gate_mm > 0.0 and self.last_idx is not None:
             i = self.last_idx
-            if 0 <= i < len(lms) and abs(lms[i]['s'] - s_line) <= self.same_gate_mm:
+            if 0 <= i < len(lms) and abs(lms[i]['s'] - s_line) <= self.same_gate_mm and ok(lms[i]):
                 return lms[i]                       # 방금 맞춘 선을 다시 봄
             for j in (i + 1, i + 2):                 # 다음 선 (하나 놓쳤으면 그다음)
-                if 0 <= j < len(lms) and abs(lms[j]['s'] - s_line) <= self.ordered_gate_mm:
+                g = self.ordered_gate_mm
+                if j == i + 2 and 0 <= i + 1 < len(lms) and lms[i + 1]['s'] > s_line:
+                    # 건너뛸 선이 본 선보다 앞(아직 안 지남)이면 놓친 게 아니다 -> 일반 게이트로만
+                    # (11/09: 정지선으로 못 맞춘 글자가 건너뛰기로 횡단보도 끝선이 됐다)
+                    g = self.gate
+                if 0 <= j < len(lms) and abs(lms[j]['s'] - s_line) <= g and ok(lms[j]):
                     return lms[j]
             return None
         best = None
         for lm in self.route.landmarks:
+            if not ok(lm):
+                continue
             e = abs(lm['s'] - s_line)
             if e <= self.gate and (best is None or e < abs(best['s'] - s_line)):
                 best = lm

@@ -223,7 +223,14 @@ class LaneParams:
     bar_fill_min: float = 0.15
     bar_fill_max: float = 0.75
     bar_min_segments: int = 2
-    bar_row_ratio: float = 0.3
+    # 11/09 bag: 정지선 뒤 150mm 안 막대 행 비율 0.76~1.0, '천천히' 글자 행은 0.47 이하.
+    # 0.3이면 글자도 횡단보도 선이 됐다 (M3·M1 정지 위치와 도면 위치가 글자에 끌려감)
+    bar_row_ratio: float = 0.6
+    # 가로띠 안 행마다 흰 구간 수의 평균. 실제 선 1~3.8, 글자 5~9, 횡단보도 블록 가장자리 4~5
+    stopline_max_segments: float = 3.9
+    # BEV 맨 아래·맨 위 행에 닿은 띠는 잘린 것이라 가까운 가장자리 거리를 모른다.
+    # (11/09: 정지선이 사각지대로 들어간 뒤 횡단보도 블록이 "348mm 앞 선"으로 계속 잡혀 끝선에서 섬)
+    stopline_skip_edges: bool = True
     # 속도
     curve_slowdown: float = 0.3       # |kappa| = kappa_max일 때 속도를 30% 줄인다
     # --- 11/06 고도화 (전부 기본 꺼짐: 0이면 예전과 똑같이 달린다) ---
@@ -1093,7 +1100,9 @@ def detect_stoplines(bev_white: np.ndarray, center_col: float, cfg: BevConfig,
             while r_end - 1 >= 0 and on[r_end - 1]:
                 r_end -= 1
             thick = (r - r_end + 1) * cfg.mm_per_px_y
-            if p.stopline_min_mm <= thick <= p.stopline_max_mm:
+            clipped = p.stopline_skip_edges and (r == h - 1 or r_end == 0)
+            seg_ok = float(segments[r_end:r + 1].mean()) <= p.stopline_max_segments
+            if p.stopline_min_mm <= thick <= p.stopline_max_mm and not clipped and seg_ok:
                 y_near_edge = cfg.row_to_y_mm(r + 0.5)
                 r0 = max(0, r_end - look)
                 f, s = fill[r0:r_end], segments[r0:r_end]
