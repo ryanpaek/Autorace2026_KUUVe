@@ -364,7 +364,8 @@ class ParkingV2:
 
         if self.phase == 'WAIT_LINE':       # ① 흰 선 기다림 (차선 노드 명령 넘김)
             lines = [d for d in inp['stoplines_mm'] if d >= p['line_min_mm']]
-            if moved >= p['ignore_mm'] and lines:
+            # armed: 미션 노드가 주차 표지를 봤거나 도면상 주차 앞 선 근처 (/mission/state parking_armed)
+            if moved >= p['ignore_mm'] and lines and inp.get('armed', True):
                 self.lane_cfg = {'target_offset_mm': p['target_offset_mm']}
                 self._enter('FOLLOW', inp)
             else:
@@ -712,7 +713,7 @@ def main(args=None):
                 v, k, info = self.logic.step({
                     't': time.monotonic(), 'dist_mm': self.dist_mm, 'yaw': self.yaw,
                     'lane_v': self.lane_v, 'lane_w': self.lane_w, 'stoplines_mm': self.stoplines,
-                    'end_lines_mm': self.end_lines,
+                    'end_lines_mm': self.end_lines, 'armed': bool(self.mstate.get('parking_armed', True)),
                     'clusters': clusters, 'blocked': blocked})
                 tw.linear.x = float(v)
                 tw.angular.z = float(self.lane_w if k is None else v * k)

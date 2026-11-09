@@ -277,12 +277,13 @@ class ObstacleNode(Node):
         near = [c['near_x'] for c in clusters if abs(c['y']) < 150.0]
         state = {'clusters': clusters[:12], 'lane_occupancy': occ,
                  'front_min_mm': min(near) if near else None,
-                 'cones_done': False, 'cone_ahead_mm': None}
+                 'cones_done': False, 'cone_ahead_mm': None, 'cone_any_ahead_mm': None}
         if self.mstate == 'M8_CONES' and self.integ.ready:
             pose = self.integ.pose
             self.cands = self.fol.on_scan(pts, Pose2D(pose.x, pose.y, pose.yaw), self.lidar_xy)
             state['cones_done'] = self.fol.done
             state['cone_ahead_mm'] = self.fol.cone_ahead_mm(pose)
+            state['cone_any_ahead_mm'] = self.fol.nearest_ahead_mm(pose)
             state['cones'] = self.fol.state_dict()
         self.last = state       # /obstacle/state는 _tick에서 m7 값과 합쳐 발행
 

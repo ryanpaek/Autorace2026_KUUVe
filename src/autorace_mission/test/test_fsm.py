@@ -245,3 +245,99 @@ def test_odom_jump_does_not_skip_states():
         sim.tick()
     assert fsm.state == 'M3_PEDESTRIAN'
     assert any('odom jump' in m for m in fsm.log)
+
+
+# ---------------------------------------------------------------- 11/09 트리거 정리
+def _drive(fsm, n, step_mm=10.0, t0=0.0, d0=0.0, **kw):
+    """step_mm씩 n틱 달린다. kw 값이 함수면 (i, dist)로 불러 그 틱 입력을 만든다."""
+    d = d0
+    for i in range(n):
+        args = {k: (v(i, d) if callable(v) else v) for k, v in kw.items()}
+        args.setdefault('new_detection_frame', True)
+        fsm.step(Inputs(t=t0 + i * 0.05, dist_mm=d, **args))
+        d += step_mm
+    return d
+
+
+def test_bump_slow_ends_after_imu_bump():
+    """서행 표지 하나만 봐도 서행, IMU로 방지턱을 느끼고 bump_after_mm 더 가면 서행 끝."""
+    fsm = MissionFSM({'start_state': 'M5_BUMP'})
+    d = _drive(fsm, 10, detections={'slow': 0.9})
+    assert fsm.sub == 'slow'
+    d = _drive(fsm, 20, d0=d, tilt_rate=0.05)
+    assert fsm.state == 'M5_BUMP'
+    d = _drive(fsm, 1, d0=d, tilt_rate=0.6)
+    d = _drive(fsm, 25, d0=d, tilt_rate=0.05)          # 250mm: 아직
+    assert fsm.state == 'M5_BUMP'
+    _drive(fsm, 10, d0=d, tilt_rate=0.05)
+    assert fsm.state == 'M6_ZIGZAG'
+    assert any('bump passed (imu)' in m for m in fsm.log)
+
+
+def test_bump_slow_fallback_distance_without_imu():
+    fsm = MissionFSM({'start_state': 'M5_BUMP', 'bump_slow_mm': 500.0})
+    d = _drive(fsm, 10, detections={'bump': 0.9})
+    _drive(fsm, 60, d0=d)
+    assert fsm.state == 'M6_ZIGZAG'
+    assert any('FALLBACK' in m for m in fsm.log)
+
+
+def test_zigzag_starts_when_front_wheel_crosses_white_line():
+    """지그재그 시작 흰 선: 카메라로 본 거리만큼 더 가야 서행 시작 (보자마자가 아니라 지나는 순간)."""
+    fsm = MissionFSM({'start_state': 'M6_ZIGZAG'})
+    line_at = 1000.0
+    lanef = lambda i, d: {'stoplines_mm': [line_at - d]} if 400.0 < line_at - d < 1800.0 else {}
+    d = 0.0
+    while fsm.sub == '' and d < 3000.0:
+        d = _drive(fsm, 1, d0=d, lane=lanef)
+    assert fsm.sub == 'zigzag'
+    assert d == pytest.approx(line_at, abs=25)
+    assert fsm.line.how == 'camera'
+
+
+def test_slow_kept_until_crosswalk_stop_then_base_speed():
+    fsm = MissionFSM({'start_state': 'M3_PEDESTRIAN'})
+    cmd = fsm.step(Inputs(t=0.0, dist_mm=0.0))
+    assert cmd.lane['speed'] == fsm.p['slow_speed']
+    assert fsm.p['slow_speed'] == 0.20
+
+
+def test_cones_end_when_no_cone_visible():
+    """라바콘 모드: 콘을 봤다가 앞 800mm 안에 0.5초 동안 하나도 없으면 handover."""
+    fsm = MissionFSM({'start_state': 'M8_CONES', 'cones_source_ready': True})
+    fsm._sub('cones', Inputs(t=0.0, dist_mm=0.0))
+    d = _drive(fsm, 60, obstacle={'cone_any_ahead_mm': 300.0})     # 600mm: 콘 계속 보임
+    assert fsm.sub == 'cones'
+    d = _drive(fsm, 5, d0=d, t0=3.0, obstacle={'cone_any_ahead_mm': None})   # 0.2초
+    assert fsm.sub == 'cones'
+    _drive(fsm, 10, d0=d, t0=3.25, obstacle={'cone_any_ahead_mm': 1500.0})
+    assert fsm.sub == 'handover'
+    assert any('no cones ahead' in m for m in fsm.log)
+
+
+def test_cones_not_ended_before_any_cone_seen():
+    fsm = MissionFSM({'start_state': 'M8_CONES', 'cones_source_ready': True})
+    fsm._sub('cones', Inputs(t=0.0, dist_mm=0.0))
+    _drive(fsm, 80, obstacle={'cone_any_ahead_mm': None})
+    assert fsm.sub == 'cones'
+
+
+def test_parking_armed_by_sign_seen_at_traffic_light():
+    """주차 표지는 신호등 구간에서 봐도 기억했다가 M4에서 주차 노드를 무장시킨다 (경로 지도 있을 때)."""
+    pts = {'m4_pre_line': 5000.0}
+    fsm = MissionFSM({'start_state': 'M1_TRAFFIC', 'route_points': pts})
+    _drive(fsm, 10, detections={'parking': 0.9, 'red': 0.9}, route_s=100.0)
+    assert fsm.parking_sign and fsm.state == 'M1_TRAFFIC'
+    fsm._goto('M4_PARKING', Inputs(t=1.0, dist_mm=100.0))
+    cmd = fsm.step(Inputs(t=1.05, dist_mm=110.0, route_s=1000.0))
+    assert fsm.parking_armed and cmd.source == 'parking'
+    assert cmd.lane['speed'] == fsm.p['slow_speed']
+
+
+def test_parking_armed_fallback_near_pre_line():
+    pts = {'m4_pre_line': 5000.0}
+    fsm = MissionFSM({'start_state': 'M4_PARKING', 'route_points': pts})
+    fsm.step(Inputs(t=0.0, dist_mm=0.0, route_s=3000.0))
+    assert not fsm.parking_armed
+    fsm.step(Inputs(t=0.05, dist_mm=10.0, route_s=4300.0))
+    assert fsm.parking_armed
