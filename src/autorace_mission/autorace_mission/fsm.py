@@ -34,6 +34,7 @@ DEFAULT_PARAMS = {
     'vote_window': 8,            # 다수결 창 (인식 프레임 수)
     'vote_need': 5,
     'det_conf': 0.5,
+    'odom_jump_mm': 600.0,       # 한 틱에 주행거리가 이만큼 넘게 튀면 odom 오류로 보고 그만큼은 무시 (11/09: 체크섬 오류로 7.5km가 찍혀 FINISHED)
     'state_max_mm': 10000.0,     # 한 상태에서 이만큼 달려도 안 끝나면 강제로 다음 상태 (멈춤 방지). M6이 약 9m라 10m
     # M5 방지턱
     'bump_slow_mm': 1800.0,      # 도면 추정(방지턱 위치는 도면에 없음): 표지 인식(선 약1m 앞) ~ 마름모 끝+여유. TODO 실측
@@ -220,6 +221,8 @@ class MissionFSM:
         self.stop: Optional[StopApproach] = None
         self.count = 0                               # 서브 상태 안에서 쓰는 연속 카운터
         self.log = []
+        self._last_dist = None                       # odom 점프 감시용
+        self._dist_adj = 0.0
         self._goto(self.p['start_state'], Inputs(t=0.0, dist_mm=0.0), 'init')
 
     # --- 공통 도구 ------------------------------------------------------------
@@ -295,11 +298,22 @@ class MissionFSM:
         return cam or bool(r)
 
     # --- 메인 ---------------------------------------------------------------
+    def _guard_odom(self, inp: Inputs) -> None:
+        """주행거리가 한 틱에 비정상적으로 튀면 그만큼을 빼서 없던 일로 한다."""
+        raw = inp.dist_mm
+        if self._last_dist is not None and abs(raw - self._last_dist) > self.p['odom_jump_mm']:
+            self._dist_adj += raw - self._last_dist
+            self.log.append(f'odom jump ignored {raw - self._last_dist:.0f}mm')
+        self._last_dist = raw
+        inp.dist_mm = raw - self._dist_adj
+
     def step(self, inp: Inputs) -> Command:
+        self._guard_odom(inp)
         if self.state in SEQUENCE[1:-1]:
+            # 표지판·선·도면 위치가 1순위. 거리는 마지막 안전장치(2순위)로만 쓴다.
             _, d = self._since(inp)
             if d > self.p['state_max_mm']:
-                self._next(inp, f'state distance limit {d:.0f}mm')
+                self._next(inp, f'FALLBACK: state distance limit {d:.0f}mm (no sign/line seen)')
         cmd = getattr(self, '_s_' + self.state)(inp)
         cmd.note = cmd.note or f'{self.state}/{self.sub}'
         return cmd

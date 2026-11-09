@@ -232,3 +232,16 @@ def test_cones_handover_times_out_without_lane():
             break
     assert fsm.state == 'M1_TRAFFIC'
     assert any('distance' in s for s in fsm.log)
+
+
+def test_odom_jump_does_not_skip_states():
+    """체크섬 오류 등으로 주행거리가 갑자기 수 km 튀어도 상태가 넘어가지 않는다 (11/09 FINISHED 사고)."""
+    fsm = MissionFSM({'start_state': 'M3_PEDESTRIAN'})
+    sim = Sim(fsm)
+    for _ in range(20):
+        sim.tick()
+    sim.dist += 7_500_000.0
+    for _ in range(40):
+        sim.tick()
+    assert fsm.state == 'M3_PEDESTRIAN'
+    assert any('odom jump' in m for m in fsm.log)
