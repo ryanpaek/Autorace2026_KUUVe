@@ -219,7 +219,8 @@ class MissionNode(Node):
         route_s = None
         if self.route_active:
             lines = self.lane.get('stoplines_mm') if self.new_lane else None
-            route_s = self.tracker.update(self.dist_mm, lines)
+            xw = self.lane.get('crosswalk_lines_mm') if self.new_lane else None
+            route_s = self.tracker.update(self.dist_mm, lines, xw)
             self.new_lane = False
         return Inputs(t=time.monotonic(), dist_mm=self.dist_mm, yaw=self.yaw,
                       detections=dict(self.det), new_detection_frame=self.new_det,

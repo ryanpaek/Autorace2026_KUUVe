@@ -102,6 +102,47 @@ def test_start_line_without_bars_is_ignored():
     assert not s.should_stop(inp)
 
 
+def _approach(s, line_at, fake_bottom=None, route_line=None, route_err=0.0, step=5.0):
+    """line_at(누적 거리)에 정지선. 앞바퀴 350mm 안은 카메라가 못 본다.
+    fake_bottom: 선이 사각지대로 들어간 뒤 BEV 아래 끝에 계속 보이는 가짜 선 거리 (횡단보도 블록)."""
+    s.route_line_s = route_line
+    dist = 0.0
+    while dist < line_at + 1000.0:
+        rem = line_at - dist
+        lines = [rem] if 350.0 < rem < 1500.0 else []
+        if fake_bottom is not None and -540.0 < rem <= 350.0:
+            lines = [fake_bottom]
+        inp = Inputs(t=0.0, dist_mm=dist, lane={'crosswalk_lines_mm': lines, 'stoplines_mm': lines})
+        inp.route_s = None if route_line is None else dist + route_err
+        if s.should_stop(inp):
+            return line_at - dist           # 멈출 때 남은 거리 (+면 선 앞)
+        dist += step
+    return None
+
+
+def test_stop_ignores_crosswalk_blocks_after_freeze():
+    """정지선이 사각지대로 들어간 뒤 블록이 348mm에 계속 보여도 정지선에서 선다 (11/09 끝선 정지)."""
+    old = _approach(StopApproach(0.0, 0.0, 400.0), 1200.0, fake_bottom=348.0)
+    assert old is None or old < -300.0         # 예전: 블록을 다 지나서야 (또는 못 섬)
+    new = _approach(StopApproach(0.0, 0.0, 400.0, freeze_mm=450.0), 1200.0, fake_bottom=348.0)
+    assert new == pytest.approx(0.0, abs=10.0)
+
+
+def test_stop_route_gate_skips_crosswalk_end_line():
+    """정지선이 이미 사각지대일 때 보이는 끝선(540mm 뒤)을 정지선으로 잡지 않고 도면 위치로 선다."""
+    s = StopApproach(0.0, 0.0, 400.0, freeze_mm=450.0, route_gate_mm=300.0)
+    s.route_line_s = 300.0
+    for dist in range(0, 400, 5):
+        rem = 300.0 - dist
+        inp = Inputs(t=0.0, dist_mm=float(dist),
+                     lane={'crosswalk_lines_mm': [rem + 540.0], 'stoplines_mm': [rem + 540.0]})
+        inp.route_s = float(dist)
+        if s.should_stop(inp):
+            break
+    assert s.how == 'route'
+    assert 300.0 - dist == pytest.approx(0.0, abs=10.0)
+
+
 def test_fork_choice_remembered_from_obstacle_zone():
     fsm = MissionFSM({'start_state': 'M7_OBSTACLE', 'm7_len_mm': 300.0,
                       'fork_len_mm': 300.0})

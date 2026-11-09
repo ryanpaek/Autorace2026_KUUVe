@@ -45,6 +45,10 @@ DEFAULT_PARAMS = {
     'stop_target_mm': 0.0,       # 앞바퀴가 정지선 가까운 가장자리에서 멈출 위치 (+면 선 앞)
     'stop_brake_mm': 30.0,       # TODO 실측: approach_speed에서 0 명령 후 밀려가는 거리
     'stop_lost_ok_mm': 400.0,    # 정지선이 카메라에서 사라진 뒤 오도메트리로 이어 가는 한계
+    # 정지선이 이 거리 안으로 오면 카메라 갱신을 끊고 오도메트리로만 센다.
+    # 카메라 사각지대(앞바퀴 약 350mm 안) 직전부터는 뒤따르는 횡단보도 블록을 정지선으로 다시 잡기 쉽다 (11/09)
+    'stop_freeze_mm': 450.0,
+    'stop_route_gate_mm': 300.0,  # 처음 잡는 선이 도면 예측과 이만큼 넘게 다르면 버림 (끝선 540mm 뒤)
     'arm_on_crosswalk_mm': 1200.0,  # 표지판을 못 봐도 횡단보도가 이 거리 안이면 정지 준비
     'ped_wait_sec': 3.5,         # 규정: 3초 이상 대기, 15초 안에 출발
     'leave_mm': 600.0,           # 출발 후 다음 미션으로 넘어가기까지 거리 (횡단보도 깊이 약 570mm를 벗어나게)
@@ -129,14 +133,23 @@ class StopApproach:
     """
 
     def __init__(self, target_mm: float, brake_mm: float, lost_ok_mm: float,
-                 key: str = 'crosswalk_lines_mm'):
+                 key: str = 'crosswalk_lines_mm', freeze_mm: float = 0.0,
+                 route_gate_mm: float = 0.0):
         self.target_mm = target_mm
         self.brake_mm = brake_mm
         self.lost_ok_mm = lost_ok_mm
         self.key = key           # 기본: 바로 뒤에 횡단보도 막대가 있는 가로선만 정지선으로 봄
+        self.freeze_mm = freeze_mm          # 0이면 끔 (예전 동작)
+        self.route_gate_mm = route_gate_mm  # 0이면 끔
         self.seen_d = None       # 마지막으로 본 정지선 거리 (앞바퀴 기준)
         self.seen_at = None      # 그때의 누적 주행 거리
         self.route_line_s = None  # 도면상 정지선 s. 카메라가 선을 못 볼 때만 쓰는 예비값
+        self.how = None          # 'camera' | 'route' (디버그)
+
+    def _route_pred(self, inp: Inputs) -> Optional[float]:
+        if self.route_line_s is None or inp.route_s is None:
+            return None
+        return self.route_line_s - inp.route_s
 
     def remaining(self, inp: Inputs) -> Optional[float]:
         # 미션 시작선도 흰 가로선이라, 횡단보도 막대가 뒤따르는 선만 쓴다.
@@ -144,10 +157,27 @@ class StopApproach:
         lines = inp.lane.get(self.key)
         if lines is None:
             lines = inp.lane.get('stoplines_mm') or []
-        if lines:
-            d = lines[0]
-            if self.seen_d is None or abs(d - self._predicted(inp)) < 150.0:
-                self.seen_d, self.seen_at = d, inp.dist_mm
+        frozen = (self.freeze_mm > 0.0 and self.seen_d is not None
+                  and self._predicted(inp) < self.freeze_mm)
+        if lines and not frozen:
+            if self.seen_d is not None:
+                ref, gate = self._predicted(inp), 150.0
+            else:
+                ref = self._route_pred(inp) if self.route_gate_mm > 0.0 else None
+                gate = self.route_gate_mm
+            if ref is None:
+                cand = lines[0]
+            else:
+                cand = min(lines, key=lambda d: abs(d - ref))
+                if abs(cand - ref) >= gate:
+                    cand = None
+            if cand is not None:
+                self.seen_d, self.seen_at, self.how = cand, inp.dist_mm, 'camera'
+        if self.seen_d is None and self.freeze_mm > 0.0 and self.route_gate_mm > 0.0:
+            rp = self._route_pred(inp)
+            if rp is not None and rp < self.freeze_mm:
+                # 이미 카메라 사각지대 근처에서 시작: 도면 위치를 출발점으로 오도메트리로 센다
+                self.seen_d, self.seen_at, self.how = rp, inp.dist_mm, 'route'
         if self.seen_d is None:
             if self.route_line_s is not None and inp.route_s is not None:
                 return self.route_line_s - inp.route_s
@@ -231,7 +261,9 @@ class MissionFSM:
     def _arm_stop(self, inp: Inputs, line: Optional[str] = None) -> None:
         self._sub('approach', inp)
         self.stop = StopApproach(self.p['stop_target_mm'], self.p['stop_brake_mm'],
-                                 self.p['stop_lost_ok_mm'])
+                                 self.p['stop_lost_ok_mm'],
+                                 freeze_mm=self.p['stop_freeze_mm'],
+                                 route_gate_mm=self.p['stop_route_gate_mm'])
         self.stop.route_line_s = self._rp(line) if line else None
 
     def _rp(self, name: str) -> Optional[float]:

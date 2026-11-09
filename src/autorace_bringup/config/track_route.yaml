@@ -26,13 +26,13 @@ segments:
 landmarks:
   - {name: m5_slow_line,      xy: [2520, 5580], width: 40}   # 서행 표지 노면 선 (방지턱 위치는 도면에 없음)
   - {name: m6_zigzag_line,    xy: [9580, 4493], width: 40}   # 지그재그 시작선
-  - {name: m3_stop_line,      xy: [9580, 2510], width: 30}   # 보행자 횡단보도 정지선
+  - {name: m3_stop_line,      xy: [9580, 2510], width: 30, kind: crosswalk}   # 보행자 횡단보도 정지선
   - {name: m3_crosswalk_end,  xy: [9580, 1970], width: 30}   # 횡단보도 끝선
   - {name: m7_start_line,     xy: [8652, 940],  width: 40}   # 3차선 시작선
   - {name: m8_start_line,     xy: [720, 1820],  width: 40}   # 라바콘 구간 시작선
   - {name: m8_end_line,       xy: [720, 3920],  width: 40}   # 라바콘 구간 끝선
   - {name: m1_pre_line,       xy: [2283, 4840], width: 40}   # 신호등 앞 마름모 시작선
-  - {name: m1_stop_line,      xy: [3203, 4840], width: 30}   # 신호등 횡단보도 정지선
+  - {name: m1_stop_line,      xy: [3203, 4840], width: 30, kind: crosswalk}   # 신호등 횡단보도 정지선
   - {name: m1_crosswalk_end,  xy: [3743, 4840], width: 30}   # 횡단보도 끝선
   - {name: m4_pre_line,       xy: [5610, 4840], width: 40}   # 주차 구역 앞 선
 
