@@ -110,7 +110,9 @@ class ObstacleNode(Node):
         p('m7_avoid_node', '/avoid_node')   # section_length를 넣을 회피 노드 이름
         lp = M7LinkParams()
         for f in fields(lp):
-            setattr(lp, f.name, p('m7_' + f.name, getattr(lp, f.name)).value)
+            v = getattr(lp, f.name)
+            v = list(v) if isinstance(v, tuple) else v        # ROS 파라미터는 tuple을 못 받음
+            setattr(lp, f.name, p('m7_' + f.name, v).value)
         self.link = M7Link(lp)
 
         g = self.get_parameter
@@ -165,6 +167,7 @@ class ObstacleNode(Node):
                                  lambda m: self.link.on_avoid_active(m.data, time.monotonic()), 10)
         self.create_subscription(Bool, '/avoid/done', lambda m: self.link.on_avoid_done(m.data), 10)
         self.create_subscription(String, '/avoid/state', self._on_avoid_state, 10)
+        self.create_subscription(String, '/perception/detections', self._on_detections, 10)  # M7 끄기 (off_mode: sign)
         self.enable_pub = self.create_publisher(Bool, '/avoid/enable', 10)
         self.fork_pub = self.create_publisher(String, '/fork_direction', 10)
         self.param_cli = self.create_client(
@@ -203,6 +206,13 @@ class ObstacleNode(Node):
             return
         self.lane_t = time.monotonic()
         self._learn_yaw()
+
+    def _on_detections(self, msg):
+        try:
+            dets = json.loads(msg.data).get('detections', [])
+        except (json.JSONDecodeError, AttributeError):
+            return
+        self.link.on_detections(dets)
 
     def _on_avoid_state(self, msg):
         try:
@@ -275,6 +285,10 @@ class ObstacleNode(Node):
         occ = lane_occupancy(clusters, g('lane_centers_y').value,
                              g('lane_half_width').value, g('roi_x_max').value)
         near = [c['near_x'] for c in clusters if abs(c['y']) < 150.0]
+        # M7 켜기(enable_mode: obstacle): 라이다 -> 앞 차로(차 중심 ±trigger_half_width_mm) 안 가장 가까운 장애물
+        lx, hw = g('laser_x_mm').value, self.link.p.trigger_half_width_mm
+        ahead = [c['near_x'] - lx for c in clusters if abs(c['y']) <= hw and c['near_x'] > lx]
+        self.link.on_front(min(ahead) if ahead else None)
         state = {'clusters': clusters[:12], 'lane_occupancy': occ,
                  'front_min_mm': min(near) if near else None,
                  'cones_done': False, 'cone_ahead_mm': None}
