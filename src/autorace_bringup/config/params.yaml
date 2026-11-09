@@ -54,7 +54,15 @@ mission_node:
     m7_external_avoid: false               # launch의 m7_avoid:=true가 켬 (limo_obstacle_avoid로 회피)
     m7_force_after_island_mm: 500.0        # 회피가 안 끝나도 섬 끝 + 이만큼에서 M2로
     fork_from_m7_exit: true                # 갈림길 표지를 못 읽으면 회피가 끝난 차로를 씀
-    cones_len_mm: 4300.0                   # 도면 기준, 모의맵 실측으로 확인
+    cones_len_mm: 4300.0                   # cones_source_ready=false일 때만 씀 (차선 주행 통과 거리)
+    # M8 라바콘: obstacle 노드가 콘 사이 경로를 따라감. false로 바꾸면 예전처럼 차선 주행으로 통과
+    cones_source_ready: true
+    cones_enter_before_mm: 300.0           # 시작선 이만큼 앞(앞바퀴)에서 라바콘 모드
+    cones_enter_cone_mm: 500.0             # 차로 안 콘이 이 안이면 조금 일찍
+    cones_end_after_mm: 150.0              # 끝선 이만큼 지나면 무조건 복귀
+    cones_zone_mm: 2700.0
+    cones_handover_mm: 400.0
+    cones_handover_frames: 4
     fork_len_mm: 2300.0                    # 도면 기준, 모의맵 실측으로 확인
     fork_default: A
     stop_on_green_arrival: true
@@ -66,11 +74,30 @@ mission_node:
 obstacle_node:
   ros__parameters:
     scan_topic: /scan
-    laser_x_mm: 100.0                      # TODO 실측
-    laser_yaw: 0.0                         # TODO 확인
+    odom_topic: /odom
+    imu_topic: /imu
+    image_topic: /camera/color/image_raw   # 콘 색 확인용 (bev_config는 launch가 넣어 줌)
+    laser_x_mm: 100.0                      # TODO 실측: 뒤차축 -> 라이다 중심 (docs/m8_cones.md 1번)
+    laser_yaw: 0.0                         # TODO 확인: 2도만 틀려도 콘 여유가 15mm 넘게 줆
     lane_centers_y: [500.0, 0.0, -500.0]
     lane_half_width: 230.0
-    cone_speed: 0.13
+    # M8 라바콘 (cone_core.ConeFollower). 속도는 cones.speed (예전 cone_speed는 안 씀)
+    camera_check: true
+    cam_orange_min: 0.12
+    m8_axis_track_deg: 90.0                # 라바콘 구간 = 좌측 직선 북쪽 방향 (도면)
+    cones:                                 # 라바콘 (cone_core.ConeParams). 이름 앞에 cones. 붙여 param set
+      speed: 0.15
+      lookahead_mm: 260.0                  # 시뮬레이션 220~300 좋음. 지그재그 흔들리면 늘리기
+      cone_scan_radius_mm: 30.0            # TODO 실측: 라이다 높이에서 콘 단면 반지름
+      cone_base_radius_mm: 50.0            # TODO 실측: 콘 바닥 반지름
+      lidar_fov_deg: 240.0                 # 라이다 시야 (뒤쪽 가림). 지나간 콘은 기억으로 유지
+      cone_min_range_mm: 120.0             # 이보다 가까운 점은 차체로 보고 버림
+      car_half_width_mm: 115.0
+      clear_margin_mm: 40.0
+      corridor_width_mm: 500.0             # 쌍을 못 찾을 때 가정하는 통로 폭 (콘 중심 간)
+      single_tie_side: right               # 가운데 놓인 콘 하나는 오른쪽으로 비켜 감
+      zone_half_width_mm: 650.0
+      done_margin_mm: 150.0
     # M7 연결 (m7_link.py). 시작선·섬 위치는 track_route.yaml 기준 (test_m7_link가 확인)
     m7_avoid_node: /avoid_node
     m7_start_s_mm: 13589.0

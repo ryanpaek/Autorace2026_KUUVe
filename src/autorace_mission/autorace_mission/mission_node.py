@@ -119,6 +119,7 @@ class MissionNode(Node):
         self._last_lane_cfg = None
         self._last_cfg_pub = 0.0
         self._last_state = None
+        self._last_fallback_warn = 0.0
         self._auto_s_done = False
 
         self.create_subscription(String, '/perception/detections', self._on_det, 10)
@@ -243,9 +244,21 @@ class MissionNode(Node):
             self._last_lane_cfg, self._last_cfg_pub = dict(cmd.lane), now
 
         out = Twist()
-        if not self.estop and cmd.source in SOURCES:
-            tw, stamp = self.twists[cmd.source]
-            if tw is not None and now - stamp <= self.get_parameter('source_timeout_sec').value:
+        source = cmd.source
+        timeout = self.get_parameter('source_timeout_sec').value
+        if source == 'obstacle' and self.fsm.state == 'M8_CONES':
+            # M8: obstacle 노드가 죽거나 늦으면 서지 말고 차선 주행으로 (부분점수는 거리 비례라 멈추면 손해)
+            # M7은 여기서 바꾸지 않는다: 회피 노드가 멈추면 m7_link가 m7_hold로 정지시킨다
+            # (정차 LIMO 사이를 차선 주행으로 직진하지 않게)
+            tw, stamp = self.twists['obstacle']
+            if tw is None or now - stamp > timeout:
+                source = 'lane'
+                if now - self._last_fallback_warn > 2.0:
+                    self.get_logger().warning('/obstacle/cmd_vel 끊김 -> 차선 주행으로 대신')
+                    self._last_fallback_warn = now
+        if not self.estop and source in SOURCES:
+            tw, stamp = self.twists[source]
+            if tw is not None and now - stamp <= timeout:
                 vmax = self.get_parameter('max_speed').value
                 wmax = self.get_parameter('max_yaw_rate').value
                 out.linear.x = max(-vmax, min(vmax, tw.linear.x))
@@ -265,7 +278,7 @@ class MissionNode(Node):
                     msg['pts'] = mp.points_ahead(inp.route_s, self.yaw)
             self.preview_pub.publish(String(data=json.dumps(msg)))
 
-        state = {'state': self.fsm.state, 'sub': self.fsm.sub, 'source': cmd.source,
+        state = {'state': self.fsm.state, 'sub': self.fsm.sub, 'source': source,
                  'fork_choice': self.fsm.fork_choice, 'dist_mm': round(self.dist_mm),
                  'estop': self.estop, 'note': cmd.note,
                  'route': self.tracker.state() if self.route_active else None}
