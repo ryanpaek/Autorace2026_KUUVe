@@ -1,0 +1,15 @@
+fork_node:
+  ros__parameters:
+    input_mode: detections          # detections: /perception/detections JSON (팀 YOLO) | text: sign_topic 에 'A'/'B'
+    det_topic: /perception/detections
+    sign_topic: /fork/sign
+    cls_a: fork_a                   # YOLO 클래스 이름 (detector_node class_names 와 같게)
+    cls_b: fork_b
+    det_conf: 0.5
+    min_box_h: 0.0                  # 표지 상자 높이(픽셀) 하한. 멀리 있는 표지 무시하려면 올림
+    vote_window: 8                  # 최근 8 프레임 중
+    vote_need: 5                    # 5 번 이상 보이면 결정 (FSM 과 같음)
+    follow_fsm: true                # FSM 이 이미 정했으면 그걸 따름
+    allow_change: false             # 한 번 정하면 유지
+    active_states: [M7_OBSTACLE, M2_FORK]
+    resend_max: 3

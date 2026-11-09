@@ -99,3 +99,60 @@ def test_alignment_converges():
         pl.update_scan(scan_to_base(rng, -math.pi, 2 * math.pi / 360, p))
     assert abs(math.degrees(pl.align_th) - 4.0) < 1.0, math.degrees(pl.align_th)
     assert abs(math.degrees(pl.pose.psi) - 4.0) < 1.0     # 내 방향이 차선 기준 실제 방향(+4°)으로 고쳐짐
+
+
+# ---------- 갈림길(미션 2) 출구 차선 이동 ----------
+def test_shift_distance_grows_with_lanes():
+    from limo_obstacle_avoid.fork_exit import shift_distance
+    p = AvoidParams()
+    c1, s1 = shift_distance(p, 1)
+    c2, s2 = shift_distance(p, 2)
+    assert 0 < c1 < s1 and 0 < c2 < s2 and c2 > c1 and s2 > s1
+    assert shift_distance(p, -2) == shift_distance(p, 2)
+
+
+def _planner_at(x, target, exit_dir, obs=()):
+    p = AvoidParams()
+    p.section_length = 4.38
+    pl = AvoidPlanner(p)
+    pl.start(0, 0, 0)
+    pl.pose.x, pl.pose.y = x, target * p.lane_width
+    pl.target = target
+    pl.set_exit(exit_dir)
+    pl.obs = []
+    for (x0, lane) in obs:
+        o = Obstacle(x0, x0 + 0.32, lane * p.lane_width - 0.11, lane * p.lane_width + 0.11)
+        o.hits = 5
+        pl.obs.append(o)
+    return pl
+
+
+def test_exit_plan_decisions():
+    # 1차선(+1)에서 B(-1): 2차선 이동. 섬까지 충분하면 go
+    pl = _planner_at(1.5, 1, 'B')
+    d, info = pl.exit_plan(pl.obstacles(True))
+    assert d == 'go' and info['need_lanes'] == -2
+    # 가운데 차선 앞에 차가 있으면 wait
+    pl = _planner_at(1.5, 1, 'B', obs=[(2.2, 0)])
+    assert pl.exit_plan(pl.obstacles(True))[0] == 'wait'
+    # 출구 차선에 섬 전까지 차가 있으면 wait
+    pl = _planner_at(1.0, 1, 'B', obs=[(3.6, -1)])
+    assert pl.exit_plan(pl.obstacles(True))[0] == 'wait'
+    # 섬 1m 전: 2차선은 too_late, 1차선(가운데에서)도 판단
+    pl = _planner_at(4.38 - 1.0 - 0.2, 1, 'B')
+    assert pl.exit_plan(pl.obstacles(True))[0] == 'too_late'
+    pl = _planner_at(4.38 - 1.3 - 0.2, 0, 'A')
+    assert pl.exit_plan(pl.obstacles(True))[0] == 'go'
+    # 이미 출구 차선이면 keep
+    pl = _planner_at(2.0, -1, 'B')
+    assert pl.exit_plan(pl.obstacles(True))[0] == 'keep'
+
+
+def test_two_lane_exit_in_simulation():
+    """1차선으로 밀려난 뒤 B 를 알면 섬 앞 끝 전에 3차선(B쪽)으로 들어감, 늦으면 무리하지 않음"""
+    import fork_sim
+    lay = [(0.9, 0), (0.9, -1), (1.9, 0)]
+    r = fork_sim.run(lay, AvoidParams(), 4.38, 'B', None)
+    assert r['ok'] and not r['collided'], r
+    r = fork_sim.run(lay, AvoidParams(), 4.38, 'B', 1.0)            # 섬 1m 전에야 앎 → 불가, 충돌·멈춤 없이 통과
+    assert not r['right_side'] and not r['collided'] and r['done']

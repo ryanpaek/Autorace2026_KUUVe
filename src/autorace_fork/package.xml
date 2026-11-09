@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>autorace_fork</name>
+  <version>0.1.0</version>
+  <description>미션 2 갈림길(A/B): YOLO 표지 투표 → 현재 차선 기준 이동 차선 수 판단 → 회피 노드에 출구 방향 전달</description>
+  <maintainer email="team@example.com">Autorace 2026 Team</maintainer>
+  <license>TODO</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
