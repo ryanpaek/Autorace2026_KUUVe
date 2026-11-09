@@ -47,6 +47,9 @@ class DetectorNode(Node):
         p('nms_threshold', 0.45)
         p('infer_hz', 10.0)
         p('publish_debug', True)
+        # onnxruntime 스레드 수. 0이면 기본값(코어 전부). 11/09 통주행: 기본값이면 LIMO(6코어)에서
+        # 장당 536ms + 차선 노드 19Hz -> 9Hz로 떨어짐. 2로 제한해 나머지 코어를 차선·센서에 남긴다
+        p('ort_threads', 2)
         self.names = [str(c) for c in self.get_parameter('class_names').value]
         self.size = int(self.get_parameter('input_size').value)
         self.latest = None
@@ -70,14 +73,22 @@ class DetectorNode(Node):
             return
         if path.endswith('.onnx'):
             import onnxruntime as ort
-            self.session = ort.InferenceSession(path, providers=['CPUExecutionProvider'])
+            so = ort.SessionOptions()
+            n = int(self.get_parameter('ort_threads').value)
+            if n > 0:
+                so.intra_op_num_threads = n
+                so.inter_op_num_threads = 1
+                so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+            self.session = ort.InferenceSession(path, sess_options=so,
+                                                providers=['CPUExecutionProvider'])
             self.input_name = self.session.get_inputs()[0].name
             self.backend = 'onnx'
         else:
             from ultralytics import YOLO
             self.model = YOLO(path)
             self.backend = 'ultralytics'
-        self.get_logger().info(f'model loaded ({self.backend}): {path}')
+        self.get_logger().info(f'model loaded ({self.backend}): {path}'
+                               f' (ort_threads={self.get_parameter("ort_threads").value})')
 
     def _on_image(self, msg):
         try:
