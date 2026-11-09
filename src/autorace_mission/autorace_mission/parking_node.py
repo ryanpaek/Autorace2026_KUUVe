@@ -139,6 +139,13 @@ def neighbors_abeam(clusters, tol_mm=30.0, side_min_mm=80.0, side_max_mm=700.0, 
     return r, l
 
 
+def in_view(clusters, front_axle_from_lidar_mm=-47.0, max_angle_deg=180.0):
+    """라이다에서 본 각도가 max_angle_deg 안인 덩어리만. 시야 끝에 걸린 리모는 일부만 보여 중심이 앞으로 쏠린다."""
+    lx = -front_axle_from_lidar_mm                  # 앞바퀴 기준 라이다 위치 (앞 +)
+    lim = math.radians(max_angle_deg)
+    return [(x, y) for x, y in clusters if abs(math.atan2(y, x - lx)) <= lim]
+
+
 def cell_line_from_neighbors(clusters, side_max_mm=700.0):
     """양옆 리모 중심(앞바퀴 기준 좌표)으로 칸 가운데 선을 구한다.
 
@@ -230,6 +237,11 @@ class ParkingV2:
         self.line = None           # 칸 가운데 선 (자기 위치 좌표)
         self.pair_line = None      # 두 리모 짝으로 구한 칸 가운데 선 (자기 위치 좌표)
         self.pair_n = 0            # 짝을 본 횟수 (평균 낼 때 씀)
+        self.pair_side_mm = None   # 짝 중점까지 옆 거리 (앞줄 약 0.5m, 뒷줄 약 1.1m) -> row
+        self.row = None            # 'front' | 'back' (정차 리모가 있는 줄 = 들어갈 줄)
+        self.side_seen = False     # 꺾은 뒤 양옆 리모로 칸 가운데 선을 한 번이라도 구했나
+        self.end_d = self.end_at = None   # 칸 끝 선(카메라): 마지막으로 본 거리, 그때 누적 거리
+        self.stop_how = None       # 'side' | 'memory' | 'camera' | 'cap' (어떻게 멈췄나, 디버그)
         self.err = None            # 마지막 재정렬 판단 값 (옆 mm, 방향 도)
 
     def _enter(self, phase, inp):
@@ -296,13 +308,50 @@ class ParkingV2:
         # 선 위 점까지 차 앞 방향 거리: 차 앞 방향과 선 방향(ux,uy)은 거의 수직이니 그대로 앞 방향 투영
         return (cx - fx) * math.cos(yaw) + (cy - fy) * math.sin(yaw)
 
-    def _body_s(self, inp):
+    def _body_s(self, inp, line=None):
         """차체 중심의 깊이 s (칸 가운데 = 0, 들어가는 쪽 +)."""
-        cx, cy, ux, uy = self.line
+        cx, cy, ux, uy = line or self.line
         yaw = inp['yaw'] or 0.0
         bx = self.px + self.p['body_center_from_rear_mm'] * math.cos(yaw)
         by = self.py + self.p['body_center_from_rear_mm'] * math.sin(yaw)
         return (bx - cx) * ux + (by - cy) * uy
+
+    def _pair_cell(self):
+        """짝으로 구한 칸 가운데 선을 깊이 보정한 것. 차선에서 보면 리모 끝면만 보여 얕게 나온다."""
+        if self.pair_line is None:
+            return None
+        cx, cy, ux, uy = self.pair_line
+        b = self.p['pair_depth_bias_mm']
+        return (cx + b * ux, cy + b * uy, ux, uy)
+
+    def _cell(self):
+        """지금 믿는 칸 가운데 선: 양옆 옆면으로 구한 것 > 짝(보정)."""
+        return self.line if self.side_seen else self._pair_cell()
+
+    def _end_remaining(self, inp):
+        """카메라로 본 칸 끝 선까지 남은 거리 (앞바퀴 기준, mm). 못 봤으면 None.
+
+        칸 끝 선 = 앞줄이면 앞줄·뒷줄 사이 흰 선, 뒷줄이면 주차 구역 바깥 노란 테두리.
+        칸 가운데 선으로 예상한 위치와 end_gate_mm 안인 선만 받고, 카메라 사각지대(앞바퀴 약 350mm 안)로
+        들어간 뒤에는 오도메트리로 센다 (정지선과 같은 방식).
+        """
+        p = self.p
+        cell = self._cell()
+        if cell is not None and inp.get('end_lines_mm'):
+            yaw = inp['yaw'] or 0.0
+            cx, cy, ux, uy = cell
+            fx = self.px + p['wheelbase_mm'] * math.cos(yaw)
+            fy = self.py + p['wheelbase_mm'] * math.sin(yaw)
+            expect = p['cell_half_depth_mm'] - ((fx - cx) * ux + (fy - cy) * uy)   # 앞바퀴 -> 칸 끝 선
+            frozen = (self.end_d is not None
+                      and self.end_d - (inp['dist_mm'] - self.end_at) < p['end_freeze_mm'])
+            if not frozen:
+                cand = min(inp['end_lines_mm'], key=lambda d: abs(d - expect))
+                if abs(cand - expect) <= p['end_gate_mm']:
+                    self.end_d, self.end_at = cand, inp['dist_mm']
+        if self.end_d is None:
+            return None
+        return self.end_d - (inp['dist_mm'] - self.end_at)
 
     def step(self, inp):
         """inp: t, dist_mm, yaw, lane_v, lane_w, stoplines_mm, clusters, blocked.
@@ -328,6 +377,10 @@ class ParkingV2:
             pair = find_pair(inp['clusters'], p['side_far_mm'], p['pair_dist_mm'], p['pair_tol_mm'])
             if pair is not None:                       # ③ 두 리모 짝 -> 칸 가운데 선 (평균)
                 mx, my, vx, vy = pair
+                n0 = self.pair_n
+                self.pair_side_mm = (-my if self.pair_side_mm is None
+                                     else (self.pair_side_mm * n0 - my) / (n0 + 1))
+                self.row = 'front' if self.pair_side_mm < p['row_split_mm'] else 'back'
                 rel = (mx, my, vy, -vx)                # 들어가는 방향 = 짝 방향에서 오른쪽 90도
                 line = self._line_to_world(rel, inp)
                 if self.pair_line is None:
@@ -381,18 +434,38 @@ class ParkingV2:
             moved = inp['dist_mm'] - self.d_phase
             self.turn_travel += max(0.0, moved)
             self.d_phase = inp['dist_mm']
-            side = (cell_line_from_neighbors(inp['clusters'], p['side_max_mm'])
+            seen = in_view(inp['clusters'], p['front_axle_from_lidar_mm'], p['side_view_deg'])
+            side = (cell_line_from_neighbors(seen, p['side_max_mm'])
                     if self._turned_deg(inp) >= p['stop_min_turn_deg'] else None)
+            turned_ok = self._turned_deg(inp) >= p['stop_min_turn_deg']
             if self.pair_line is not None and side is not None:
                 # 짝을 알고 양옆 리모 옆면이 보이면: 옆면으로 구한 선에서 차체 중심이 칸 가운데 오면 멈춤.
                 # (차선에서 본 짝은 리모의 차선 쪽 끝면만 보여 깊이가 8~17cm 얕게 나온다 -> 깊이는 옆면으로)
                 self.line = self._line_to_world(side, inp)
+                self.side_seen = True
                 r = l = self._body_s(inp) >= -p['enter_brake_mm']
+                self.stop_how = 'side' if r else None
+            elif self.pair_line is not None and self.side_seen:
+                # 옆면을 한 번 봤는데 지금 안 보임: 라이다 시야(실측 약 ±105도) 뒤로 리모가 빠진 것.
+                # 기억한 선 + 오도메트리로 계속 판단 (11/09 park_02: 5cm 남기고 놓쳐 1.1m 직진 -> 실패)
+                r = l = self._body_s(inp) >= -p['enter_brake_mm']
+                self.stop_how = 'memory' if r else None
             elif self.pair_line is not None:
                 r = l = False
             else:                                     # 모르면: 예전처럼 양옆 리모가 앞바퀴 옆
                 r, l = neighbors_abeam(inp['clusters'], p['abeam_tol_mm'], 80.0, p['side_max_mm'],
                                        p['passed_ok'])
+            if not (r and l) and self.pair_line is not None and turned_ok:
+                # 카메라: 칸 끝 선(앞줄=줄 사이 흰 선, 뒷줄=바깥 노란 테두리)까지 남은 거리
+                rem = self._end_remaining(inp)
+                if rem is not None and rem <= p['end_stop_mm'] + p['enter_brake_mm']:
+                    r = l = True
+                    self.stop_how = 'camera'
+                # 안전: 칸 가운데를 이만큼 지나면 무조건 멈춤 (칸을 벗어나 한참 가는 것 방지)
+                cell = self._cell()
+                if not (r and l) and cell is not None and self._body_s(inp, cell) >= p['cell_cap_mm']:
+                    r = l = True
+                    self.stop_how = 'cap'
             if r and l:
                 self._enter('CHECK', inp)
             else:
@@ -418,10 +491,15 @@ class ParkingV2:
                 return self._out(p['turn_speed'], 0.0 if straight else KAPPA_FULL_RIGHT)
 
         if self.phase == 'CHECK':           # (재정렬) 칸 가운데에 반듯하게 들어갔나
-            rel = cell_line_from_neighbors(inp['clusters'], p['side_max_mm'])
+            rel = cell_line_from_neighbors(
+                in_view(inp['clusters'], p['front_axle_from_lidar_mm'], p['side_view_deg']), p['side_max_mm'])
             if p['max_realign'] <= 0 or (rel is None and self.pair_line is None):
                 return self._done('PARKED', inp)
-            self.line = self._line_to_world(rel, inp) if rel is not None else self.pair_line
+            if rel is not None:
+                self.line = self._line_to_world(rel, inp)
+            elif not self.side_seen:
+                self.line = self._pair_cell()       # 옆면을 못 봤으면 짝(깊이 보정)
+            # (옆면을 봤으면 self.line = 기억한 선 그대로)
             lat, head, s_deep, s_shallow = self._misalign(self.line, inp)
             self.err = (round(lat), round(head, 1), round(s_deep), round(s_shallow))
             lim_d = p['cell_half_depth_mm'] - p['corner_margin_mm']
@@ -470,7 +548,9 @@ class ParkingV2:
     def _info(self):
         """/parking/state에 실을 내용."""
         return {'phase': self.phase, 'done': self.phase == 'DONE', 'result': self.result,
-                'backs': self.backs, 'realigns': self.realigns, 'last_err': self.err}
+                'backs': self.backs, 'realigns': self.realigns, 'last_err': self.err,
+                'row': self.row, 'stop_how': self.stop_how,
+                'end_mm': None if self.end_d is None else round(self.end_d)}
 
 
 DEFAULTS = {
@@ -504,6 +584,14 @@ DEFAULTS = {
     'pair_min_frames': 3,      # 짝을 이만큼 본 뒤에 믿는다 (한 번 튄 값 무시)
     'turn_lead_mm': 320.0,     # 칸 가운데가 앞바퀴보다 이만큼 앞일 때 꺾기 시작 (회전반경 530 - 축거 210)
     'stop_min_turn_deg': 60.0, # 이만큼 돈 뒤에만 양옆 옆면으로 '칸 가운데 도착'을 판단 (도는 도중 오판 방지)
+    # ---- 줄(앞줄 1~3 / 뒷줄 4~6)과 칸 끝에서 멈추기 (11/09 park_02 반영)
+    'row_split_mm': 800.0,     # 짝 중점까지 옆 거리가 이보다 가까우면 앞줄 (앞줄 약 0.5m, 뒷줄 약 1.1m)
+    'pair_depth_bias_mm': 125.0,  # 짝으로 본 칸 가운데가 실제보다 얕게 나오는 만큼 (시뮬레이션 80~170)
+    'end_stop_mm': 195.0,      # 칸 가운데 정지 = 앞바퀴 -> 칸 끝 선 (깊이 반 300 - (축거 210 - 차체 중심 105))
+    'end_gate_mm': 200.0,      # 칸 끝 선 예상 위치와 이만큼 안만 받음 (줄 사이 선과 바깥 테두리는 620mm 차이)
+    'end_freeze_mm': 420.0,    # 남은 거리가 이보다 짧으면 카메라 갱신 끊고 오도메트리로만 (BEV 사각지대 약 350)
+    'cell_cap_mm': 80.0,       # 차체 중심이 (추정한) 칸 가운데를 이만큼 지나면 무조건 멈춤. 칸 안 여유 약 140 - 추정 오차 여유 60
+    'side_view_deg': 95.0,     # 칸 가운데 선은 라이다 각도 이 안의 리모로만 (실측 시야 끝 약 105도. 끝에 걸리면 덩어리 중심이 쏠림)
     # ---- 재정렬 (PULLOUT -> ENTER)
     'max_realign': 2,          # 0 = 재정렬 끔 (= 원래 버전 2)
     'cell_half_mm': 250.0,     # 칸 폭 500의 절반 (도면)
@@ -549,6 +637,7 @@ def main(args=None):
             self.dist_mm, self._last_xy, self.yaw = 0.0, None, None
             self.lane_v = self.lane_w = 0.0
             self.stoplines = []
+            self.end_lines = []
             self.scan = None
             self.logic = None
             self._sent_cfg = None
@@ -576,9 +665,12 @@ def main(args=None):
         def _on_lane_status(self, m):
             """/lane/status에서 흰 선 거리 목록만 꺼낸다."""
             try:
-                self.stoplines = [float(d) for d in json.loads(m.data).get('stoplines_mm', [])]
+                d = json.loads(m.data)
+                self.stoplines = [float(x) for x in d.get('stoplines_mm', [])]
+                # 칸 끝 선: 흰·노란 가로선 (옛 lane 노드면 흰 선만)
+                self.end_lines = [float(x) for x in d.get('end_lines_mm', d.get('stoplines_mm', []))]
             except (json.JSONDecodeError, TypeError, ValueError):
-                self.stoplines = []
+                self.stoplines, self.end_lines = [], []
 
         def _on_lane_cmd(self, m):
             """차선 노드 명령 저장 (차선 따라가는 단계에서 그대로 넘김)."""
@@ -620,6 +712,7 @@ def main(args=None):
                 v, k, info = self.logic.step({
                     't': time.monotonic(), 'dist_mm': self.dist_mm, 'yaw': self.yaw,
                     'lane_v': self.lane_v, 'lane_w': self.lane_w, 'stoplines_mm': self.stoplines,
+                    'end_lines_mm': self.end_lines,
                     'clusters': clusters, 'blocked': blocked})
                 tw.linear.x = float(v)
                 tw.angular.z = float(self.lane_w if k is None else v * k)
