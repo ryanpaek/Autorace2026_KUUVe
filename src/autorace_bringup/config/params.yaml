@@ -83,8 +83,9 @@ obstacle_node:
 detector_node:
   ros__parameters:
     image_topic: /camera/color/image_raw
-    model_path: ''                         # 학습 후 .onnx 또는 .pt 경로
-    input_size: 320
+    model_path: '/home/wego/autorace_ws/models/autorace_yolo_v3.onnx'
+    class_names: [red, yellow, green, fork_a, fork_b, pedestrian, bump, slow, parking]   # v3 모델 ID 순서
+    input_size: 640
     conf_threshold: 0.5
     infer_hz: 10.0
 
