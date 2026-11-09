@@ -114,7 +114,9 @@ detector_node:
     class_names: [red, yellow, green, fork_a, fork_b, pedestrian, bump, slow, parking]   # v3 모델 ID 순서
     input_size: 640
     conf_threshold: 0.5
-    infer_hz: 10.0
+    # 11/09: 스레드 제한 없이 10Hz로 돌리면 실제 1.8Hz + 차선 노드 절반 속도. 2스레드·5Hz로 제한
+    infer_hz: 5.0
+    ort_threads: 2
 
 parking_node:
   ros__parameters:
