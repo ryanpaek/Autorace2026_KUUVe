@@ -12,7 +12,7 @@
 | `autorace_obstacle` | `obstacle_node` (+ `m7_link`) | M8 라바콘 회피(라이다 추적 + 카메라 주황 확인, 시뮬레이션 검증, 실차 전) — [docs/m8_cones.md](docs/m8_cones.md). M7은 `limo_obstacle_avoid`를 켜고 끄는 연결 |
 | `limo_obstacle_avoid` | `avoid_node`, `cmd_mux`, 단계별 시험 `s0`~`s4` | M7 3차선 정차 LIMO 회피 (라이다 + odom/IMU 구간 좌표). `autorace.launch.py m7_avoid:=true`로 연결. 사용법은 그 폴더 README |
 | `autorace_fork` | `fork_node` | M2 갈림길: YOLO `fork_a`/`fork_b` 투표(8 중 5) → `/fork_direction`, `/fork/state`. FSM이 정했으면 그걸 따름. `autorace.launch.py use_fork_node:=true`로 켬 (기본 꺼짐). 사용법은 그 폴더 README |
-| `autorace_perception` | `detector_node`, `image_collector` | ONNX/ultralytics 추론 틀, 모델 학습 TODO |
+| `autorace_perception` | `detector_node`, `class_command_node`, `image_collector` | YOLO v3 9개 클래스 검출 + 행동 요청 발행. 확인된 지속 요청을 기존 미션에 연결·실차 검증 필요 ([규약](docs/yolo_commands.md)) |
 | `training/lane_seg` | `autolabel.py`, `train_lane_seg.py` (PC에서 실행) | 차선 분할 모델 수집·라벨·학습·ONNX. 사용법은 그 폴더 README |
 | `autorace_bringup` | `autorace.launch.py`, `lane_test.launch.py`, 설정, 스크립트 | 실행 틀 |
 
@@ -58,6 +58,7 @@ source install/setup.bash
 | `/lane/config` | String(JSON) | mission_node → lane_node: `{"mode","speed","lane_width_mm",...}` |
 | `/lane/status` | String(JSON) | lane_node → mission_node: status, offset_mm, stoplines_mm, crosswalk_lines_mm |
 | `/perception/detections` | String(JSON) | detector_node → mission_node: `{"detections":[{"cls","conf","bbox"}]}` |
+| `/perception/commands` | String(JSON) | class_command_node → mission_node: 확인된 클래스별 지속 요청, 실행 중 미션 재시작 방지 ([규약](docs/yolo_commands.md)) |
 | `/obstacle/state` | String(JSON) | obstacle_node → mission_node: `cones_done`, `cone_ahead_mm`, `cones{...}` |
 | `/mission/state` | String(JSON) | mission_node → 모두 |
 | `/mission/start` / `/mission/estop` / `/mission/set_state` | Empty / Bool / String | 사람 → mission_node |
@@ -89,6 +90,15 @@ mission_node가 오도메트리로 경로상 위치 `s`(mm, 출발 체커 = 0)�
 - 헤딩은 `/imu` orientation yaw를 쓴다 (`/odom` yaw는 드라이버가 작은 변화를 버림).
 
 ## 테스트 (ROS 없이)
+
+YOLO 클래스별 명령 발행만 확인하려면 의존성 없는 테스트를 실행한다.
+
+```bash
+python3 -m unittest discover -s src/autorace_perception/test -p 'test_class_command*.py' -v
+```
+
+인식·발행만 실행하는 `perception_commands.launch.py`와 적색 유지·녹색 해제·황색 설정 사용법은 [명령 발행 문서](docs/yolo_commands.md)에 있다.
+명령 발행은 기본적으로 최근 10프레임 중 7프레임 검출을 확인한다. 리뷰 기록은 Git 저장소 밖 작업 폴더에 별도로 보관한다.
 
 ```bash
 cd ~/autorace_ws

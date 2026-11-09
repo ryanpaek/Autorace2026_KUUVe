@@ -9,7 +9,7 @@ model_path 확장자로 백엔드를 고른다.
   {"stamp": 123.4, "infer_ms": 18.2,
    "detections": [{"cls": "red", "conf": 0.91, "bbox": [x, y, w, h]}]}
 cls 이름은 미션 FSM이 쓰는 이름과 같아야 한다 (class_names 파라미터 순서 = 학습 라벨 순서).
-  red, yellow, green, pedestrian, fork_a, fork_b, slow, bump, parking
+  red, yellow, green, fork_a, fork_b, pedestrian, bump, slow, parking
 최신 프레임만 infer_hz로 처리한다 (밀린 프레임은 버림).
 """
 
@@ -24,10 +24,10 @@ from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CompressedImage, Image
 from std_msgs.msg import String
 
+from autorace_perception.class_commands import V3_CLASSES, canonical_class
 from autorace_perception.yolo_onnx import decode, letterbox, to_tensor
 
-DEFAULT_CLASSES = ['red', 'yellow', 'green', 'pedestrian', 'fork_a', 'fork_b',
-                   'slow', 'bump', 'parking']
+DEFAULT_CLASSES = list(V3_CLASSES)
 
 
 def image_msg_to_bgr(msg):
@@ -42,7 +42,7 @@ class DetectorNode(Node):
         p('image_topic', '/camera/color/image_raw')
         p('model_path', '')
         p('class_names', DEFAULT_CLASSES)
-        p('input_size', 320)
+        p('input_size', 640)
         p('conf_threshold', 0.5)
         p('nms_threshold', 0.45)
         p('infer_hz', 10.0)
@@ -119,7 +119,8 @@ class DetectorNode(Node):
                 res = self.model.predict(frame, imgsz=self.size, conf=conf, verbose=False)[0]
                 for b in res.boxes:
                     x1, y1, x2, y2 = [float(v) for v in b.xyxy[0].tolist()]
-                    dets.append({'cls': res.names[int(b.cls)], 'conf': round(float(b.conf), 4),
+                    dets.append({'cls': canonical_class(res.names[int(b.cls)]),
+                                 'conf': round(float(b.conf), 4),
                                  'bbox': [int(x1), int(y1), int(x2 - x1), int(y2 - y1)]})
         except Exception as e:      # 한 프레임 실패로 노드가 죽지 않게
             self.get_logger().error(f'inference failed: {e}', throttle_duration_sec=5.0)
