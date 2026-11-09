@@ -36,6 +36,7 @@ def run(layout, p, island_x, exit_dir, sign_before, seed=0, delay=2, head_err_de
     car.odom_yaw = car.imu_yaw = car.yaw
     pl = AvoidPlanner(p)
     pl.start(car.odom_x, car.odom_y, car.imu_yaw, 0.0)
+    last_v = 0.0
     if sign_before is None:
         pl.set_exit(exit_dir)
     sent = sign_before is None
@@ -45,7 +46,7 @@ def run(layout, p, island_x, exit_dir, sign_before, seed=0, delay=2, head_err_de
     worst, collided, stuck = 1e9, False, 0
     y_at_island = None
     for k in range(int(80 / dt)):
-        pl.pose.update(car.odom_x, car.odom_y, car.imu_yaw)
+        pl.pose.update(car.odom_x, car.odom_y, car.imu_yaw, forward=last_v >= 0.0)   # 후진(멈춤 탈출)도 반영
         if not sent and island_x - (pl.pose.x + p.robot_front) <= sign_before:
             pl.set_exit(exit_dir)
             sent = True
@@ -58,6 +59,7 @@ def run(layout, p, island_x, exit_dir, sign_before, seed=0, delay=2, head_err_de
         q.append((v, w))
         v2, w2 = q.pop(0)
         car.step(v2, w2, dt, rnd=rnd)
+        last_v = v2
         t += dt
         g = sc.min_gap(car.footprint(), rects)
         worst = min(worst, g)
