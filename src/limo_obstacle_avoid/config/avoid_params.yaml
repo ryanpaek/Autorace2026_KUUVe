@@ -86,3 +86,19 @@
     align_max_heading_deg: 6.0
     align_w_min: 0.14
     align_w_max: 0.32
+
+    # ── 카메라 차선 보정 (11/09): 팀 lane_node /lane/status 로 옆 위치·방향 보정 (차선 코드 복사 아님, 같은 결과 사용) ──
+    lane_fix: true
+    lane_fix_gain: 0.15      # 한 번에 옆 오차의 이만큼 반영
+    lane_fix_heading_gain: 0.1
+    lane_fix_gate: 0.15      # 지금 추정과 15 cm 넘게 다르면 다른 차로를 본 것 → 안 씀
+    lane_fix_max_deg: 10.0   # 차선 방향이 10° 넘게 보이면 안 씀 (차로 변경 중, 3차선 입구 사선)
+    lane_row: 0.55           # 차선 노드 offset 을 재는 행 (기준점 앞 m)
+
+    # ── 멈춤 탈출 (11/09): 막혀서 0.8초 서 있으면 0.25 m 후진하며 크게 꺾어 다시 계획 (최대 3번) ──
+    recover: true
+    recover_after: 0.8
+    recover_dist: 0.25
+    recover_speed: 0.10
+    recover_time: 4.0
+    recover_max: 3

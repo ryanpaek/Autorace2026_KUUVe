@@ -406,3 +406,43 @@ def test_obstacle_trigger_700_if_configured():
     obs = 13589.0 + 1500.0
     en = run_front(link, 11905.0, 15000.0, lambda s: obs - s if obs - s < 2000 else None)
     assert en and en[0][0] == pytest.approx(obs - 700.0, abs=20)
+
+
+# --- 11/09: M7이 끝날 때 몇 차선인지 (/m7/exit_lane) ------------------------------------
+from autorace_obstacle.m7_link import exit_report  # noqa: E402
+
+
+def test_exit_report_numbers():
+    assert exit_report(1, 'x')['lane'] == 1 and exit_report(1, 'x')['fork'] == 'A'
+    assert exit_report(0, 'x')['lane'] == 2 and exit_report(0, 'x')['fork'] is None
+    assert exit_report(-1, 'x')['lane'] == 3 and exit_report(-1, 'x')['fork'] == 'B'
+    assert exit_report(None, 'x') is None and exit_report(5, 'x') is None
+
+
+def test_exit_report_on_avoid_done_once():
+    link = M7Link()
+    drive(link, 13500.0, 13700.0)
+    link.on_avoid_active(True, 0.0)
+    link.on_avoid_state({'state': 'RUN', 'target': -1, 'now_lane': -1})
+    assert link.pop_report() is None
+    link.on_avoid_done(True)
+    r = link.pop_report()
+    assert r['lane'] == 3 and r['fork'] == 'B' and r['by'] == 'avoid_done'
+    assert link.pop_report() is None                         # 한 번만
+
+
+def test_exit_report_on_sign_and_forced():
+    link = running_link()
+    link.on_avoid_state({'state': 'RUN', 'target': 1, 'now_lane': 1})
+    for f in [True] * 4 + [False] * 5:
+        link.on_detections(det(f))
+    link.update(5.0, mission(17973.0 - 500.0), {})
+    r = link.pop_report()
+    assert r['lane'] == 1 and r['by'] == 'sign'
+    link2 = M7Link()
+    drive(link2, 13500.0, 13700.0)
+    link2.on_avoid_active(True, 0.0)
+    link2.on_avoid_state({'state': 'RUN', 'target': 0, 'now_lane': -1})
+    link2.update(9.0, mission(18500.0, state='M2_FORK'), {})  # FSM 강제 종료
+    r2 = link2.pop_report()
+    assert r2['lane'] == 3 and r2['by'] == 'forced'          # now_lane 우선

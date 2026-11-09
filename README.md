@@ -64,6 +64,7 @@ source install/setup.bash
 | `/route/set_s` | Float32 | 사람 → mission_node: 경로 위치 s(mm) 직접 지정 (연습용) |
 | `/avoid/enable`, `/fork_direction` | Bool, String | obstacle_node → avoid_node (M7 시작선에서 켬, 갈림길 A/B) |
 | `/fork/state` | String(JSON) | fork_node → 사람: 결정, 지금 차선, 몇 차선 이동, 섬까지 거리, 상태 문장 |
+| `/m7/exit_lane` | String(JSON), latched | obstacle_node → M2 등: M7이 끝나는 순간 `{"lane": 1|2|3, "fork": "A"|"B"|null, "side", "by"}` (1차선 = 왼쪽 = A) |
 | `/avoid/active`, `/avoid/done`, `/avoid/state` | Bool, Bool, String(JSON) | avoid_node → obstacle_node (→ `/obstacle/state`의 m7_*) |
 | `/limo/ack_cmd` | AckermannDrive | ackermann_bridge → LIMO 애커만 드라이버 (`/cmd_vel`을 변환) |
 | `/lane/debug/compressed`, `/perception/debug/compressed`, `/obstacle/debug/compressed` | CompressedImage | 디버그 화면 (rqt_image_view, Foxglove). obstacle은 M8에서만 |

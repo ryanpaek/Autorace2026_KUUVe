@@ -39,7 +39,7 @@ from rcl_interfaces.msg import Parameter as ParamMsg
 from rcl_interfaces.msg import ParameterDescriptor, ParameterType, ParameterValue
 from rcl_interfaces.srv import SetParameters
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from sensor_msgs.msg import CompressedImage, Image, Imu, LaserScan
 from std_msgs.msg import Bool, String
 
@@ -170,6 +170,10 @@ class ObstacleNode(Node):
         self.create_subscription(String, '/perception/detections', self._on_detections, 10)  # M7 끄기 (off_mode: sign)
         self.enable_pub = self.create_publisher(Bool, '/avoid/enable', 10)
         self.fork_pub = self.create_publisher(String, '/fork_direction', 10)
+        # M7이 끝나는 순간 몇 차선인지 (M2가 받아서 이어 주행). 늦게 켠 노드도 받도록 마지막 값 보관(latched)
+        latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                             reliability=ReliabilityPolicy.RELIABLE)
+        self.exit_pub = self.create_publisher(String, '/m7/exit_lane', latched)
         self.param_cli = self.create_client(
             SetParameters, g_name(g('m7_avoid_node').value) + '/set_parameters')
         self.create_timer(1.0 / float(g('control_hz').value), self._tick)
@@ -348,6 +352,10 @@ class ObstacleNode(Node):
                 self.enable_pub.publish(Bool(data=False))
             elif act[0] == 'fork':
                 self.fork_pub.publish(String(data=act[1]))
+        rep = self.link.pop_report()
+        if rep is not None:
+            self.exit_pub.publish(String(data=json.dumps(rep, ensure_ascii=False)))
+            self.get_logger().info(f'[M7] {rep["text"]} -> /m7/exit_lane')
         for e in self.link.events:
             self.get_logger().info(f'[M7] {e}')
         self.link.events.clear()

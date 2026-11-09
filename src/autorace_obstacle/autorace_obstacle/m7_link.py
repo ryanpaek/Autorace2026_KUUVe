@@ -80,6 +80,24 @@ class M7LinkParams:
     off_gate_mm: float = 1500.0         # 섬 앞 끝까지 이 안일 때만 표지로 끔 (멀리서 가려져 사라지는 오판 방지)
 
 
+LANE_NUMBER = {1: 1, 0: 2, -1: 3}          # 회피 차로(+1 왼쪽) -> 1차선(왼쪽, A) / 2차선 / 3차선(오른쪽, B)
+
+
+def exit_report(lane, by: str) -> Optional[dict]:
+    """M7이 끝날 때 /m7/exit_lane 으로 낼 내용. lane: 회피 노드 차로 번호(+1/0/-1)."""
+    try:
+        k = int(lane)
+    except (TypeError, ValueError):
+        return None
+    if k not in LANE_NUMBER:
+        return None
+    n = LANE_NUMBER[k]
+    fork = lane_to_fork(k)
+    side = {1: '왼쪽', 2: '가운데', 3: '오른쪽'}[n]
+    return {'lane': n, 'fork': fork, 'side': side, 'avoid_lane': k, 'by': by,
+            'text': f'M7 끝: {n}차선({side}{", 갈림길 " + fork if fork else ""}) — {by}'}
+
+
 def lane_to_fork(lane) -> Optional[str]:
     """회피 패키지 차로 번호(+1 왼쪽, -1 오른쪽) -> 갈림길 A/B (규정: A 좌측, B 우측)."""
     try:
@@ -117,6 +135,7 @@ class M7Link:
         self.sign_lost = 0           # 확인한 뒤 연속으로 안 보인 프레임
         self.sign_near = False
         self.off_by = None           # 'sign' | 'avoid_done'
+        self.report = None           # M7이 끝날 때 한 번 내보낼 차로 (exit_report), obstacle_node가 pop
         self.trigger = None          # 켠 이유: 'line' | 'obstacle' | 'fallback'
         self.events: List[str] = []
 
@@ -164,10 +183,18 @@ class M7Link:
                 len(d.get('bbox') or []) == 4 and d['bbox'][3] >= self.p.off_sign_near_h_px for d in hits):
             self.sign_near = True
 
+    def _end_lane(self):
+        return self.avoid_lane if self.avoid_lane is not None else self.avoid_target
+
+    def pop_report(self) -> Optional[dict]:
+        r, self.report = self.report, None
+        return r
+
     def on_avoid_done(self, done: bool) -> None:
         if done and self.phase in ('armed', 'running'):
             self.off_by = 'avoid_done'
             self.phase = 'done'
+            self.report = exit_report(self._end_lane(), 'avoid_done')
             self.exit_fork = lane_to_fork(self.avoid_target)
             self.events.append(f'회피 완료 (마지막 차로 {self.avoid_target} -> {self.exit_fork})')
 
@@ -186,6 +213,7 @@ class M7Link:
                 out.append(('disable',))
                 self.events.append('FSM이 M7을 벗어남 -> 회피 중단')
                 self.phase = 'aborted'
+                self.report = exit_report(self._end_lane(), 'forced')
             self.in_m7 = False
             return out
 
@@ -225,8 +253,9 @@ class M7Link:
             if why:
                 self.phase = 'done'
                 self.off_by = 'sign'
-                lane_now = self.avoid_lane if self.avoid_lane is not None else self.avoid_target
+                lane_now = self._end_lane()
                 self.exit_fork = lane_to_fork(lane_now)
+                self.report = exit_report(lane_now, 'sign')
                 out.append(('disable',))
                 self.events.append(f'회피 끔: {why} (시작선 {pos:+.0f} mm, 차로 {lane_now} -> {self.exit_fork})')
                 return out

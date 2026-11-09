@@ -72,6 +72,7 @@ def run(layout, p, island_x, delay=0, head_err_deg=0.0, dy0=0.0, odom_scale=1.0,
     car.odom_yaw = car.imu_yaw = car.yaw
     pl = AvoidPlanner(p)
     pl.start(car.odom_x, car.odom_y, car.imu_yaw, 0.0)
+    last_v = 0.0
     n_beam, a_min = 360, -math.pi
     a_inc = 2 * math.pi / n_beam
     dt, t = 0.05, 0.0
@@ -80,7 +81,7 @@ def run(layout, p, island_x, delay=0, head_err_deg=0.0, dy0=0.0, odom_scale=1.0,
     edge = (p.num_side_lanes + 0.5) * p.lane_width
     for k in range(int(80 / dt)):
         drift = math.radians(imu_drift_deg) * min(1.0, t / 20.0)
-        pl.pose.update(car.odom_x, car.odom_y, car.imu_yaw)
+        pl.pose.update(car.odom_x, car.odom_y, car.imu_yaw, forward=last_v >= 0.0)   # 후진(멈춤 탈출)도 반영
         if k % 2 == 0:
             lx = car.x + p.lidar_x * math.cos(car.yaw)
             ly = car.y + p.lidar_x * math.sin(car.yaw)
@@ -90,6 +91,7 @@ def run(layout, p, island_x, delay=0, head_err_deg=0.0, dy0=0.0, odom_scale=1.0,
         q.append((v, w))
         v2, w2 = q.pop(0)
         car.step(v2, w2, dt, odom_scale=odom_scale, imu_drift=drift, rnd=rnd)
+        last_v = v2
         t += dt
         g = sc.min_gap(car.footprint(), rects)
         worst = min(worst, g)

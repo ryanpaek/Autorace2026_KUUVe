@@ -74,6 +74,8 @@ class AvoidNode(Node):
                                  self.on_scan, qos_profile_sensor_data)
         self.create_subscription(Bool, '/avoid/enable', self.on_enable, 10)
         self.create_subscription(String, '/fork_direction', self.on_fork, 10)
+        # 카메라 차선 보정: 팀 lane_node 결과를 그대로 받아 옆 위치·방향을 맞춤 (lane_fix 파라미터로 끔)
+        self.create_subscription(String, '/lane/status', self.on_lane, 10)
 
         self.create_timer(1.0 / self.get_parameter('rate').value, self.loop)
         self.create_timer(0.2, self.publish_markers)
@@ -114,6 +116,14 @@ class AvoidNode(Node):
         self.p.exit_lane = m.data
         self.pl.set_exit(m.data)
         self.get_logger().info(f'갈림길 방향 받음: {m.data} → 출구 차선 {self.pl.exit_pref}')
+
+    def on_lane(self, m):
+        if not self.active:
+            return
+        try:
+            self.pl.lane_fix(json.loads(m.data))
+        except (ValueError, TypeError, AttributeError):
+            pass
 
     def on_odom(self):
         if self.active:
