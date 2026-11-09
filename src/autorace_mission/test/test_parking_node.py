@@ -38,11 +38,14 @@ def corners(x, y, th):
             for dx in (-REAR, WB + REAR) for dy in (-W_BODY / 2, W_BODY / 2)]
 
 
-def raycast(px, py, th, boxes, n=360):
-    """사각형들에 대한 가짜 라이다 (m)."""
+def raycast(px, py, th, boxes, n=360, fov_deg=360.0):
+    """사각형들에 대한 가짜 라이다 (m). fov_deg 밖은 inf (실측: 리모 덩어리가 잡히는 건 약 ±105도까지)."""
     out = []
     for i in range(n):
         a = -math.pi + i * 2 * math.pi / n
+        if abs(a) > math.radians(fov_deg / 2.0):
+            out.append(math.inf)
+            continue
         dx, dy = math.cos(th + a), math.sin(th + a)
         best = math.inf
         for b in boxes:
@@ -70,7 +73,20 @@ def hits(x, y, th, boxes):
     return False
 
 
-def drive(parked, target, overrides=None, y0=240.0):
+# 가로선 (y 위쪽 가장자리, 아래쪽): 차로·주차 구역 경계, 앞줄·뒷줄 사이, 바깥 테두리
+H_LINES = (0.0, -620.0, -1240.0)
+
+
+def camera_lines(fx, fy, th):
+    """가짜 카메라: 칸 쪽(남쪽)을 볼 때 앞바퀴 -> 가로선 가까운 가장자리 거리 (BEV 350~1900mm만)."""
+    dev = th + math.pi / 2
+    if abs(dev) > math.radians(25):
+        return []
+    out = [(fy - yl) / math.cos(dev) for yl in H_LINES]
+    return sorted(d for d in out if 350.0 <= d <= 1900.0)
+
+
+def drive(parked, target, overrides=None, y0=240.0, fov_deg=360.0, camera=False, log=None):
     """주차 논리(ParkingV2)를 가상 트랙에서 끝까지 돌린다 -> (칸 안 모서리 수, 충돌, 결과)."""
     p = dict(pn.DEFAULTS)
     p.update(overrides or {})
@@ -80,7 +96,8 @@ def drive(parked, target, overrides=None, y0=240.0):
     info = {'done': False, 'result': ''}
     for _ in range(int(60 / dt)):
         fx, fy = x + WB * math.cos(th), y + WB * math.sin(th)
-        rng, amin, ainc = raycast(fx + LIDAR_AHEAD * math.cos(th), fy + LIDAR_AHEAD * math.sin(th), th, boxes)
+        rng, amin, ainc = raycast(fx + LIDAR_AHEAD * math.cos(th), fy + LIDAR_AHEAD * math.sin(th), th, boxes,
+                                  fov_deg=fov_deg)
         cl = pn.scan_clusters(rng, amin, ainc, 0.05, 8.0, p['front_axle_from_lidar_mm'], 0.0,
                               max_dist_mm=max(1500.0, p['side_far_mm'] + 200.0))
         bl = pn.front_blocked(rng, amin, ainc, 0.05, 8.0, p['front_axle_from_lidar_mm'], 0.0,
@@ -89,7 +106,10 @@ def drive(parked, target, overrides=None, y0=240.0):
         lines = [d_line] if 60.0 <= d_line <= 700.0 and abs(th) < 0.3 else []
         lane_w = 0.18 * max(-1.89, min(1.89, 0.004 * (240.0 + offset - y) - 2.0 * th))   # 가짜 차선 노드
         v, k, info = logic.step({'t': t, 'dist_mm': dist, 'yaw': th, 'lane_v': 0.18, 'lane_w': lane_w,
-                                 'stoplines_mm': lines, 'clusters': cl, 'blocked': bl})
+                                 'stoplines_mm': lines, 'clusters': cl, 'blocked': bl,
+                                 'end_lines_mm': camera_lines(fx, fy, th) if camera else []})
+        if log is not None:
+            log.append(dict(info))
         if logic.lane_cfg:
             offset = logic.lane_cfg.get('target_offset_mm', 0.0)
         kap = 0.0 if abs(v) < 1e-6 else (lane_w if k is None else v * k) / v
@@ -183,3 +203,40 @@ def test_late_turn_recovers_by_realign():
 def test_disabled_realign_still_parks_nominal():
     n_in, hit, result = drive([1, 3], 2, {'max_realign': 0})
     assert (n_in, hit, result) == (4, False, 'PARKED')
+
+
+# ---------------------------------------------------------------- 11/09 park_02: 라이다 시야가 좁을 때
+NARROW = 210.0    # 실측: 꺾은 뒤 리모 덩어리가 약 ±105도 밖에서 사라짐 (park_02 66.3초)
+
+
+def test_narrow_fov_front_row_parks_by_memory():
+    """꺾은 뒤 왼쪽 리모가 시야 밖으로 빠져도 기억한 칸 가운데 선으로 선다 (예전: 1.1m 직진 후 실패)."""
+    log = []
+    n_in, hit, result = drive([1, 3], 2, fov_deg=NARROW, log=log)
+    assert (n_in, hit) == (4, False) and result.startswith('PARKED')
+    assert log[-1]['row'] == 'front'
+
+
+def test_narrow_fov_back_row_parks():
+    log = []
+    n_in, hit, result = drive([4, 6], 5, fov_deg=NARROW, log=log)
+    assert (n_in, hit) == (4, False) and result.startswith('PARKED')
+    assert log[-1]['row'] == 'back'
+
+
+def test_camera_end_line_stops_in_right_row():
+    """옆면 정지를 끄고(side_max_mm 50) 카메라만 주면 칸 끝 선으로 그 줄 칸 안에 선다. 앞줄=줄 사이 선, 뒷줄=테두리."""
+    for parked, target in (([1, 3], 2), ([4, 6], 5)):
+        log = []
+        n_in, hit, result = drive(parked, target, {'side_max_mm': 50.0}, fov_deg=NARROW, camera=True, log=log)
+        assert (n_in, hit) == (4, False), (parked, n_in, result)
+        assert log[-1]['stop_how'] == 'camera', (parked, log[-1]['stop_how'])
+
+
+def test_cap_keeps_car_inside_cell_without_side_or_camera():
+    """옆면도 카메라도 없으면 짝(깊이 보정)으로 칸 가운데를 조금 지나서 멈춤 -> 칸 밖으로 안 나감."""
+    for parked, target in (([1, 3], 2), ([4, 6], 5)):
+        log = []
+        n_in, hit, result = drive(parked, target, {'side_max_mm': 50.0}, fov_deg=NARROW, log=log)
+        assert (n_in, hit) == (4, False), (parked, n_in, result)
+        assert log[-1]['stop_how'] == 'cap', (parked, log[-1]['stop_how'])

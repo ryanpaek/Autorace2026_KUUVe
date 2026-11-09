@@ -310,6 +310,8 @@ class LaneOutput:
     low_conf: bool = False              # 중앙선이 lookahead까지 안 닿음
     stoplines_mm: List[float] = field(default_factory=list)  # 앞바퀴 -> 모든 흰 가로선 (가까운 순)
     crosswalk_lines_mm: List[float] = field(default_factory=list)  # 그중 횡단보도 막대가 뒤따르는 선
+    # 흰·노란 가로선 모두 (차 정면 기준). 주차 칸 끝 선(줄 사이 흰 선, 바깥 노란 테두리)용
+    end_lines_mm: List[float] = field(default_factory=list)
     mem_pts: int = 0                    # 기억 점 수 (차선 기억이 켜졌을 때)
     ff_kappa: Optional[float] = None    # 도면 곡률 (왼쪽 +, 1/m). 미리 넣기가 켜졌을 때
     lookahead_mm: Optional[float] = None
@@ -320,7 +322,7 @@ class LaneOutput:
             'mem_pts', 'ff_kappa', 'lookahead_mm',
             'kappa', 'speed_scale', 'status', 'source', 'offset_mm',
             'heading_rad', 'path_kappa', 'low_conf', 'stoplines_mm',
-            'crosswalk_lines_mm')}
+            'crosswalk_lines_mm', 'end_lines_mm')}
         d['target_mm'] = list(self.target_mm) if self.target_mm else None
         cl = self.debug.get('centerline')
         d['model'] = ('circle' if cl.circle is not None else 'poly') if cl is not None else None
@@ -1306,6 +1308,7 @@ class LaneFollower:
                     yaw: Optional[float] = None, speed: float = 0.3,
                     pose=None, dist_mm: Optional[float] = None) -> LaneOutput:
         cfg, p = self.cfg, self.p
+        raw_lane = bev_lane                 # 가로선 찾기용 (아래 팽창·가로 성분 제거 전)
         look = p.lookahead_mm
         if p.lookahead_per_mps:
             look = float(np.clip(p.lookahead_mm + p.lookahead_per_mps * (speed - 0.3),
@@ -1510,6 +1513,9 @@ class LaneFollower:
             lines = detect_stoplines(bev_white, center_col, cfg, p)
             out.stoplines_mm = [d for d, _ in lines]
             out.crosswalk_lines_mm = [d for d, bars in lines if bars]
+            # 주차 칸 끝 선: 흰+노란 마스크, 차 정면 기준 (칸 안에서는 차선 중심 추정이 엉뚱할 수 있음)
+            both = bev_white if raw_lane is None else cv2.bitwise_or(bev_white, raw_lane)
+            out.end_lines_mm = [d for d, _ in detect_stoplines(both, cfg.vehicle_col, cfg, p)]
         return out
 
     # --- 선 동일성 (프레임 간) --------------------------------------------------
