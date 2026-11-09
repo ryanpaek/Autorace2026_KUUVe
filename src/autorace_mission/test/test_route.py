@@ -155,3 +155,30 @@ def test_map_pose_points_and_drift(route):
     mp2.update_lane(7000.0, 0.0, dict(lane, offset_mm=0.0), 0.0)
     pts2 = mp2.points_ahead(s2, 0.0)
     assert pts2[-1][0] > 100.0
+
+
+def test_text_before_stop_line_does_not_snap(route):
+    """정지선 550mm 앞 '천천히' 글자를 정지선·끝선으로 맞추지 않고, 진짜 정지선에서 맞춘다 (11/09)."""
+    lm = {m['name']: m['s'] for m in route.landmarks}
+    tr = RouteTracker(route, ordered_gate_mm=1200.0)
+    tr.reset(lm['m6_zigzag_line'] + 50.0, 0.0)
+    tr.last_idx = [m['name'] for m in route.landmarks].index('m6_zigzag_line')
+    text_s = lm['m3_stop_line'] - 550.0
+    dist = (text_s - 700.0) - tr.s                    # 글자가 700mm 앞에 보이는 위치까지 odom 정확히
+    tr.update(dist, [700.0], [700.0])                 # 글자가 막대 판정까지 받은 최악의 경우
+    assert tr.last_fix is None or tr.last_fix['name'] not in ('m3_stop_line', 'm3_crosswalk_end')
+    s_before = tr.s
+    dist2 = dist + (lm['m3_stop_line'] - 700.0) - s_before
+    tr.update(dist2, [700.0 - 550.0, 700.0], [700.0])  # 글자(150) + 정지선(700, 막대)
+    assert tr.last_fix['name'] == 'm3_stop_line'
+    assert tr.s == pytest.approx(lm['m3_stop_line'] - 700.0, abs=30.0)
+
+
+def test_plain_line_never_snaps_to_crosswalk_landmark(route):
+    lm = {m['name']: m['s'] for m in route.landmarks}
+    tr = RouteTracker(route)
+    tr.reset(lm['m3_stop_line'] - 600.0, 0.0)
+    tr.update(0.0, [600.0], [])                       # 막대 없는 선
+    assert tr.last_fix is None
+    tr.update(0.0, [600.0], [600.0])
+    assert tr.last_fix['name'] == 'm3_stop_line'

@@ -171,6 +171,29 @@ def test_crosswalk_line_vs_start_line(cfg):
     assert out.crosswalk_lines_mm[0] == pytest.approx(700.0, abs=10)
 
 
+def test_band_clipped_at_bev_bottom_is_ignored(cfg):
+    """BEV 맨 아래 행에 걸린 띠는 가까운 가장자리를 모르므로 정지선으로 내지 않는다 (11/09)."""
+    white = synth.straight_lane(cfg)
+    # synth: BEV 맨 아래 = 앞바퀴 100mm. 80~140mm 띠는 아래 끝에 잘려 있다
+    synth.add_stopline(white, cfg, front_dist_mm=80.0, thick_mm=60.0)
+    synth.add_stopline(white, cfg, front_dist_mm=700.0)
+    out = run(LaneFollower(cfg), synth.straight_lane(cfg), white=white)
+    assert [round(d) for d in out.stoplines_mm] == pytest.approx([700], abs=10)
+
+
+def test_text_like_band_is_not_a_line(cfg):
+    """한 행에 흰 구간이 여러 개(글자 '천천히' 같은)인 띠는 가로선이 아니다 (11/09)."""
+    white = synth.straight_lane(cfg)
+    r0 = int(round(cfg.y_mm_to_row(200.0 + 500.0 + 20.0)))
+    r1 = int(round(cfg.y_mm_to_row(200.0 + 500.0)))
+    for x in range(-180, 180, 60):          # 45mm 획 + 15mm 틈 x 6 -> 채움 0.75, 구간 6개
+        c0 = int(round(cfg.vehicle_col + x / cfg.mm_per_px_x))
+        white[r0:r1 + 1, c0:c0 + int(45 / cfg.mm_per_px_x)] = 255
+    synth.add_stopline(white, cfg, front_dist_mm=900.0)
+    out = run(LaneFollower(cfg), synth.straight_lane(cfg), white=white)
+    assert [round(d) for d in out.stoplines_mm] == pytest.approx([900], abs=10)
+
+
 def test_target_offset_shifts_left(cfg):
     """target_offset_mm(+왼쪽)를 주면 차로 중심에서 그만큼 왼쪽을 겨냥한다."""
     f = LaneFollower(cfg)
