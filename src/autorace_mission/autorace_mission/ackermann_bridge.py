@@ -13,12 +13,29 @@ import math
 import time
 
 
+def small_steer_comp(delta: float, gain: float = 1.0, below: float = 0.10) -> float:
+    """작은 조향 보정. |delta| <= below 구간은 gain배, below~2*below에서 원래 값으로 이어 붙인다.
+
+    11/02 bag 분석: 0.1 rad 미만 조향 명령은 실제로 약 65%만 먹힌다 (조향 유격).
+    gain 1.0 = 보정 없음.
+    """
+    a = abs(delta)
+    if gain == 1.0 or below <= 0.0 or a >= 2.0 * below:
+        return delta
+    if a <= below:
+        out = a * gain
+    else:
+        out = a + (gain - 1.0) * below * (2.0 * below - a) / below
+    return math.copysign(out, delta)
+
+
 def twist_to_ackermann(v: float, w: float, wheelbase: float = 0.2,
-                       max_steer: float = 0.40, min_speed: float = 0.02):
+                       max_steer: float = 0.40, min_speed: float = 0.02,
+                       small_gain: float = 1.0, small_below: float = 0.10):
     """(speed, steering_angle) 반환. 정지에 가까우면 조향 0."""
     if abs(v) < min_speed:
         return float(v), 0.0
-    delta = math.atan(wheelbase * w / v)
+    delta = small_steer_comp(math.atan(wheelbase * w / v), small_gain, small_below)
     return float(v), float(max(-max_steer, min(max_steer, delta)))
 
 
@@ -35,6 +52,8 @@ def main(args=None):
             self.declare_parameter('max_steer', 0.40)         # rad, 가상 바퀴 기준
             self.declare_parameter('max_speed', 0.5)          # m/s 최종 안전 상한
             self.declare_parameter('cmd_timeout_sec', 0.3)
+            self.declare_parameter('small_steer_gain', 1.0)   # 작은 조향 보정 (1.0 = 끔, 권장 1.3)
+            self.declare_parameter('small_steer_below', 0.10)
             self.declare_parameter('in_topic', '/cmd_vel')
             self.declare_parameter('out_topic', '/limo/ack_cmd')
             self.speed = 0.0
@@ -50,7 +69,9 @@ def main(args=None):
         def _on_cmd(self, m: Twist):
             p = self.get_parameter
             v, d = twist_to_ackermann(m.linear.x, m.angular.z, p('wheelbase').value,
-                                      p('max_steer').value)
+                                      p('max_steer').value,
+                                      small_gain=float(p('small_steer_gain').value),
+                                      small_below=float(p('small_steer_below').value))
             vmax = p('max_speed').value
             self.speed = max(-vmax, min(vmax, v))
             self.steer = d

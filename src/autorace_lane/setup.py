@@ -22,6 +22,7 @@ setup(
             'lane_node = autorace_lane.lane_node:main',
             'bev_calib = autorace_lane.bev_calib:main',
             'offline_replay = autorace_lane.offline_replay:main',
+            'lane_eval = autorace_lane.lane_eval:main',
         ],
     },
 )

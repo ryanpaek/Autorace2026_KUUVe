@@ -43,7 +43,7 @@ def iter_video(path):
         i += 1
 
 
-def iter_bag(path, topic):
+def iter_bag(path, topic, pose=None):
     """rosbag2 폴더에서 이미지 토픽을 꺼낸다.
 
     ROS2(rclpy)가 있으면 그걸 쓰고, 없으면 순수 파이썬 `rosbags` 라이브러리로 읽는다.
@@ -54,8 +54,10 @@ def iter_bag(path, topic):
         from rclpy.serialization import deserialize_message
         from rosidl_runtime_py.utilities import get_message
     except ImportError:
-        yield from _iter_bag_rosbags(path, topic)
+        yield from _iter_bag_rosbags(path, topic, pose)
         return
+    if pose is not None:      # rclpy 경로에서는 odom 없이 (리플레이는 rosbags 경로 권장)
+        print('[offline_replay] ROS2 환경에서는 차선 기억 리플레이 미지원 -> rosbags 경로를 쓰세요')
     from autorace_lane.lane_node import image_msg_to_bgr
     storage = 'mcap' if glob.glob(os.path.join(path, '*.mcap')) else 'sqlite3'
     reader = rosbag2_py.SequentialReader()
@@ -77,18 +79,30 @@ def iter_bag(path, topic):
         yield f'{t}', img
 
 
-def _iter_bag_rosbags(path, topic):
+def _iter_bag_rosbags(path, topic, pose=None):
+    """pose: PoseIntegrator를 주면 /odom·/imu로 같이 갱신한다 (차선 기억 리플레이용)."""
     try:
         from rosbags.rosbag2 import Reader
         from rosbags.typesys import Stores, get_typestore
     except ImportError:
         sys.exit('rosbag 읽기: ROS2 환경을 source 하거나 `pip install rosbags` 하세요')
+    from autorace_lane.lane_node_util import yaw_of
     ts = get_typestore(Stores.ROS2_HUMBLE)
     with Reader(path) as r:
         conns = [c for c in r.connections if c.topic == topic]
         if not conns:
             sys.exit(f'topic {topic} not in bag: {sorted({c.topic for c in r.connections})}')
+        if pose is not None:
+            conns += [c for c in r.connections if c.topic in ('/odom', '/imu')]
         for c, t, raw in r.messages(connections=conns):
+            if c.topic == '/imu':
+                pose.on_imu_yaw(yaw_of(ts.deserialize_cdr(raw, c.msgtype).orientation))
+                continue
+            if c.topic == '/odom':
+                o = ts.deserialize_cdr(raw, c.msgtype)
+                pose.on_odom(o.pose.pose.position.x, o.pose.pose.position.y,
+                             yaw_of(o.pose.pose.orientation), o.twist.twist.linear.x)
+                continue
             m = ts.deserialize_cdr(raw, c.msgtype)
             if c.msgtype.endswith('CompressedImage'):
                 img = cv2.imdecode(np.asarray(m.data, np.uint8), cv2.IMREAD_COLOR)
@@ -129,6 +143,7 @@ def main(argv=None):
     ap.add_argument('--range', nargs=2, type=int, default=None, metavar=('START', 'END'),
                     help='이 프레임 번호 구간만 처리 (result.csv 번호와 같음). 예: --range 2250 2600')
     ap.add_argument('--model', default=None, help='차선 분할 ONNX (없으면 HSV)')
+    ap.add_argument('--no-images', action='store_true', help='디버그 이미지 저장 안 함 (빠름)')
     a = ap.parse_args(argv)
 
     cfg = BevConfig.from_yaml(os.path.expanduser(a.bev))
@@ -140,9 +155,12 @@ def main(argv=None):
     f = LaneFollower(cfg, params, mask_fn=masker)
     f.set_mode(a.mode)
     src = os.path.expanduser(a.input)
+    pose = None
     if os.path.isdir(src) and (glob.glob(os.path.join(src, '*.db3'))
                                or glob.glob(os.path.join(src, '*.mcap'))):
-        frames = iter_bag(src, a.topic)
+        from autorace_lane.lane_core import PoseIntegrator
+        pose = PoseIntegrator()
+        frames = iter_bag(src, a.topic, pose)
     elif os.path.isdir(src):
         frames = iter_folder(src)
     else:
@@ -154,14 +172,17 @@ def main(argv=None):
     with open(os.path.join(out_dir, 'result.csv'), 'w', newline='') as fcsv:
         w = csv.writer(fcsv)
         w.writerow(['frame', 'status', 'source', 'kappa', 'offset_mm', 'heading_rad',
-                    'path_kappa', 'low_conf', 'stopline_mm', 'idx', 'model', 'circle_r_mm'])
+                    'path_kappa', 'low_conf', 'stopline_mm', 'idx', 'model', 'circle_r_mm',
+                    'tgt_x', 'tgt_y', 'mem_pts', 'dist_mm'])
         for idx, (name, img) in enumerate(frames):
             if a.range and not (a.range[0] <= idx <= a.range[1]):
                 if idx > a.range[1]:
                     break
                 continue
             n = idx
-            out = f.process(img, speed=a.speed)
+            out = f.process(img, speed=a.speed,
+                            pose=pose.pose if pose is not None else None,
+                            dist_mm=pose.dist_mm if pose is not None else None)
             st = out.status_dict()
             w.writerow([name, out.status, out.source, f'{out.kappa:.4f}',
                         '' if out.offset_mm is None else f'{out.offset_mm:.1f}',
@@ -169,8 +190,11 @@ def main(argv=None):
                         '' if out.path_kappa is None else f'{out.path_kappa:.3f}',
                         int(out.low_conf),
                         out.stoplines_mm[0] if out.stoplines_mm else '', idx,
-                        st['model'] or '', st['circle_r_mm'] or ''])
-            if n % max(1, a.every) == 0:
+                        st['model'] or '', st['circle_r_mm'] or '',
+                        '' if out.target_mm is None else f'{out.target_mm[0]:.0f}',
+                        '' if out.target_mm is None else f'{out.target_mm[1]:.0f}',
+                        out.mem_pts, '' if pose is None else f'{pose.dist_mm:.0f}'])
+            if not a.no_images and n % max(1, a.every) == 0:
                 cam = cv2.resize(img, (cfg.image_width, cfg.image_height))
                 dbg = draw_debug(out, cfg)
                 scale = cam.shape[0] / dbg.shape[0]

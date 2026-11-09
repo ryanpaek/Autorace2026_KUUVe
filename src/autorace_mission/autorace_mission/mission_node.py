@@ -36,7 +36,7 @@ from sensor_msgs.msg import Imu
 from std_msgs.msg import Bool, Empty, Float32, String
 
 from autorace_mission.fsm import DEFAULT_PARAMS, Inputs, MissionFSM
-from autorace_mission.route import RouteMap, RouteTracker
+from autorace_mission.route import MapPose, RouteMap, RouteTracker
 
 # /mission/set_state로 점프할 때 차를 놓는 곳 (도면 경로 지점 + 오프셋 mm)
 STATE_START_POINT = {
@@ -74,11 +74,16 @@ class MissionNode(Node):
         self.declare_parameter('route_gate_mm', 250.0)
         self.declare_parameter('route_gain', 0.6)
         self.declare_parameter('odom_scale', 1.0)           # 실측: 실제 거리 / 오도메트리 거리
+        # 흰 선을 도면 순서대로 짝짓는 허용 범위 (지그재그 흔들림으로 odom이 최대 ~80cm 길어짐). 0이면 예전 방식
+        self.declare_parameter('route_ordered_gate_mm', 1200.0)
+        # 시작하자마자 경로 위치를 이 값(mm)으로 맞춘다 (lane_test에서 START 체커 출발 = 0.0). 음수면 안 함
+        self.declare_parameter('route_start_s', -1.0)
 
         params = {k: self.get_parameter(k).value for k in DEFAULT_PARAMS
                   if not isinstance(DEFAULT_PARAMS[k], dict)}
         self.route = None
         self.tracker = None
+        self.mappose = None
         self.route_active = False
         path = self.get_parameter('route_file').value
         if path:
@@ -87,8 +92,11 @@ class MissionNode(Node):
                 self.tracker = RouteTracker(self.route,
                                             gate_mm=self.get_parameter('route_gate_mm').value,
                                             gain=self.get_parameter('route_gain').value,
-                                            odom_scale=self.get_parameter('odom_scale').value)
+                                            odom_scale=self.get_parameter('odom_scale').value,
+                                            ordered_gate_mm=float(self.get_parameter(
+                                                'route_ordered_gate_mm').value))
                 params['route_points'] = self.route.points
+                self.mappose = MapPose(self.route)
                 self.get_logger().info(f'route map: {path} ({self.route.length / 1000:.1f} m, '
                                        f'{len(self.route.landmarks)} lines)')
             except Exception as e:      # 지도 파일이 깨져도 거리 기준으로 달린다
@@ -112,6 +120,7 @@ class MissionNode(Node):
         self._last_cfg_pub = 0.0
         self._last_state = None
         self._last_fallback_warn = 0.0
+        self._auto_s_done = False
 
         self.create_subscription(String, '/perception/detections', self._on_det, 10)
         self.create_subscription(String, '/lane/status', self._on_lane, 10)
@@ -131,6 +140,8 @@ class MissionNode(Node):
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.cfg_pub = self.create_publisher(String, '/lane/config', 10)
         self.state_pub = self.create_publisher(String, '/mission/state', 10)
+        # 차선 노드의 도면 곡률 미리 넣기용: 앞바퀴에서 0~1300mm 앞 곡률 (왼쪽 +, 1/m)
+        self.preview_pub = self.create_publisher(String, '/route/preview', 10)
         self.create_timer(1.0 / float(self.get_parameter('tick_hz').value), self._tick)
 
     # --- 입력 ---------------------------------------------------------------
@@ -218,6 +229,10 @@ class MissionNode(Node):
 
     # --- 틱 -----------------------------------------------------------------
     def _tick(self):
+        s0 = float(self.get_parameter('route_start_s').value)
+        if not self._auto_s_done and s0 >= 0.0 and self.tracker is not None and self._last_xy:
+            self._route_reset(s0, 'route_start_s')
+            self._auto_s_done = True
         inp = self._inputs()
         self.new_det = False
         self.start_flag = False
@@ -231,8 +246,10 @@ class MissionNode(Node):
         out = Twist()
         source = cmd.source
         timeout = self.get_parameter('source_timeout_sec').value
-        if source == 'obstacle':
-            # obstacle 노드가 죽거나 늦으면 서지 말고 차선 주행으로 (부분점수는 거리 비례라 멈추면 손해)
+        if source == 'obstacle' and self.fsm.state == 'M8_CONES':
+            # M8: obstacle 노드가 죽거나 늦으면 서지 말고 차선 주행으로 (부분점수는 거리 비례라 멈추면 손해)
+            # M7은 여기서 바꾸지 않는다: 회피 노드가 멈추면 m7_link가 m7_hold로 정지시킨다
+            # (정차 LIMO 사이를 차선 주행으로 직진하지 않게)
             tw, stamp = self.twists['obstacle']
             if tw is None or now - stamp > timeout:
                 source = 'lane'
@@ -247,6 +264,19 @@ class MissionNode(Node):
                 out.linear.x = max(-vmax, min(vmax, tw.linear.x))
                 out.angular.z = max(-wmax, min(wmax, tw.angular.z))
         self.cmd_pub.publish(out)
+        if self.route_active and inp.route_s is not None:
+            step = 100.0
+            ks = [round(self.route.curvature(inp.route_s + i * step), 4) for i in range(14)]
+            msg = {'s': round(inp.route_s), 'step_mm': step, 'k': ks}
+            mp = self.mappose
+            if mp is not None:
+                mp.predict(self.dist_mm, inp.route_s, self.yaw)
+                mp.update_lane(inp.route_s, self.yaw, self.lane, self.dist_mm)
+                msg['pose_ok'] = mp.valid(self.dist_mm) and self.yaw is not None
+                if msg['pose_ok']:
+                    msg['d_mm'] = round(mp.d)
+                    msg['pts'] = mp.points_ahead(inp.route_s, self.yaw)
+            self.preview_pub.publish(String(data=json.dumps(msg)))
 
         state = {'state': self.fsm.state, 'sub': self.fsm.sub, 'source': source,
                  'fork_choice': self.fsm.fork_choice, 'dist_mm': round(self.dist_mm),

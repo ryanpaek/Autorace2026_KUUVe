@@ -107,3 +107,51 @@ def test_state_reports_next_landmark(route):
     st = t.state()
     assert st['next'] == 'm6_zigzag_line'
     assert st['next_in_mm'] == pytest.approx(route.points["m6_zigzag_line"] - 9000.0, abs=5)
+
+
+def test_ordered_matching_survives_zigzag_overrun(route):
+    """지그재그에서 odom이 80cm 더 늘어나도 정지선을 순서대로 맞춘다 (11/06)."""
+    lm = {m['name']: m['s'] for m in route.landmarks}
+    for ordered, expect in ((1200.0, 'm3_stop_line'), (0.0, None)):
+        tr = RouteTracker(route, ordered_gate_mm=ordered)
+        tr.reset(lm['m6_zigzag_line'] + 50.0, 0.0)
+        # 실제로는 정지선 600mm 앞에 왔는데 odom은 800mm 더 왔다고 본다
+        true_s = lm['m3_stop_line'] - 600.0
+        dist = (true_s - tr.s) + 800.0
+        tr.update(dist, [600.0])
+        if expect is None:
+            assert tr.last_fix is None or tr.last_fix['name'] != 'm3_stop_line'
+        else:
+            assert tr.last_fix['name'] == expect
+            for _ in range(10):                       # 같은 선을 계속 보면 수렴
+                tr.update(dist, [600.0])
+            assert tr.s == pytest.approx(true_s, abs=30.0)
+            # 다음 선(횡단보도 끝선)도 순서대로
+            tr.update(dist + (lm['m3_crosswalk_end'] - 300.0 - true_s), [300.0])
+            assert tr.last_fix['name'] == 'm3_crosswalk_end'
+
+
+def test_map_pose_points_and_drift(route):
+    from autorace_mission.route import MapPose
+    mp = MapPose(route)
+    s = 3000.0                                   # 상단 직선 (동쪽, heading 0)
+    imu_yaw = 0.7                                # IMU 기준이 도면과 0.7 rad 다르다고 하자
+    lane = {'status': 'BOTH', 'low_conf': False, 'model': 'poly', 'heading_rad': 0.0,
+            'offset_mm': 100.0}                 # 차로 중심이 차 왼쪽 100mm -> 차는 중심 오른쪽 100
+    assert mp.update_lane(s, imu_yaw, lane, 0.0)
+    assert mp.yaw_off == pytest.approx(-0.7)
+    pts = mp.points_ahead(s, imu_yaw)
+    # 중심선은 차 왼쪽 100mm, 앞으로 쭉
+    assert pts[5][0] == pytest.approx(-100.0, abs=1.0)
+    assert pts[5][1] == pytest.approx(200.0 + 500.0, abs=1.0)
+    # 차가 오른쪽으로 0.1 rad 틀어진 채 1m 가면 d가 약 -100 더 (오른쪽으로)
+    mp.predict(0.0, s, imu_yaw)
+    mp.predict(1000.0, s + 1000.0, imu_yaw - 0.1)
+    assert mp.d == pytest.approx(-100.0 - 1000.0 * math.sin(0.1), abs=2.0)
+    assert mp.valid(1000.0) and not mp.valid(5000.0)
+    # 코너 앞: 중심선 점이 오른쪽으로 휜다
+    s2 = 7800.0
+    mp2 = MapPose(route)
+    mp2.update_lane(7000.0, 0.0, dict(lane, offset_mm=0.0), 0.0)
+    pts2 = mp2.points_ahead(s2, 0.0)
+    assert pts2[-1][0] > 100.0

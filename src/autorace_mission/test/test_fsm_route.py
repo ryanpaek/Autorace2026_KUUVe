@@ -96,3 +96,70 @@ def test_cones_by_route_positions():
     assert subs[('M8_CONES', 'cones')] == pytest.approx(p['m8_start_line'] - 300, abs=10)
     assert subs[('M8_CONES', 'handover')] == pytest.approx(p['m8_end_line'] + 150, abs=10)
     assert fsm.state == 'M1_TRAFFIC'
+
+
+def run_m7_external(done_at_mm=300.0, fork_sign=True, active_from=0.0, dt=0.05):
+    """M7을 limo_obstacle_avoid로: 시작선부터 m7_active, 섬 끝 + done_at_mm에서 m7_done."""
+    route = RouteMap.from_yaml(ROUTE_YAML)
+    p = route.points
+    start = next(m['s'] for m in route.landmarks if m['name'] == 'm7_start_line')
+    fsm = MissionFSM({'route_points': p, 'vote_window': 3, 'vote_need': 2,
+                      'start_state': 'M7_OBSTACLE', 'm7_external_avoid': True})
+    t, s = 0.0, p['m3_crosswalk_end']
+    sources, entered = [], {}
+    for _ in range(20000):
+        det = {'fork_b': 0.9} if fork_sign and fsm.state in ('M7_OBSTACLE', 'M2_FORK') else {}
+        end = p['m7_island_tip'] + (done_at_mm if done_at_mm is not None else 1e9)
+        obstacle = {'m7_active': start + active_from <= s < end,
+                    'm7_done': done_at_mm is not None and s >= p['m7_island_tip'] + done_at_mm,
+                    'm7_exit': 'A'}
+        cmd = fsm.step(Inputs(t=t, dist_mm=s - p['m3_crosswalk_end'], route_s=s, detections=det,
+                              new_detection_frame=True, obstacle=obstacle))
+        entered.setdefault(fsm.state, s)
+        if fsm.state == 'M7_OBSTACLE':
+            sources.append((s, cmd.source))
+        s += cmd.lane.get('speed', 0.0) * 1000.0 * dt
+        t += dt
+        if fsm.state == 'M8_CONES':
+            break
+    return p, start, fsm, sources, entered
+
+
+def test_m7_external_waits_for_avoid_done():
+    p, start, fsm, sources, entered = run_m7_external(done_at_mm=300.0)
+    # 예전처럼 섬 끝 300 mm 앞이 아니라, 회피 노드가 끝났을 때 M2로
+    assert entered['M2_FORK'] == pytest.approx(p['m7_island_tip'] + 300, abs=20)
+    # 코너·시작선 전에는 차선, 회피 노드가 켜진 뒤에는 obstacle
+    assert all(src == 'lane' for s, src in sources if s < start)
+    assert all(src == 'obstacle' for s, src in sources if s >= start + 20)
+    assert fsm.fork_choice == 'B'                      # 표지 투표가 회피 차로(A)보다 우선
+
+
+def test_m7_external_forced_end_if_avoid_never_finishes():
+    p, start, fsm, sources, entered = run_m7_external(done_at_mm=None)
+    assert entered['M2_FORK'] == pytest.approx(p['m7_island_tip'] + 500, abs=20)
+    assert 'forced' in ' '.join(fsm.log)
+
+
+def test_m2_uses_avoid_exit_lane_when_sign_unread():
+    p, start, fsm, sources, entered = run_m7_external(fork_sign=False)
+    assert fsm.fork_choice == 'A'                      # 회피가 끝난 차로 그대로 (섬을 건너지 않게)
+    assert entered['M8_CONES'] == pytest.approx(p['m2_merge_end'], abs=20)
+
+
+def test_m7_external_off_keeps_old_behaviour():
+    route, fsm, entered, stops = run_lap()
+    assert entered['M2_FORK'] == pytest.approx(route.points['m7_island_tip'] - 300, abs=20)
+
+
+def test_m7_external_hold_stops():
+    """회피 노드가 도중에 멈추면(m7_hold) 차선 주행으로 넘기지 않고 정지."""
+    fsm = MissionFSM({'start_state': 'M7_OBSTACLE', 'm7_external_avoid': True,
+                      'route_points': {'m7_island_tip': 17973.0}})
+    run = fsm.step(Inputs(t=0.0, dist_mm=0.0, route_s=14000.0, obstacle={'m7_active': True}))
+    assert run.source == 'obstacle'
+    held = fsm.step(Inputs(t=0.1, dist_mm=20.0, route_s=14020.0,
+                           obstacle={'m7_active': False, 'm7_hold': True}))
+    assert held.source == 'stop' and fsm.state == 'M7_OBSTACLE'
+    lost = fsm.step(Inputs(t=0.2, dist_mm=20.0, route_s=14020.0, obstacle={'m7_active': False}))
+    assert lost.source == 'lane'                   # hold가 없으면 예전대로 (코너 구간 등)

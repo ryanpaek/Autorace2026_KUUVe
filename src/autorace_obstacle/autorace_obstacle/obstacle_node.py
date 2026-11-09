@@ -9,13 +9,16 @@
                  sub 'handover' 경로 끝(차로 중심, 구간 방향 직진)을 계속 따라가며 차선 노드가 차선을 다시 잡길 기다림
                마지막 콘을 지나면 /obstacle/state의 cones_done = true
                카메라: 콘 바닥 위치를 BEV 호모그래피로 이미지에 찍어 주황색인지 본다 (아니면 그 콘을 뺀다)
-  M7_OBSTACLE: TODO. 차로 점유(lane_occupancy)로 빈 차로를 고르고 차선 변경.
-               갈림길 방향(/mission/state의 fork_choice)에 맞는 쪽 차로로 끝내야 한다.
-               방법 A: lane 노드의 target_offset_mm(±500)으로 옆 차로 중심을 따라가게 한다.
-               방법 B: 오도메트리로 미리 짠 S자 경로를 재생한다.
+  M7_OBSTACLE: 회피 주행은 limo_obstacle_avoid 패키지의 avoid_node가 한다 (그 출력은 launch에서
+               /obstacle/cmd_vel로 remap). 이 노드는 연결만 맡는다 (m7_link.py):
+                 시작선에서 /avoid/enable, 갈림길 방향 -> /fork_direction,
+                 /avoid/done -> /obstacle/state의 m7_done, 회피 중이면 m7_active.
+  그래서 /obstacle/cmd_vel은 M8_CONES일 때만 낸다 (다른 상태에서 0을 내면 avoid_node 명령과 섞인다).
 
-구독: /scan, /mission/state, /lane/status, odom_topic, imu_topic, image_topic(카메라 확인용)
-발행: /obstacle/cmd_vel, /obstacle/state, /obstacle/debug/compressed
+구독: /scan, /mission/state, /lane/status, odom_topic, imu_topic, image_topic(카메라 확인용),
+      /avoid/active, /avoid/done, /avoid/state
+발행: /obstacle/cmd_vel, /obstacle/state (20 Hz, 라이다가 없어도 m7_done이 FSM에 가게),
+      /obstacle/debug/compressed, /avoid/enable, /fork_direction
 
 녹화 다시 보기: ros2 bag play <bag> 와 이 노드만 켜면 디버그 그림을 볼 수 있다 (rqt_image_view).
   bag에 /mission/state가 없으면: ros2 topic pub -r 5 /mission/state std_msgs/msg/String \
@@ -32,19 +35,26 @@ import numpy as np
 import rclpy
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
-from rcl_interfaces.msg import ParameterDescriptor
+from rcl_interfaces.msg import Parameter as ParamMsg
+from rcl_interfaces.msg import ParameterDescriptor, ParameterType, ParameterValue
+from rcl_interfaces.srv import SetParameters
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CompressedImage, Image, Imu, LaserScan
-from std_msgs.msg import String
+from std_msgs.msg import Bool, String
 
 from autorace_obstacle import cone_debug
 from autorace_obstacle.cone_core import (ConeFollower, ConeParams, GroundProjector, Pose2D,
                                          PoseIntegrator, YawOffsetEstimator, orange_ratio, wrap)
+from autorace_obstacle.m7_link import M7Link, M7LinkParams
 from autorace_obstacle.scan_utils import cluster_points, lane_occupancy, roi, scan_to_points
 
 # 이 상태들에서는 차선 방향이 도면 방향과 다를 수 있어 yaw 차이를 배우지 않는다
 NO_LEARN_STATES = ('M6_ZIGZAG', 'M2_FORK', 'M8_CONES', 'M4_PARKING', 'FINISHED')
+
+
+def g_name(name: str) -> str:
+    return name if name.startswith('/') else '/' + name
 
 
 def yaw_from_quaternion(q) -> float:
@@ -96,6 +106,12 @@ class ObstacleNode(Node):
         for f in fields(ConeParams):
             v = getattr(defaults, f.name)
             p('cones.' + f.name, list(v) if isinstance(v, tuple) else v, dyn)
+        # M7 연결 (m7_link.M7LinkParams 항목을 m7_ 접두어로 선언. 예: m7_start_s_mm)
+        p('m7_avoid_node', '/avoid_node')   # section_length를 넣을 회피 노드 이름
+        lp = M7LinkParams()
+        for f in fields(lp):
+            setattr(lp, f.name, p('m7_' + f.name, getattr(lp, f.name)).value)
+        self.link = M7Link(lp)
 
         g = self.get_parameter
         cp = {f.name: g('cones.' + f.name).value for f in fields(ConeParams)}
@@ -144,6 +160,15 @@ class ObstacleNode(Node):
         self.state_pub = self.create_publisher(String, '/obstacle/state', 10)
         self.cmd_pub = self.create_publisher(Twist, '/obstacle/cmd_vel', 10)
         self.dbg_pub = self.create_publisher(CompressedImage, '/obstacle/debug/compressed', 2)
+        # M7 연결
+        self.create_subscription(Bool, '/avoid/active',
+                                 lambda m: self.link.on_avoid_active(m.data, time.monotonic()), 10)
+        self.create_subscription(Bool, '/avoid/done', lambda m: self.link.on_avoid_done(m.data), 10)
+        self.create_subscription(String, '/avoid/state', self._on_avoid_state, 10)
+        self.enable_pub = self.create_publisher(Bool, '/avoid/enable', 10)
+        self.fork_pub = self.create_publisher(String, '/fork_direction', 10)
+        self.param_cli = self.create_client(
+            SetParameters, g_name(g('m7_avoid_node').value) + '/set_parameters')
         self.create_timer(1.0 / float(g('control_hz').value), self._tick)
         self.get_logger().info(f'obstacle_node up: camera check {"on" if self.proj else "off"}, '
                                f'lidar at {self.lidar_xy} mm')
@@ -178,6 +203,24 @@ class ObstacleNode(Node):
             return
         self.lane_t = time.monotonic()
         self._learn_yaw()
+
+    def _on_avoid_state(self, msg):
+        try:
+            self.link.on_avoid_state(json.loads(msg.data))
+        except (json.JSONDecodeError, AttributeError):
+            pass
+
+    def _enable(self, section_m):
+        """M7: 회피 노드 section_length(원점 ~ 섬 끝)를 지금 위치로 맞춘 뒤 켠다."""
+        if not self.param_cli.service_is_ready():
+            self.get_logger().warning('[M7] 회피 노드 파라미터 서비스 없음 -> section_length 기본값으로 켬')
+            self.enable_pub.publish(Bool(data=True))
+            return
+        req = SetParameters.Request()
+        req.parameters = [ParamMsg(name='section_length', value=ParameterValue(
+            type=ParameterType.PARAMETER_DOUBLE, double_value=float(section_m)))]
+        self.param_cli.call_async(req).add_done_callback(
+            lambda _f: self.enable_pub.publish(Bool(data=True)))
 
     def _learn_yaw(self):
         """직선 구간에서 'IMU yaw + 차선 방향 - 도면 방향'을 모은다."""
@@ -234,15 +277,14 @@ class ObstacleNode(Node):
         near = [c['near_x'] for c in clusters if abs(c['y']) < 150.0]
         state = {'clusters': clusters[:12], 'lane_occupancy': occ,
                  'front_min_mm': min(near) if near else None,
-                 'm7_done': False, 'cones_done': False, 'cone_ahead_mm': None}
+                 'cones_done': False, 'cone_ahead_mm': None}
         if self.mstate == 'M8_CONES' and self.integ.ready:
             pose = self.integ.pose
             self.cands = self.fol.on_scan(pts, Pose2D(pose.x, pose.y, pose.yaw), self.lidar_xy)
             state['cones_done'] = self.fol.done
             state['cone_ahead_mm'] = self.fol.cone_ahead_mm(pose)
             state['cones'] = self.fol.state_dict()
-        self.last = state
-        self.state_pub.publish(String(data=json.dumps(state)))
+        self.last = state       # /obstacle/state는 _tick에서 m7 값과 합쳐 발행
 
     # --- 카메라 확인 ----------------------------------------------------------
     def _on_compressed(self, msg):
@@ -283,22 +325,33 @@ class ObstacleNode(Node):
 
     # --- 제어 ---------------------------------------------------------------
     def _tick(self):
-        tw = Twist()
-        if self.mstate == 'M8_CONES':
-            if self.fol.corridor is None or not self.integ.ready:
-                # 할 말이 없으면 아예 안 낸다 -> mission_node가 끊김으로 보고 차선 주행으로 대신
-                # (접근 중이거나 odom/IMU가 없을 때 0 명령으로 차를 세우지 않기 위해)
-                pass
-            else:
-                pose = self.integ.pose
-                v, k = self.fol.control(Pose2D(pose.x, pose.y, pose.yaw))
-                tw.linear.x, tw.angular.z = float(v), float(v * k)
-                self.cmd_pub.publish(tw)
-        else:
-            if self.mstate == 'M7_OBSTACLE':
-                pass   # TODO: 빈 차로 선택 + 차선 변경 (모듈 설명 참고)
-            self.cmd_pub.publish(tw)
         now = time.monotonic()
+        # --- M7 연결 (켜기/끄기/갈림길 방향). 회피 주행 명령은 avoid_node가 직접 낸다
+        for act in self.link.update(now, self.mission, self.lane):
+            if act[0] == 'enable':
+                self._enable(act[1])
+            elif act[0] == 'disable':
+                self.enable_pub.publish(Bool(data=False))
+            elif act[0] == 'fork':
+                self.fork_pub.publish(String(data=act[1]))
+        for e in self.link.events:
+            self.get_logger().info(f'[M7] {e}')
+        self.link.events.clear()
+
+        # --- M8 라바콘: 이 상태에서만 /obstacle/cmd_vel을 낸다
+        if self.mstate == 'M8_CONES' and self.fol.corridor is not None and self.integ.ready:
+            # 접근 중(corridor 없음)이거나 odom/IMU가 없으면 아예 안 낸다
+            # -> mission_node가 끊김으로 보고 차선 주행으로 대신 (0 명령으로 차를 세우지 않기 위해)
+            pose = self.integ.pose
+            v, k = self.fol.control(Pose2D(pose.x, pose.y, pose.yaw))
+            tw = Twist()
+            tw.linear.x, tw.angular.z = float(v), float(v * k)
+            self.cmd_pub.publish(tw)
+
+        state = dict(self.last)
+        state.update(self.link.state())
+        self.state_pub.publish(String(data=json.dumps(state)))
+
         if (self.mstate == 'M8_CONES' and self.get_parameter('publish_debug').value
                 and now - self.dbg_t >= 0.2):
             self.dbg_t = now
@@ -322,7 +375,8 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
-        node.cmd_pub.publish(Twist())
+        if node.mstate == 'M8_CONES':
+            node.cmd_pub.publish(Twist())   # M7 중에는 avoid_node 토픽이라 건드리지 않는다
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

@@ -155,7 +155,8 @@ class RouteTracker:
 
     def __init__(self, route: RouteMap, gate_mm: float = 250.0, gate_per_m: float = 60.0,
                  gate_max_mm: float = 800.0, max_range_mm: float = 900.0,
-                 gain: float = 0.6, odom_scale: float = 1.0):
+                 gain: float = 0.6, odom_scale: float = 1.0, ordered_gate_mm: float = 0.0,
+                 same_gate_mm: float = 200.0):
         self.route = route
         # 예측 위치와 도면 선이 gate 안이어야 같은 선으로 본다.
         # 마지막 보정 뒤 많이 달렸을수록 오도메트리 오차가 커지므로 m당 gate_per_m씩 넓힌다
@@ -166,6 +167,12 @@ class RouteTracker:
         self.max_range_mm = max_range_mm  # 너무 멀리 본 선은 거리 오차가 커서 안 씀
         self.gain = gain                  # 한 번에 고치는 비율 (여러 프레임에 걸쳐 수렴)
         self.odom_scale = odom_scale
+        # 순서 짝짓기 (11/06): 선은 도면 순서대로 나타나므로, 마지막으로 맞춘 선 다음 선을
+        # 이 범위(mm) 안이면 받아들인다. 지그재그를 따라 흔들리며 달리면 odom 거리가 도면보다
+        # 최대 약 18% 길어져(11/02 실측 80cm) 일반 게이트로는 엉뚱한 선과 짝지어진다. 0이면 끔
+        self.ordered_gate_mm = ordered_gate_mm
+        self.same_gate_mm = same_gate_mm      # 같은 선을 다시 볼 때 허용 오차
+        self.last_idx: Optional[int] = None
         self.s = 0.0
         self._dist_ref = None
         self._since_fix = 0.0
@@ -176,6 +183,9 @@ class RouteTracker:
         self.s = float(s)
         self._dist_ref = dist_mm
         self._since_fix = 0.0
+        # 출발 위치보다 앞(뒤쪽)에 있는 마지막 선 = 이미 지난 선
+        passed = [i for i, m in enumerate(self.route.landmarks) if m['s'] < s - 50.0]
+        self.last_idx = passed[-1] if passed else -1
 
     @property
     def gate(self) -> float:
@@ -194,15 +204,29 @@ class RouteTracker:
             lm = self.match(self.s + d)
             if lm is not None:
                 err = lm['s'] - (self.s + d)
-                self.s += self.gain * err
+                new_line = self.route.landmarks.index(lm) != self.last_idx
+                # 순서 짝짓기로 새 선을 처음 맞추면 한 번에 고친다 (오차는 odom 쪽이 원인).
+                # 남겨 두면 다음 프레임에 이웃 선(횡단보도 끝선 등)과 짝지어질 수 있다
+                g = 1.0 if (self.ordered_gate_mm > 0.0 and new_line) else self.gain
+                self.s += g * err
                 self.fixes += 1
                 if abs(err) * (1.0 - self.gain) < 100.0:
                     self._since_fix = 0.0      # 남은 오차가 작으면 게이트를 다시 좁힌다
                 self.last_fix = {'name': lm['name'], 'err_mm': round(err), 'd_mm': round(d)}
+                self.last_idx = self.route.landmarks.index(lm)
                 break                     # 가장 가까운 선 하나만
         return self.s
 
     def match(self, s_line: float) -> Optional[dict]:
+        lms = self.route.landmarks
+        if self.ordered_gate_mm > 0.0 and self.last_idx is not None:
+            i = self.last_idx
+            if 0 <= i < len(lms) and abs(lms[i]['s'] - s_line) <= self.same_gate_mm:
+                return lms[i]                       # 방금 맞춘 선을 다시 봄
+            for j in (i + 1, i + 2):                 # 다음 선 (하나 놓쳤으면 그다음)
+                if 0 <= j < len(lms) and abs(lms[j]['s'] - s_line) <= self.ordered_gate_mm:
+                    return lms[j]
+            return None
         best = None
         for lm in self.route.landmarks:
             e = abs(lm['s'] - s_line)
@@ -221,6 +245,79 @@ class RouteTracker:
             'next': nxt['name'] if nxt else None,
             'next_in_mm': round(nxt['s'] - self.s) if nxt else None,
             'gate_mm': round(self.gate),
+            'last_line': (self.route.landmarks[self.last_idx]['name']
+                          if self.last_idx is not None and self.last_idx >= 0 else None),
             'fixes': self.fixes,
             'last_fix': self.last_fix,
         }
+
+
+class MapPose:
+    """도면 위 차 자세: 경로 위치 s(RouteTracker) + 좌우 위치 d + 방향 (11/06).
+
+    - 방향: IMU yaw + 보정값. 보정값은 직선 구간에서 두 선이 다 보일 때
+      "도면 경로 방향 = IMU yaw + 차선 방향"으로 맞춘다 (IMU 드리프트 거의 0, 11/02 실측).
+    - 좌우 d (경로 중심선 기준 왼쪽 +, mm): 차선이 잘 보이면 차선 노드 offset으로 맞추고,
+      놓치면 진행 거리 x sin(차 방향 - 경로 방향)으로 적분한다.
+    차선을 놓쳤을 때 "도면상 차로 가운데가 지금 차 기준 어디인지"를 알려 주는 게 목적.
+    """
+
+    def __init__(self, route: RouteMap, front_axle_mm: float = 200.0,
+                 valid_mm: float = 3000.0, alpha: float = 0.2):
+        self.route = route
+        self.front_axle_mm = front_axle_mm      # 뒷바퀴 축(차선 노드 기준점) -> 앞바퀴 (s 기준)
+        self.valid_mm = valid_mm                # 마지막 좌우 보정 뒤 이 거리까지만 믿는다
+        self.alpha = alpha
+        self.yaw_off: Optional[float] = None
+        self.d = 0.0
+        self._d_fix_dist: Optional[float] = None
+        self._dist = None
+
+    def predict(self, dist_mm: float, s: float, imu_yaw: Optional[float]) -> None:
+        if self._dist is not None and self.yaw_off is not None and imu_yaw is not None:
+            ds = dist_mm - self._dist
+            self.d += ds * math.sin(_wrap(imu_yaw + self.yaw_off - self.route.heading(s)))
+        self._dist = dist_mm
+
+    def update_lane(self, s: float, imu_yaw: Optional[float], lane: dict,
+                    dist_mm: float) -> bool:
+        """차선 상태로 보정. 직선 구간 + 두 선 + 다항식 모델일 때만 (원호 모델 offset은 부정확)."""
+        if imu_yaw is None or not lane:
+            return False
+        if (lane.get('status') != 'BOTH' or lane.get('low_conf') or lane.get('model') != 'poly'
+                or lane.get('heading_rad') is None or lane.get('offset_mm') is None):
+            return False
+        if abs(self.route.curvature(s)) > 1e-6 or abs(self.route.curvature(s + 600.0)) > 1e-6:
+            return False
+        hd = float(lane['heading_rad'])
+        if abs(hd) > 0.3:
+            return False
+        off = _wrap(self.route.heading(s) - (imu_yaw + hd))
+        if self.yaw_off is None:
+            self.yaw_off = off
+        else:
+            self.yaw_off = _wrap(self.yaw_off + self.alpha * _wrap(off - self.yaw_off))
+        self.d = -float(lane['offset_mm'])      # offset = 차 기준 차로 중심 (왼쪽 +) -> 차의 위치는 반대
+        self._d_fix_dist = dist_mm
+        return True
+
+    def valid(self, dist_mm: float) -> bool:
+        return (self.yaw_off is not None and self._d_fix_dist is not None
+                and dist_mm - self._d_fix_dist <= self.valid_mm)
+
+    def points_ahead(self, s: float, imu_yaw: float, n: int = 14,
+                     step_mm: float = 100.0) -> List[Tuple[float, float]]:
+        """경로 중심선 점 (차선 노드 좌표: x 오른쪽+, y 전방+, 뒷바퀴 축 기준 mm)."""
+        h = self.route.heading(s)
+        fx, fy = self.route.xy(s)
+        fx, fy = fx - self.d * math.sin(h), fy + self.d * math.cos(h)   # 왼쪽 법선 = (-sin, cos)
+        psi = imu_yaw + self.yaw_off
+        c, sn = math.cos(psi), math.sin(psi)
+        out = []
+        for i in range(n):
+            qx, qy = self.route.xy(s + i * step_mm)
+            dx, dy = qx - fx, qy - fy
+            fwd = dx * c + dy * sn
+            right = dx * sn - dy * c
+            out.append((round(right, 1), round(fwd + self.front_axle_mm, 1)))
+        return out

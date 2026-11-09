@@ -1,0 +1,85 @@
+# 모든 노드(s1~s5, cmd_mux)가 같이 읽는 설정.  ★ 실수(float)는 꼭 소수점 붙이기 (1 → 1.0)
+# 실행 중 바꾸기:  ros2 param set /avoid_node trigger_dist 1.2
+/**:
+  ros__parameters:
+    # ── 토픽 (LIMO에서 ros2 topic list 로 확인 후 수정) ──
+    scan_topic: /scan
+    odom_topic: /odom
+    imu_topic: /imu
+    yaw_source: imu          # imu | odom   (3단계에서 더 정확한 쪽)
+    imu_mode: auto           # auto | orientation | gyro  (auto: IMU 방향값이 없거나 안 변하면 자이로 적분으로 자동 전환)
+
+    # ── 바퀴 명령 출력 (cmd_mux, s4) ──
+    out_mode: twist          # twist: /cmd_vel → 팀 ackermann_bridge 필요 / ack: /limo/ack_cmd 직접 (브리지 끄기)
+    cmd_topic: /cmd_vel
+    ack_topic: /limo/ack_cmd
+    angular_mode: yaw_rate   # twist 일 때 angular.z 의미: yaw_rate | steer_angle (4단계에서 옆 이동이 이상하면)
+    wheelbase: 0.222         # 축거 [m] (팀 브리지 값과 같게, 줄자로 확인)
+    lane_topic: /lane_follow/cmd_vel   # 차선추종 노드 출력 (remap 필요)
+    avoid_topic: /avoid/cmd_vel
+    timeout: 0.3             # cmd_mux: 이 시간 넘게 안 온 명령은 무시
+    failsafe_hold: true      # 회피 중 회피 명령이 끊기면 차선추종으로 넘기지 않고 정지
+
+    # ── 안전 ──
+    odom_timeout: 0.3        # /odom 이 이만큼 끊기면 정지
+    scan_timeout: 0.5        # /scan 이 이만큼 끊기면 정지
+
+    # ── 트랙 ──
+    lane_width: 0.52         # 이웃 차로 중심 간격. 도면: 선 사이 500 + 점선 20 = 520 mm (FSM three_lane_width_mm와 같게)
+    num_side_lanes: 1
+    start_lane: 0            # enable 순간 있는 차선 (0=가운데)
+    section_length: 4.38     # ★ enable 지점 ~ 가운데 섬 앞 끝 거리. 도면 4384 mm, 대회장 실측
+                             #   팀 스택(autorace.launch m7_avoid:=true)에서는 obstacle_node가 켤 때 위치로 다시 넣음
+    island_length: 1.0
+    use_island: true
+    exit_lane: auto          # auto | A | B   (/fork_direction 토픽으로도 바뀜)
+    done_margin: 0.3
+
+    # ── 차량 ──
+    robot_front: 0.20
+    robot_rear: 0.16
+    robot_half_width: 0.12
+    side_margin: 0.05
+
+    # ── 라이다 (1단계에서 확인) ──
+    lidar_x: 0.10
+    scan_yaw_offset_deg: 0.0
+    scan_flip: false
+    range_min: 0.10
+    range_max: 3.0
+    roi_front: 2.5
+    roi_back: 0.6
+    roi_side_extra: 0.10
+    cluster_gap: 0.12
+    cluster_min_pts: 3
+    merge_dist: 0.20
+    max_obs_width: 0.45
+    obs_min_len: 0.33
+    confirm_hits: 3
+
+    # ── 판단 (5단계에서 튜닝) ──
+    trigger_dist: 1.0
+    change_len: 1.0
+    clear_back: 0.0
+    better_margin: 0.3
+    hold_time: 0.8
+    stop_dist: 0.25
+
+    # ── 제어 (4단계에서 튜닝) ──
+    v_cruise: 0.25
+    v_change: 0.20
+    lookahead: 0.50
+    min_turn_radius: 0.53    # 최소 회전반경 실측값
+    max_heading_deg: 40.0
+    reach_tol: 0.08
+
+    # ── 정렬 보정: 정차 LIMO 중심이 차선 중심에 오도록 내 좌표를 돌리고 옮김 (출발 방향 오차 보정) ──
+    lane_align: true
+    align_gain: 0.5
+    align_sigma_meas: 0.03
+    align_sigma_dy: 0.05
+    align_sigma_heading_deg: 2.0
+    align_max_dy: 0.12
+    align_max_heading_deg: 6.0
+    align_w_min: 0.14
+    align_w_max: 0.32
