@@ -146,18 +146,28 @@ def in_view(clusters, front_axle_from_lidar_mm=-47.0, max_angle_deg=180.0):
     return [(x, y) for x, y in clusters if abs(math.atan2(y, x - lx)) <= lim]
 
 
-def cell_line_from_neighbors(clusters, side_max_mm=700.0):
+def cell_line_from_neighbors(clusters, side_max_mm=700.0, ahead_max_mm=150.0, row_tol_mm=250.0):
     """양옆 리모 중심(앞바퀴 기준 좌표)으로 칸 가운데 선을 구한다.
 
     반환: (중점 x, 중점 y, 방향 단위벡터 ux, uy) — 차 기준 좌표, 방향은 차 앞쪽과 같은 쪽.
     양옆 중 하나라도 없으면 None. 리모가 둘 다 같은 쪽 얼굴만 보여서 생기는 치우침은 서로 상쇄된다.
+    앞바퀴보다 ahead_max_mm 넘게 앞에 있는 리모는 쓰지 않는다: 2번 칸에 들어갈 때 대각선 앞의 4·6번을
+    1·3번 대신 고르면 칸 가운데를 뒷줄로 잡아 5번 리모까지 들어간다 (11/10 다섯 대 배치 시뮬레이션).
+    좌우 두 대는 같은 줄(앞뒤 차이 row_tol_mm 안)이어야 하고, 그중 옆으로 가장 가까운 짝을 고른다.
     """
-    rights = [(x, y) for x, y in clusters if -side_max_mm <= y <= -80.0 and x > -400.0]
-    lefts = [(x, y) for x, y in clusters if 80.0 <= y <= side_max_mm and x > -400.0]
-    if not rights or not lefts:
+    rights = [(x, y) for x, y in clusters if -side_max_mm <= y <= -80.0 and -400.0 < x <= ahead_max_mm]
+    lefts = [(x, y) for x, y in clusters if 80.0 <= y <= side_max_mm and -400.0 < x <= ahead_max_mm]
+    best = None
+    for r in rights:
+        for l in lefts:
+            if abs(r[0] - l[0]) > row_tol_mm:
+                continue
+            key = abs(r[1]) + abs(l[1])
+            if best is None or key < best[0]:
+                best = (key, r, l)
+    if best is None:
         return None
-    r = min(rights, key=lambda c: math.hypot(*c))
-    l = min(lefts, key=lambda c: math.hypot(*c))
+    _, r, l = best
     mx, my = (r[0] + l[0]) / 2.0, (r[1] + l[1]) / 2.0
     vx, vy = l[0] - r[0], l[1] - r[1]          # 오른쪽 리모 -> 왼쪽 리모
     n = math.hypot(vx, vy)
@@ -380,9 +390,18 @@ class ParkingV2:
                 n0 = self.pair_n
                 self.pair_side_mm = (-my if self.pair_side_mm is None
                                      else (self.pair_side_mm * n0 - my) / (n0 + 1))
+                pair_row = 'front' if -my < p['row_split_mm'] else 'back'   # 이번에 본 짝의 줄
                 self.row = 'front' if self.pair_side_mm < p['row_split_mm'] else 'back'
                 rel = (mx, my, vy, -vx)                # 들어가는 방향 = 짝 방향에서 오른쪽 90도
                 line = self._line_to_world(rel, inp)
+                if p['target_row'] in ('front', 'back'):
+                    # 목표 줄 고정 (11/10 대회 배치: 항상 2번 = 앞줄). 다른 줄 짝(1번을 놓쳐 4·6번이 짝)은
+                    # 앞뒤 위치·방향은 같으니 깊이만 한 줄 옮겨 쓴다.
+                    self.row = p['target_row']
+                    if pair_row != p['target_row']:
+                        cx, cy, ux, uy = line
+                        sh = -p['row_pitch_mm'] if p['target_row'] == 'front' else p['row_pitch_mm']
+                        line = (cx + sh * ux, cy + sh * uy, ux, uy)
                 if self.pair_line is None:
                     self.pair_line = line
                 else:                                  # 여러 번 본 값의 평균 (흔들림 줄이기)
@@ -586,6 +605,8 @@ DEFAULTS = {
     'stop_min_turn_deg': 60.0, # 이만큼 돈 뒤에만 양옆 옆면으로 '칸 가운데 도착'을 판단 (도는 도중 오판 방지)
     # ---- 줄(앞줄 1~3 / 뒷줄 4~6)과 칸 끝에서 멈추기 (11/09 park_02 반영)
     'row_split_mm': 800.0,     # 짝 중점까지 옆 거리가 이보다 가까우면 앞줄 (앞줄 약 0.5m, 뒷줄 약 1.1m)
+    'target_row': 'front',     # 들어갈 줄 고정: 'front'(2번) | 'back'(5번) | 'auto'(짝 줄로 판단). 11/10 대회 배치 = 2번
+    'row_pitch_mm': 620.0,     # 앞줄·뒷줄 칸 가운데 사이 (칸 깊이 600 + 선 20, 도면)
     'pair_depth_bias_mm': 125.0,  # 짝으로 본 칸 가운데가 실제보다 얕게 나오는 만큼 (시뮬레이션 80~170)
     'end_stop_mm': 195.0,      # 칸 가운데 정지 = 앞바퀴 -> 칸 끝 선 (깊이 반 300 - (축거 210 - 차체 중심 105))
     'end_gate_mm': 200.0,      # 칸 끝 선 예상 위치와 이만큼 안만 받음 (줄 사이 선과 바깥 테두리는 620mm 차이)

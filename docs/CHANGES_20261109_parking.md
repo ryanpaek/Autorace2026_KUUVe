@@ -1,6 +1,8 @@
 # 변경 내역 (2026-11-09): M4 T자 주차 — 두 리모 중점 + 재정렬
 
-브랜치 `claude/parking-two-limo-midpoint` (기준: `main` 362008f). 설계: 윤서. 시뮬레이션 결과: [parking_sim_20261106.pdf](parking_sim_20261106.pdf)
+브랜치 `claude/parking-two-limo-midpoint` (기준: `main` 362008f). 설계: 윤서. 시뮬레이션 결과: [parking_sim_20261110.pdf](parking_sim_20261110.pdf)
+
+> **11/10 대회 배치 확정: 목표는 항상 2번, 정차 리모는 1·3·4·5·6 다섯 칸.** 맨 아래 "11/10 추가" 참고. 최신 시뮬레이션: [parking_sim_20261110.pdf](parking_sim_20261110.pdf)
 
 ## 한 줄 요약
 
@@ -70,7 +72,7 @@
 | `src/autorace_bringup/config/params.yaml` | `parking_node`에 실측 필요 값·주요 값 추가. `enabled: false` 유지 |
 | `src/autorace_mission/test/test_parking_node.py` (새 파일) | 계산 함수 7개 + 가상 트랙 4개 (1·3→2, 4·6→5, 40cm 늦게, 재정렬 끔). `pytest` 11개 통과 |
 | `tools/parking_scan_check.py` (새 파일) | 차 안 움직이고 `/scan`만 보고 덩어리·짝·정면 각도 출력 |
-| `docs/parking_sim_20261106.pdf` (새 파일) | 시뮬레이션 그림·표 |
+| `docs/parking_sim_20261110.pdf` | 시뮬레이션 그림·표 (11/10 대회 배치로 교체) |
 
 ## 실차 시험 순서
 
@@ -103,3 +105,20 @@
   ③ 카메라 칸 끝 선(앞줄=줄 사이 흰 선, 뒷줄=노란 테두리) (`camera`) ④ 추정 칸 가운데를 `cell_cap_mm`(80) 지나면 무조건 정지 (`cap`).
 - `/parking/status`의 `row`, `stop_how`, `end_mm`으로 어떻게 멈췄는지 확인.
 - park_02 bag 재생: 앞줄로 판단, `cap`으로 정지 (예전엔 1.1m 직진 후 실패). 실차에서 깊이가 얕으면 `pair_depth_bias_mm`(125)를 올린다.
+
+## 11/10 추가: 대회 배치(1·3·4·5·6 → 2번) 고정 (claude/parking-fixed-cell2)
+
+배치가 확정돼서 #17 구조(side/memory/camera/cap)는 그대로 두고 두 가지만 바꿈.
+
+| # | 문제 (다섯 대 배치, 라이다 시야 ±105도 시뮬레이션) | 바꾼 것 |
+| --- | --- | --- |
+| ① | 1번을 놓치면 4·6번이 짝 → `row`가 뒷줄로 판단돼 **5번 칸으로 감** | `target_row: front` (params). 다른 줄 짝은 앞뒤 위치·방향만 쓰고 깊이를 한 줄(`row_pitch_mm` 620) 옮겨 씀. `auto`면 예전처럼 |
+| ② | 양옆을 "가장 가까운 리모"로 고르면 2번에 들어가는 중 **대각선 앞 4·6번**이 뽑혀 칸 가운데를 뒷줄로 잡고 5번 리모까지 들어감 | `cell_line_from_neighbors`: 앞바퀴보다 15cm 넘게 앞인 리모 제외 + 좌우 같은 줄(앞뒤 차이 25cm 안)일 때만 |
+
+같은 12가지 조건(기본, 라이다 위치 ±5cm, 잡음 1cm+10% 빠짐, 조향 ±7%+출발 ±4cm, 옆 리모 6cm 비킴, 1번 놓침, 1·3번 놓침,
+꺾는 시점 −20/+20/+40cm)에서 15점: **main 그대로 4개 → 이번 12개, 충돌 0**.
+(카메라 칸 끝 선 정지는 이 시뮬레이션에 없어서 main도 실제로는 더 나을 수 있음)
+
+- 시험: 기존 5번 칸 시험 5개는 `target_row: auto`로 돌려 그대로 유지 + 다섯 대 시험 4개 추가 → `pytest` 19개 통과
+- 실차 시험 2번(라이다 확인)은 정차 리모 다섯 대로: "짝: 있음"이고 중점 "앞" 값이 1·3번 사이인지
+- 실차 시험 4번(바닥)도 다섯 대로 10번
