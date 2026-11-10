@@ -133,6 +133,27 @@ detector_node:
     infer_hz: 5.0
     ort_threads: 2
 
+class_command_node:
+  ros__parameters:
+    detections_topic: /perception/detections
+    commands_topic: /perception/commands
+    mission_topic: /mission/state          # state + route.last_fix/fixes 재사용
+    context_timeout_sec: 1.0               # 구간/바닥 확인 유효 시간 (수신 후 단조 시계)
+    conf_threshold: 0.5
+    vote_window: 10                        # 최근 새 검출 프레임 10개
+    vote_need: 7                           # 그중 7개 이상 검출 시 해당 명령 발행
+    yellow_action: none                    # none: 명령 없음, pause: 정지선 앞 정지 요청
+    # 원본 영상 bbox 높이(px). 0=크기 필터 끔. 현장 시험 후 클래스별 조정.
+    min_bbox_height_px.red: 0.0
+    min_bbox_height_px.yellow: 0.0
+    min_bbox_height_px.green: 0.0
+    min_bbox_height_px.fork_a: 0.0
+    min_bbox_height_px.fork_b: 0.0
+    min_bbox_height_px.pedestrian: 0.0
+    min_bbox_height_px.bump: 0.0
+    min_bbox_height_px.slow: 0.0
+    min_bbox_height_px.parking: 0.0
+
 parking_node:
   ros__parameters:
     odom_topic: /odom
