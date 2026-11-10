@@ -71,7 +71,7 @@ def yaw_from_quaternion(q):
 
 def scan_clusters(ranges, angle_min, angle_inc, rng_min, rng_max,
                   front_axle_from_lidar_mm=-47.0, laser_yaw=0.0,
-                  gap_mm=80.0, min_pts=3, max_size_mm=450.0, max_dist_mm=1500.0):
+                  gap_mm=80.0, min_pts=3, max_size_mm=450.0, max_dist_mm=1500.0, x_mode='mean'):
     """라이다 스캔 -> 물체 덩어리 중심 목록 [(x, y)] (앞바퀴 기준, 앞 +, 왼쪽 +, mm).
 
     가까운 점끼리 묶고(gap_mm), LIMO 크기(max_size_mm)보다 큰 덩어리(벽 등)는 버린다.
@@ -103,8 +103,24 @@ def scan_clusters(ranges, angle_min, angle_inc, rng_min, rng_max,
         xs, ys = [p[0] for p in c], [p[1] for p in c]
         if max(max(xs) - min(xs), max(ys) - min(ys)) > max_size_mm:
             continue
-        out.append((sum(xs) / len(xs), sum(ys) / len(ys)))
+        # x_mode 'extent': 앞뒤(x)는 점들의 양 끝 가운데. 차선에서 리모를 보면 차선 쪽 끝면(폭 전체) + 한쪽 옆면이
+        # 보여 평균이 우리 차 쪽으로 쏠린다 -> 짝의 앞뒤 위치는 양 끝 가운데가 정확 (11/10 시뮬레이션 약 6cm)
+        x = (min(xs) + max(xs)) / 2.0 if x_mode in ('extent', 'box') else sum(xs) / len(xs)
+        y = (min(ys) + max(ys)) / 2.0 if x_mode == 'box' else sum(ys) / len(ys)   # 'box': 5번 앞면 (정면) 가운데
+        out.append((x, y))
     return out
+
+
+def scan_points(ranges, angle_min, angle_inc, rng_min, rng_max, front_axle_from_lidar_mm=-47.0,
+                laser_yaw=0.0, max_dist_mm=700.0):
+    """라이다 스캔 -> 가까운 점 목록 [(x, y)] (앞바퀴 기준, 앞 +, 왼쪽 +, mm). 옆 감시용."""
+    pts = []
+    for i, r in enumerate(ranges):
+        if not (math.isfinite(r) and rng_min <= r <= rng_max) or r * 1000.0 > max_dist_mm:
+            continue
+        a = angle_min + angle_inc * i + laser_yaw
+        pts.append((r * 1000.0 * math.cos(a) - front_axle_from_lidar_mm, r * 1000.0 * math.sin(a)))
+    return pts
 
 
 def front_blocked(ranges, angle_min, angle_inc, rng_min, rng_max, front_axle_from_lidar_mm,
@@ -146,18 +162,28 @@ def in_view(clusters, front_axle_from_lidar_mm=-47.0, max_angle_deg=180.0):
     return [(x, y) for x, y in clusters if abs(math.atan2(y, x - lx)) <= lim]
 
 
-def cell_line_from_neighbors(clusters, side_max_mm=700.0):
+def cell_line_from_neighbors(clusters, side_max_mm=700.0, ahead_max_mm=150.0, row_tol_mm=250.0):
     """양옆 리모 중심(앞바퀴 기준 좌표)으로 칸 가운데 선을 구한다.
 
     반환: (중점 x, 중점 y, 방향 단위벡터 ux, uy) — 차 기준 좌표, 방향은 차 앞쪽과 같은 쪽.
     양옆 중 하나라도 없으면 None. 리모가 둘 다 같은 쪽 얼굴만 보여서 생기는 치우침은 서로 상쇄된다.
+    앞바퀴보다 ahead_max_mm 넘게 앞에 있는 리모는 쓰지 않는다: 2번 칸에 들어갈 때 대각선 앞의 4·6번을
+    1·3번 대신 고르면 칸 가운데를 뒷줄로 잡아 5번 리모까지 들어간다 (11/10 다섯 대 배치 시뮬레이션).
+    좌우 두 대는 같은 줄(앞뒤 차이 row_tol_mm 안)이어야 하고, 그중 옆으로 가장 가까운 짝을 고른다.
     """
-    rights = [(x, y) for x, y in clusters if -side_max_mm <= y <= -80.0 and x > -400.0]
-    lefts = [(x, y) for x, y in clusters if 80.0 <= y <= side_max_mm and x > -400.0]
-    if not rights or not lefts:
+    rights = [(x, y) for x, y in clusters if -side_max_mm <= y <= -80.0 and -400.0 < x <= ahead_max_mm]
+    lefts = [(x, y) for x, y in clusters if 80.0 <= y <= side_max_mm and -400.0 < x <= ahead_max_mm]
+    best = None
+    for r in rights:
+        for l in lefts:
+            if abs(r[0] - l[0]) > row_tol_mm:
+                continue
+            key = abs(r[1]) + abs(l[1])
+            if best is None or key < best[0]:
+                best = (key, r, l)
+    if best is None:
         return None
-    r = min(rights, key=lambda c: math.hypot(*c))
-    l = min(lefts, key=lambda c: math.hypot(*c))
+    _, r, l = best
     mx, my = (r[0] + l[0]) / 2.0, (r[1] + l[1]) / 2.0
     vx, vy = l[0] - r[0], l[1] - r[1]          # 오른쪽 리모 -> 왼쪽 리모
     n = math.hypot(vx, vy)
@@ -236,10 +262,13 @@ class ParkingV2:
         self._last_v = 0.0
         self.line = None           # 칸 가운데 선 (자기 위치 좌표)
         self.pair_line = None      # 두 리모 짝으로 구한 칸 가운데 선 (자기 위치 좌표)
+        self.col5 = None           # 5번 리모 앞면 가운데 (자기 위치 좌표, 평균) -> 2번 칸 세로 가운데선
+        self.col5_n = 0
         self.pair_n = 0            # 짝을 본 횟수 (평균 낼 때 씀)
         self.pair_side_mm = None   # 짝 중점까지 옆 거리 (앞줄 약 0.5m, 뒷줄 약 1.1m) -> row
         self.row = None            # 'front' | 'back' (정차 리모가 있는 줄 = 들어갈 줄)
-        self.side_seen = False     # 꺾은 뒤 양옆 리모로 칸 가운데 선을 한 번이라도 구했나
+        self.side_seen = False
+        self.side_line = None      # 양옆 옆면으로 구한 선 (깊이에만 씀)     # 꺾은 뒤 양옆 리모로 칸 가운데 선을 한 번이라도 구했나
         self.end_d = self.end_at = None   # 칸 끝 선(카메라): 마지막으로 본 거리, 그때 누적 거리
         self.stop_how = None       # 'side' | 'memory' | 'camera' | 'cap' (어떻게 멈췄나, 디버그)
         self.err = None            # 마지막 재정렬 판단 값 (옆 mm, 방향 도)
@@ -308,6 +337,90 @@ class ParkingV2:
         # 선 위 점까지 차 앞 방향 거리: 차 앞 방향과 선 방향(ux,uy)은 거의 수직이니 그대로 앞 방향 투영
         return (cx - fx) * math.cos(yaw) + (cy - fy) * math.sin(yaw)
 
+    def _car_rect(self):
+        """차 사각형 (뒷바퀴축 기준 앞뒤 [뒤범퍼, 앞범퍼], 옆 반폭)."""
+        p = self.p
+        return (p['body_center_from_rear_mm'] - p['body_length_mm'] / 2.0,
+                p['body_center_from_rear_mm'] + p['body_length_mm'] / 2.0, p['body_width_mm'] / 2.0)
+
+    def _memory_boxes(self):
+        """기억한 칸 가운데 선으로 정차 리모 위치를 만든다: 같은 줄 좌우 + (앞줄 목표면) 뒷줄 세 칸.
+
+        반환: [(중심 x, 중심 y, 깊이 방향 ux, uy)] 자기 위치 좌표. 리모는 칸 가운데에 반듯하다고 가정.
+        """
+        cell = self._cell()
+        if cell is None:
+            return []
+        p = self.p
+        cx, cy, ux, uy = cell
+        vx, vy = -uy, ux                                  # 차선 방향 (칸 줄 방향)
+        w = p['cell_pitch_mm']
+        spots = [(0.0, -w), (0.0, w)]                     # (깊이, 옆) 같은 줄 좌우 = 1·3번
+        if p['target_row'] != 'back':
+            spots += [(p['row_pitch_mm'], -w), (p['row_pitch_mm'], 0.0), (p['row_pitch_mm'], w)]   # 4·5·6번
+        return [(cx + d * ux + o * vx, cy + d * uy + o * vy, ux, uy) for d, o in spots]
+
+    def _side_gap(self, inp):
+        """차 테두리와 리모 사이 가장 가까운 거리 (mm): 지금 보이는 라이다 점 + 기억한 리모 위치.
+
+        꺾는 도중 1번 리모 모서리는 라이다 시야(약 ±105도) 뒤라 안 보일 수 있어 기억으로 본다.
+        """
+        p = self.p
+        yaw = inp['yaw'] or 0.0
+        c, sn = math.cos(yaw), math.sin(yaw)
+        r0, r1, hw = self._car_rect()
+        gap = 1e9
+        # (1) 지금 보이는 점: 앞바퀴 기준 -> 뒷바퀴축 기준으로 옮겨 차 사각형까지 거리
+        for x, y in inp.get('points', []):
+            xr = x + p['wheelbase_mm']
+            dx = max(r0 - xr, 0.0, xr - r1)
+            dy = max(abs(y) - hw, 0.0)
+            gap = min(gap, math.hypot(dx, dy))
+        # (2) 기억한 리모: 차 테두리 위 점들에서 리모 사각형까지 거리
+        boxes = self._memory_boxes()
+        if boxes:
+            hl, hwb = p['parked_half_len_mm'], p['body_width_mm'] / 2.0
+            outline = []
+            for a in range(9):
+                t = a / 8.0
+                for (ax, ay), (bx, by) in (((r0, -hw), (r1, -hw)), ((r0, hw), (r1, hw)),
+                                           ((r0, -hw), (r0, hw)), ((r1, -hw), (r1, hw))):
+                    lx, ly = ax + (bx - ax) * t, ay + (by - ay) * t
+                    outline.append((self.px + lx * c - ly * sn, self.py + lx * sn + ly * c))
+            for bx, by, ux, uy in boxes:
+                for qx, qy in outline:
+                    du = (qx - bx) * ux + (qy - by) * uy          # 리모 앞뒤 방향
+                    dv = -(qx - bx) * uy + (qy - by) * ux         # 리모 옆 방향
+                    gap = min(gap, math.hypot(max(abs(du) - hl, 0.0), max(abs(dv) - hwb, 0.0)))
+        return gap
+
+    def _center_offset(self, line, inp):
+        """차체 중심이 칸 가운데 선에서 옆으로 벗어난 거리 (mm, 왼쪽 +)."""
+        cx, cy, ux, uy = line
+        yaw = inp['yaw'] or 0.0
+        bx = self.px + self.p['body_center_from_rear_mm'] * math.cos(yaw)
+        by = self.py + self.p['body_center_from_rear_mm'] * math.sin(yaw)
+        return -(bx - cx) * uy + (by - cy) * ux
+
+    def _guard_hit(self, inp):
+        """옆 감시: side_guard_mm보다 가까우면 True (칸 가운데를 알 때만)."""
+        p = self.p
+        return p['side_guard_mm'] > 0 and self._cell() is not None and self._side_gap(inp) < p['side_guard_mm']
+
+    def _front_s(self, inp):
+        """앞범퍼 양 모서리 중 더 깊은 쪽의 깊이 s (칸 가운데 = 0, 들어가는 쪽 +)."""
+        p = self.p
+        cx, cy, ux, uy = self.line
+        yaw = inp['yaw'] or 0.0
+        c, sn = math.cos(yaw), math.sin(yaw)
+        front = p['body_center_from_rear_mm'] + p['body_length_mm'] / 2.0
+        out = []
+        for dy in (-p['body_width_mm'] / 2.0, p['body_width_mm'] / 2.0):
+            qx = self.px + front * c - dy * sn
+            qy = self.py + front * sn + dy * c
+            out.append((qx - cx) * ux + (qy - cy) * uy)
+        return max(out)
+
     def _body_s(self, inp, line=None):
         """차체 중심의 깊이 s (칸 가운데 = 0, 들어가는 쪽 +)."""
         cx, cy, ux, uy = line or self.line
@@ -325,8 +438,61 @@ class ParkingV2:
         return (cx + b * ux, cy + b * uy, ux, uy)
 
     def _cell(self):
-        """지금 믿는 칸 가운데 선: 양옆 옆면으로 구한 것 > 짝(보정)."""
-        return self.line if self.side_seen else self._pair_cell()
+        """지금 믿는 칸 가운데 선. 옆 위치·방향은 짝, 깊이는 양옆 옆면(봤으면) > 짝(보정).
+
+        짝은 차선에서 1·3번을 같은 자리·같은 때 봐서 옆 위치·방향이 정확하다 (꺾는 시점이 잘 맞는 이유).
+        꺾은 뒤 양옆 옆면은 1번이 시야 뒤로 반쯤 빠져 덩어리 중심이 쏠려 옆으로 약 6cm 틀어진다 (11/10 시뮬레이션).
+        대신 깊이는 옆면이 정확하다 (짝은 끝면만 보여 얕게 나옴).
+        """
+        pc = self._pair_cell()
+        if pc is None:
+            return self.line if self.side_seen else None
+        cx, cy, ux, uy = pc
+        if self.side_seen and self.side_line is not None:      # 가로선(깊이) = 1·3번 옆면
+            d = (self.side_line[0] - cx) * ux + (self.side_line[1] - cy) * uy
+            cx, cy = cx + d * ux, cy + d * uy
+        if self.col5 is not None and self.col5_n >= self.p['col5_min_frames']:   # 세로선(옆) = 5번 앞면 가운데
+            vx, vy = -uy, ux
+            o = (self.col5[0] - cx) * vx + (self.col5[1] - cy) * vy
+            cx, cy = cx + o * vx, cy + o * vy
+        return (cx, cy, ux, uy)
+
+    def _update_col5(self, inp):
+        """정면의 5번 리모 앞면으로 2번 칸 세로 가운데선 갱신 (윤서 아이디어 11/10).
+
+        들어갈 때 5번은 차 정면이라 1번에 안 가리고 시야 밖으로도 안 빠진다 (차선 따라올 땐 1번에 가려짐 -> 안 씀).
+        정면에서 보면 앞면 폭 전체가 보이므로 점들의 좌우 양 끝 가운데가 5번 가운데. 짝으로 예상한 위치에서
+        col5_gate_mm 안의 덩어리만 받는다.
+        """
+        p = self.p
+        base = self._pair_cell()
+        if base is None or self._turned_deg(inp) < p['col5_min_turn_deg']:
+            return
+        if self.side_seen and self.side_line is not None:
+            d = (self.side_line[0] - base[0]) * base[2] + (self.side_line[1] - base[1]) * base[3]
+            base = (base[0] + d * base[2], base[1] + d * base[3], base[2], base[3])
+        cx, cy, ux, uy = base
+        vx, vy = -uy, ux
+        face = p['row_pitch_mm'] - p['parked_half_len_mm']          # 칸 가운데 -> 5번 앞면 (깊이)
+        ex, ey = cx + face * ux, cy + face * uy                      # 예상 위치
+        yaw = inp['yaw'] or 0.0
+        c, sn = math.cos(yaw), math.sin(yaw)
+        fx, fy = self.px + p['wheelbase_mm'] * c, self.py + p['wheelbase_mm'] * sn
+        best = None
+        for x, y in inp.get('clusters_box', []):
+            wx, wy = fx + x * c - y * sn, fy + x * sn + y * c        # 앞바퀴 기준 -> 자기 위치 좌표
+            dl = (wx - ex) * vx + (wy - ey) * vy
+            dd = (wx - ex) * ux + (wy - ey) * uy
+            if abs(dl) <= p['col5_gate_mm'] and abs(dd) <= 2 * p['col5_gate_mm'] and x > 0:
+                if best is None or abs(dl) < abs(best[0]):
+                    best = (dl, wx, wy)
+        if best is None:
+            return
+        _, wx, wy = best
+        n = self.col5_n
+        self.col5 = (wx, wy) if self.col5 is None else ((self.col5[0] * n + wx) / (n + 1),
+                                                        (self.col5[1] * n + wy) / (n + 1))
+        self.col5_n += 1
 
     def _end_remaining(self, inp):
         """카메라로 본 칸 끝 선까지 남은 거리 (앞바퀴 기준, mm). 못 봤으면 None.
@@ -375,15 +541,30 @@ class ParkingV2:
             moved = inp['dist_mm'] - self.d_phase
             if inp['blocked']:
                 return self._done('BLOCKED', inp)
-            pair = find_pair(inp['clusters'], p['side_far_mm'], p['pair_dist_mm'], p['pair_tol_mm'])
+            pair = find_pair(inp.get('clusters_pair') or inp['clusters'], p['side_far_mm'], p['pair_dist_mm'],
+                             p['pair_tol_mm'])
             if pair is not None:                       # ③ 두 리모 짝 -> 칸 가운데 선 (평균)
                 mx, my, vx, vy = pair
                 n0 = self.pair_n
                 self.pair_side_mm = (-my if self.pair_side_mm is None
                                      else (self.pair_side_mm * n0 - my) / (n0 + 1))
+                pair_row = 'front' if -my < p['row_split_mm'] else 'back'   # 이번에 본 짝의 줄
                 self.row = 'front' if self.pair_side_mm < p['row_split_mm'] else 'back'
-                rel = (mx, my, vy, -vx)                # 들어가는 방향 = 짝 방향에서 오른쪽 90도
+                if p['pair_dir_from_heading']:
+                    # 들어가는 방향 = 지금 차의 오른쪽 (차선 추종 중이라 차가 차선과 나란함).
+                    # 두 리모를 잇는 방향은 1번·3번의 깊이 쏠림이 서로 달라 약 6도 기울었음 (11/10 시뮬레이션)
+                    rel = (mx, my, 0.0, -1.0)
+                else:
+                    rel = (mx, my, vy, -vx)            # 들어가는 방향 = 짝 방향에서 오른쪽 90도
                 line = self._line_to_world(rel, inp)
+                if p['target_row'] in ('front', 'back'):
+                    # 목표 줄 고정 (11/10 대회 배치: 항상 2번 = 앞줄). 다른 줄 짝(1번을 놓쳐 4·6번이 짝)은
+                    # 앞뒤 위치·방향은 같으니 깊이만 한 줄 옮겨 쓴다.
+                    self.row = p['target_row']
+                    if pair_row != p['target_row']:
+                        cx, cy, ux, uy = line
+                        sh = -p['row_pitch_mm'] if p['target_row'] == 'front' else p['row_pitch_mm']
+                        line = (cx + sh * ux, cy + sh * uy, ux, uy)
                 if self.pair_line is None:
                     self.pair_line = line
                 else:                                  # 여러 번 본 값의 평균 (흔들림 줄이기)
@@ -435,6 +616,7 @@ class ParkingV2:
             moved = inp['dist_mm'] - self.d_phase
             self.turn_travel += max(0.0, moved)
             self.d_phase = inp['dist_mm']
+            self._update_col5(inp)
             seen = in_view(inp['clusters'], p['front_axle_from_lidar_mm'], p['side_view_deg'])
             side = (cell_line_from_neighbors(seen, p['side_max_mm'])
                     if self._turned_deg(inp) >= p['stop_min_turn_deg'] else None)
@@ -443,6 +625,7 @@ class ParkingV2:
                 # 짝을 알고 양옆 리모 옆면이 보이면: 옆면으로 구한 선에서 차체 중심이 칸 가운데 오면 멈춤.
                 # (차선에서 본 짝은 리모의 차선 쪽 끝면만 보여 깊이가 8~17cm 얕게 나온다 -> 깊이는 옆면으로)
                 self.line = self._line_to_world(side, inp)
+                self.side_line = self.line
                 self.side_seen = True
                 r = l = self._body_s(inp) >= -p['enter_brake_mm']
                 self.stop_how = 'side' if r else None
@@ -467,6 +650,14 @@ class ParkingV2:
                 if not (r and l) and cell is not None and self._body_s(inp, cell) >= p['cell_cap_mm']:
                     r = l = True
                     self.stop_how = 'cap'
+            if (not (r and l) and self._turned_deg(inp) >= 10.0 and self.realigns < p['max_realign']
+                    and self._guard_hit(inp)):
+                # 옆 감시: 꺾는 중 리모(보이는 것 + 기억한 것)에 side_guard_mm보다 가까워지면 멈추고 재정렬
+                self.line = self._cell()
+                self.realigns += 1
+                self.err = ('guard', round(self._side_gap(inp)))
+                self._enter('PULLOUT', inp)
+                return self._out(0.0, 0.0)
             if r and l:
                 self._enter('CHECK', inp)
             else:
@@ -489,6 +680,12 @@ class ParkingV2:
                     return self._done('FAIL_TURN_TOO_LONG', inp)
                 straight = (p['straighten_yaw_deg'] > 0
                             and self._turned_deg(inp) >= p['straighten_yaw_deg'])
+                col5_ok = p['follow_col5'] and self.col5 is not None and self.col5_n >= p['col5_min_frames']
+                if col5_ok and (straight or p['col5_early']):
+                    # 바퀴 편 뒤: 5번 세로선(× 1·3번 가로선)을 따라 들어감
+                    k = pursuit_kappa_on_line(self.px, self.py, inp['yaw'] or 0.0, self._cell(),
+                                              p['pursuit_look_mm'])
+                    return self._out(p['turn_speed'], max(-2.0, min(2.0, k)))
                 return self._out(p['turn_speed'], 0.0 if straight else KAPPA_FULL_RIGHT)
 
         if self.phase == 'CHECK':           # (재정렬) 칸 가운데에 반듯하게 들어갔나
@@ -497,18 +694,22 @@ class ParkingV2:
             if p['max_realign'] <= 0 or (rel is None and self.pair_line is None):
                 return self._done('PARKED', inp)
             if rel is not None:
-                self.line = self._line_to_world(rel, inp)
-            elif not self.side_seen:
-                self.line = self._pair_cell()       # 옆면을 못 봤으면 짝(깊이 보정)
-            # (옆면을 봤으면 self.line = 기억한 선 그대로)
+                self.side_line = self._line_to_world(rel, inp)
+                self.side_seen = True
+            self.line = self._cell()                # 옆 위치·방향 = 짝, 깊이 = 옆면(봤으면)
             lat, head, s_deep, s_shallow = self._misalign(self.line, inp)
             self.err = (round(lat), round(head, 1), round(s_deep), round(s_shallow))
             lim_d = p['cell_half_depth_mm'] - p['corner_margin_mm']
-            if (lat <= p['cell_half_mm'] - p['corner_margin_mm'] and abs(head) <= p['realign_head_deg']
-                    and s_deep <= lim_d and s_shallow >= -lim_d):
+            inside = (lat <= p['cell_half_mm'] - p['corner_margin_mm'] and abs(head) <= p['realign_head_deg']
+                      and s_deep <= lim_d and s_shallow >= -lim_d)
+            off = self._center_offset(self.line, inp)
+            neat = abs(head) <= p['final_head_tol_deg'] and abs(off) <= p['final_lat_tol_mm']
+            self.err = self.err + (round(off),)
+            if inside and neat:
                 return self._done('PARKED', inp)
             if self.realigns >= p['max_realign']:
-                return self._done('PARKED_NOT_ALIGNED', inp)
+                # 횟수를 다 썼으면: 네 모서리가 칸 안이면 그대로 끝 (점수는 같음), 아니면 NOT_ALIGNED
+                return self._done('PARKED' if inside else 'PARKED_NOT_ALIGNED', inp)
             self.realigns += 1
             self._enter('PULLOUT', inp)
 
@@ -518,8 +719,10 @@ class ParkingV2:
                 self._enter('ENTER', inp)
                 self.seen_ahead = False
             else:
-                k = 0.0                              # 기본: 바퀴 똑바로 후진 (꺾고 후진하면 앞이 옆으로 휘둘려 옆 리모에 닿음)
-                if p['pullout_steer']:
+                # 사람이 빼듯이: 앞범퍼가 옆 리모 끝을 지나기 전엔 바퀴 똑바로, 지나면 칸 가운데 선 따라 꺾으며 후진.
+                # (처음부터 꺾으면 앞이 옆으로 휘둘려 옆 리모에 닿음 — 11/06 시뮬레이션)
+                k = 0.0
+                if p['pullout_steer'] and self._front_s(inp) <= -(p['parked_half_len_mm'] + p['pullout_clear_mm']):
                     k = pursuit_kappa_on_line(self.px, self.py, inp['yaw'] or 0.0, self.line,
                                               p['pursuit_look_mm'], reverse=True)
                 return self._out(-p['realign_speed'], max(-2.0, min(2.0, k)))
@@ -528,8 +731,18 @@ class ParkingV2:
             moved = inp['dist_mm'] - self.d_phase
             if inp['blocked']:
                 return self._done('BLOCKED', inp)
+            self._update_col5(inp)
+            if self.col5 is not None and self.col5_n >= p['col5_min_frames']:
+                self.line = self._cell()                      # 5번 세로선이 생기면 그 선으로 따라감
             if self._body_s(inp) >= -p['enter_brake_mm']:      # 차체 중심이 칸 가운데에 옴
                 self._enter('CHECK', inp)
+                return self._out(0.0, 0.0)
+            if self._guard_hit(inp):                          # 옆 감시
+                if self.realigns >= p['max_realign']:
+                    return self._done('GUARD_STOP', inp)
+                self.realigns += 1
+                self.err = ('guard', round(self._side_gap(inp)))
+                self._enter('PULLOUT', inp)
                 return self._out(0.0, 0.0)
             if moved >= p['pullout_mm'] + p['enter_max_extra_mm']:
                 return self._done('FAIL_ENTER_TOO_LONG', inp)
@@ -587,6 +800,14 @@ DEFAULTS = {
     'stop_min_turn_deg': 60.0, # 이만큼 돈 뒤에만 양옆 옆면으로 '칸 가운데 도착'을 판단 (도는 도중 오판 방지)
     # ---- 줄(앞줄 1~3 / 뒷줄 4~6)과 칸 끝에서 멈추기 (11/09 park_02 반영)
     'row_split_mm': 800.0,     # 짝 중점까지 옆 거리가 이보다 가까우면 앞줄 (앞줄 약 0.5m, 뒷줄 약 1.1m)
+    'target_row': 'front',     # 들어갈 줄 고정: 'front'(2번) | 'back'(5번) | 'auto'(짝 줄로 판단). 11/10 대회 배치 = 2번
+    'row_pitch_mm': 620.0,     # 앞줄·뒷줄 칸 가운데 사이 (칸 깊이 600 + 선 20, 도면)
+    'pair_dir_from_heading': True,  # 칸 방향을 차선 추종 중 차 방향(IMU)으로. False = 두 리모 잇는 방향
+    'follow_col5': True,       # 꺾은 뒤 정면 5번 리모로 세로 가운데선을 구해 따라 들어감 (윤서 아이디어 11/10). False = 끔
+    'col5_min_turn_deg': 70.0, # 이만큼 돈 뒤부터 5번을 봄 (덜 돌았을 땐 5번 앞면이 비스듬해 가운데가 쏠림)
+    'col5_gate_mm': 150.0,     # 짝으로 예상한 5번 위치에서 옆으로 이 안의 덩어리만 5번으로 인정
+    'col5_min_frames': 3,      # 5번을 이만큼 본 뒤에 믿음
+    'col5_early': True,        # 5번 세로선이 생기면 (87도 전이라도) 바로 그 선을 따라감. False = 87도 뒤부터
     'pair_depth_bias_mm': 125.0,  # 짝으로 본 칸 가운데가 실제보다 얕게 나오는 만큼 (시뮬레이션 80~170)
     'end_stop_mm': 195.0,      # 칸 가운데 정지 = 앞바퀴 -> 칸 끝 선 (깊이 반 300 - (축거 210 - 차체 중심 105))
     'end_gate_mm': 200.0,      # 칸 끝 선 예상 위치와 이만큼 안만 받음 (줄 사이 선과 바깥 테두리는 620mm 차이)
@@ -595,14 +816,20 @@ DEFAULTS = {
     'side_view_deg': 95.0,     # 칸 가운데 선은 라이다 각도 이 안의 리모로만 (실측 시야 끝 약 105도. 끝에 걸리면 덩어리 중심이 쏠림)
     # ---- 재정렬 (PULLOUT -> ENTER)
     'max_realign': 2,          # 0 = 재정렬 끔 (= 원래 버전 2)
+    'final_head_tol_deg': 4.0, # 깔끔하게: 칸 선과 방향이 이보다 틀어지면 (모서리가 칸 안이어도) 재정렬
+    'final_lat_tol_mm': 30.0,  # 깔끔하게: 차체 중심이 칸 가운데에서 이보다 옆으로 벗어나면 재정렬
+    'side_guard_mm': 50.0,     # 옆 감시: 꺾는 중·다시 들어가는 중 리모(보이는 것+기억한 것)까지 이보다 가까우면 재정렬. 0 = 끔
+    'cell_pitch_mm': 520.0,    # 칸 가운데 사이 옆 간격 (칸 폭 500 + 선 20, 도면)
     'cell_half_mm': 250.0,     # 칸 폭 500의 절반 (도면)
     'corner_margin_mm': 25.0,  # 모서리가 칸 선에서 이만큼 안쪽이어야 통과 (측정 오차 여유)
     'realign_head_deg': 20.0,  # 방향이 이보다 틀어지면 모서리가 괜찮아도 재정렬
     'body_length_mm': 322.0,   # LIMO 길이 (팀 parking_node 주석)
     'body_width_mm': 220.0,
-    'pullout_mm': 450.0,       # 뒤로 빠지는 거리. 옆 10cm 고치는 데 앞으로 약 45cm 필요 (반지름 0.53m S자)
+    'pullout_mm': 650.0,       # 뒤로 빠지는 거리. 똑바로 빼서 앞범퍼가 옆 리모 끝을 지난 뒤 꺾으며 후진할 몫까지 (11/10)
     'pursuit_look_mm': 250.0,  # 선 따라가기 앞보기 거리
-    'pullout_steer': False,    # True면 후진하면서도 선을 따라감 (시험에서 옆 리모와 충돌 -> 기본 끔)
+    'pullout_steer': True,     # 후진 때도 꺾기 (앞범퍼가 옆 리모 끝 + pullout_clear_mm를 지난 뒤부터). False = 늘 똑바로
+    'pullout_clear_mm': 150.0, # 앞범퍼가 옆 리모 끝에서 이만큼 더 나온 뒤 꺾기 시작 (5cm면 차 옆면이 1번 리모 모서리에 1mm까지 닿음)
+    'parked_half_len_mm': 161.0,   # 정차 리모 길이 322의 절반 (칸 가운데 기준 리모 끝 = ±161)
     'realign_speed': 0.10,
     'enter_brake_mm': 13.0,    # 0.10 m/s 제동 거리 (calib 4번: 약 13 x 속도 cm)
     'cell_half_depth_mm': 300.0,   # 칸 깊이 600의 절반 (도면). 정차 리모가 칸 가운데라고 가정
@@ -702,7 +929,7 @@ def main(args=None):
             if active and g('enabled'):
                 if self.logic is None:
                     self.logic = ParkingV2({k: g(k) for k in DEFAULTS})
-                clusters, blocked = [], False
+                clusters, blocked, points, clusters_pair, clusters_box = [], False, [], [], []
                 if self.scan is not None:
                     s = self.scan
                     clusters = scan_clusters(s.ranges, s.angle_min, s.angle_increment, s.range_min,
@@ -711,11 +938,20 @@ def main(args=None):
                     blocked = front_blocked(s.ranges, s.angle_min, s.angle_increment, s.range_min,
                                             s.range_max, g('front_axle_from_lidar_mm'), g('laser_yaw'),
                                             g('front_bumper_from_axle_mm'), g('front_stop_mm'), 120.0)
+                    points = scan_points(s.ranges, s.angle_min, s.angle_increment, s.range_min, s.range_max,
+                                         g('front_axle_from_lidar_mm'), g('laser_yaw'))
+                    clusters_pair = scan_clusters(s.ranges, s.angle_min, s.angle_increment, s.range_min,
+                                                  s.range_max, g('front_axle_from_lidar_mm'), g('laser_yaw'),
+                                                  max_dist_mm=max(1500.0, g('side_far_mm') + 200.0), x_mode='extent')
+                    clusters_box = scan_clusters(s.ranges, s.angle_min, s.angle_increment, s.range_min,
+                                                 s.range_max, g('front_axle_from_lidar_mm'), g('laser_yaw'),
+                                                 max_dist_mm=1500.0, x_mode='box')
                 v, k, info = self.logic.step({
                     't': time.monotonic(), 'dist_mm': self.dist_mm, 'yaw': self.yaw,
                     'lane_v': self.lane_v, 'lane_w': self.lane_w, 'stoplines_mm': self.stoplines,
                     'end_lines_mm': self.end_lines, 'armed': bool(self.mstate.get('parking_armed', True)),
-                    'clusters': clusters, 'blocked': blocked})
+                    'clusters': clusters, 'blocked': blocked, 'points': points, 'clusters_pair': clusters_pair,
+                    'clusters_box': clusters_box})
                 tw.linear.x = float(v)
                 tw.angular.z = float(self.lane_w if k is None else v * k)
                 if self.logic.lane_cfg is not None and self.logic.lane_cfg != self._sent_cfg:

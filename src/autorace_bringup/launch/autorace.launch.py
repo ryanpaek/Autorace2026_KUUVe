@@ -71,6 +71,8 @@ def generate_launch_description():
         # M2 갈림길 판단 노드(autorace_fork): YOLO fork_a/fork_b 투표 + 지금 차선 기준 이동 차선 수 판단 -> /fork_direction.
         #   FSM이 이미 정했으면 그걸 따르므로 켜도 결정이 엇갈리지 않는다. /fork/state 로 상황을 볼 수 있다.
         DeclareLaunchArgument('use_fork_node', default_value='false'),
+        # 주차 켜기 (parking_node enabled). 통주행은 full.launch.py가 true로 준다
+        DeclareLaunchArgument('parking', default_value='false'),
         DeclareLaunchArgument('fork_params', default_value=_fork_params()),
         Node(package='autorace_mission', executable='ackermann_bridge', name='ackermann_bridge',
              output='screen', condition=IfCondition(use_bridge)),
@@ -83,7 +85,8 @@ def generate_launch_description():
                                       LaunchConfiguration('use_class_commands'), value_type=bool)}],
              output='screen'),
         Node(package='autorace_mission', executable='parking_node', name='parking_node',
-             parameters=[params], output='screen'),
+             parameters=[params, {'enabled': ParameterValue(LaunchConfiguration('parking'), value_type=bool)}],
+             output='screen'),
         Node(package='autorace_obstacle', executable='obstacle_node', name='obstacle_node',
              parameters=[params, {'bev_config': bev}], output='screen'),
         Node(package='limo_obstacle_avoid', executable='avoid_node', name='avoid_node',
