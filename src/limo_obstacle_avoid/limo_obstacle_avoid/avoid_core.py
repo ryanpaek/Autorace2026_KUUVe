@@ -83,6 +83,8 @@ class AvoidParams:
     hold_time: float = 0.8            # 차선 바꾼 뒤 최소 유지 시간 [s]
     stop_dist: float = 0.30           # 지금 조향대로 이만큼 더 가면 차체가 부딪힐 때만 정지(→ 후진). 옆 차로·옆에 붙은 장애물은 안 봄
     path_margin: float = 0.02         # 위 판단에서 차체 둘레 여유 [m]
+    path_rollout: bool = True         # 위 판단의 길: 목표 차로로 가다 똑바로 서는 실제 조향을 굴려 봄 (false: 지금 곡률 유지)
+    emerg_lane_band: bool = True      # 범퍼 앞 비상: 지금 차로~가려는 차로 안(도면 차로 경계)의 점만 셈. 그 밖 차로 장애물 무시
     emerg_min_pts: int = 2            # 비상정지 박스 안에 점이 이만큼 있어야 비상 (라이다 점 하나 튀어서 서는 것 방지)
     # ── 제어 (pure pursuit) ──
     v_cruise: float = 0.25            # 차선 안에서 속도
@@ -135,6 +137,7 @@ class AvoidParams:
     recover_mode: str = 'trail'       # 'trail' | 'swing'(예전: 25cm 후진하며 크게 꺾기)
     trail_step: float = 0.05          # 지나온 길 점 간격 [m]
     rollback_lookahead: float = 0.30  # 후진할 때 따라갈 뒤쪽 점 거리 [m]
+    recover_lookahead: float = 0.25   # 후진한 뒤 다음 차로에 들어갈 때까지 전방 주시 거리 (보통 lookahead보다 짧게 -> 더 크게 꺾음)
     rollback_max_dist: float = 0.30   # 한 번 되돌아갈 최대 거리 [m] (11/10 1.5 -> 0.3: 크게 물러나지 않음)
     rollback_time: float = 15.0       # 한 번 되돌아가기 최대 시간 [s]
 
@@ -251,6 +254,7 @@ class AvoidPlanner:
         self.stuck_since = None      # 막혀서 서 있기 시작한 시각
         self.rec = None              # 탈출 중이면 {'t0', 'x0', 'y0', 'side'}
         self.rb = None               # 되돌아가기 중이면 {'t0', 'x0', 'y0', 'dist', 'blocked'}
+        self.sharp = False           # 후진 뒤 다음 차로에 들어갈 때까지 크게 꺾기 (recover_lookahead)
         self.rec_n = 0               # 탈출 횟수 (trail + swing)
         self.rec_side_last = None    # 마지막 swing 방향
         self.rec_same_side = 0
@@ -300,6 +304,9 @@ class AvoidPlanner:
         ylim = (p.num_side_lanes + 0.5) * p.lane_width + p.roi_side_extra
 
         emerg_n = 0
+        lo_lane, hi_lane = sorted((self.nearest_lane(y), self.target))
+        band_lo = self.center(lo_lane) - 0.5 * p.lane_width
+        band_hi = self.center(hi_lane) + 0.5 * p.lane_width
         clusters, cur = [], []
         prev = None
 
@@ -319,10 +326,11 @@ class AvoidPlanner:
                 continue
             px, py = pt
             # 비상정지 박스: 앞범퍼 바로 앞, 차폭 안
-            if p.robot_front < px < p.robot_front + p.stop_dist and abs(py) < p.robot_half_width:
-                emerg_n += 1
             X = x + px * c - py * s
             Y = y + px * s + py * c
+            if (p.robot_front < px < p.robot_front + p.stop_dist and abs(py) < p.robot_half_width
+                    and (not p.emerg_lane_band or band_lo <= Y <= band_hi)):
+                emerg_n += 1
             if not (x - p.roi_back <= X <= x + p.roi_front and -ylim <= Y <= ylim):
                 close(); prev = None
                 continue
@@ -619,6 +627,7 @@ class AvoidPlanner:
             self.target = nxt
             self.last_switch = t
             self.rb = None
+            self.sharp = True
             self.stuck_since = None
             return None
         while len(self.trail) > 1 and math.hypot(self.trail[-1][0] - x, self.trail[-1][1] - y) < p.rollback_lookahead:
@@ -626,6 +635,7 @@ class AvoidPlanner:
         if (rb['dist'] >= p.rollback_max_dist or t - rb['t0'] >= p.rollback_time or not self.trail):
             self.events.append((x, f'되돌아가기 끝 ({rb["dist"]:.2f}m, 갈 길 없음) → 다시 계획'))
             self.rb = None
+            self.sharp = True
             self.stuck_since = None
             self.last_switch = t - p.hold_time
             return None
@@ -677,6 +687,7 @@ class AvoidPlanner:
         if back >= p.recover_dist or t - r['t0'] >= p.recover_time:
             self.events.append((self.pose.x, f'탈출 끝 ({back:.2f}m 후진) → 다시 계획'))
             self.rec = None
+            self.sharp = True
             self.stuck_since = None
             self.last_switch = t - p.hold_time        # 바로 차로를 다시 고를 수 있게
             return None
@@ -749,6 +760,8 @@ class AvoidPlanner:
 
         # ③ 속도
         in_lane = abs(y - self.center(self.target)) < p.reach_tol
+        if in_lane and self.sharp:
+            self.sharp = False                          # 새 차로에 들어옴 -> 보통 조향
         v = p.v_cruise if in_lane else p.v_change
         # 정지(→ 후진)는 '지금 조향대로 stop_dist 더 가면 차체가 부딪힘'일 때만.
         #   예전: 가려는 차로 전체(옆에 붙은 장애물 포함, 거리 음수)를 봐서 옆 장애물만으로도 서고 후진했다.
@@ -798,8 +811,11 @@ class AvoidPlanner:
 
     # ---------- 바로 앞 충돌 판단 ----------
     def path_hit(self, obs, k, dist):
-        """곡률 k로 dist[m] 더 갈 때 차체(여유 path_margin)가 장애물과 처음 겹치는 거리. 없으면 INF.
-        실제 장애물과 섬만 본다 (출구 선호 가상벽은 차로 고르기용이라 제외)."""
+        """지금 계획대로 dist[m] 더 갈 때 차체(여유 path_margin)가 장애물과 처음 겹치는 거리. 없으면 INF.
+        실제 장애물과 섬만 본다 (출구 선호 가상벽은 차로 고르기용이라 제외).
+        길은 '목표 차로 중심으로 가다가 똑바로 서는' pure pursuit을 그대로 굴려서 만든다 (11/10 밤).
+        예전엔 지금 곡률 k를 0.3 m 동안 유지한다고 봐서, 1->2차선으로 꺾어 들어갈 때 계속 꺾는 것으로 보고
+        3차선 장애물에 닿는다고 판단 -> 정지·후진·출발을 반복했다. k는 rollout을 끄면(path_rollout false) 쓴다."""
         p = self.p
         boxes = [o for o in obs if not (o.virtual and o.tag == 'exit')]
         if not boxes:
@@ -808,14 +824,14 @@ class AvoidPlanner:
         hw = p.robot_half_width + p.path_margin
         front, rear = p.robot_front + p.path_margin, p.robot_rear
         n = max(1, int(math.ceil(dist / 0.05)))
+        ds = dist / n
+        x, y, h = x0, y0, psi0
         for i in range(n + 1):
-            sd = dist * i / n
-            if abs(k) < 1e-6:
-                x, y, h = x0 + sd * math.cos(psi0), y0 + sd * math.sin(psi0), psi0
-            else:
-                h = psi0 + k * sd
-                x = x0 + (math.sin(h) - math.sin(psi0)) / k
-                y = y0 - (math.cos(h) - math.cos(psi0)) / k
+            sd = ds * i
+            if i > 0:
+                kk = self._pursuit_k(x, y, h) if p.path_rollout else k
+                hm = h + 0.5 * kk * ds
+                x, y, h = x + ds * math.cos(hm), y + ds * math.sin(hm), h + kk * ds
             c, s = math.cos(h), math.sin(h)
             car = [(x + a * c - b * s, y + a * s + b * c) for a, b in ((front, hw), (front, -hw), (-rear, -hw), (-rear, hw))]
             for o in boxes:
@@ -823,11 +839,30 @@ class AvoidPlanner:
                     return sd
         return INF
 
+    def _ld(self):
+        """전방 주시 거리. 후진(되돌아가기·탈출)한 뒤 다음 차로에 들어갈 때까지는 짧게 -> 더 크게 꺾어 빨리 빠짐."""
+        return self.p.recover_lookahead if self.sharp else self.p.lookahead
+
+    def _pursuit_k(self, x, y, psi):
+        """(x, y, psi)에서 목표 차로 중심을 따라가는 곡률 (control과 같은 식, 차선 노드 섞기 없음)."""
+        p = self.p
+        Ld = self._ld()
+        dy = self.center(self.target) - y
+        xr = Ld * math.cos(psi) + dy * math.sin(psi)
+        yr = -Ld * math.sin(psi) + dy * math.cos(psi)
+        k = 2.0 * yr / (xr * xr + yr * yr)
+        kmax = 1.0 / p.min_turn_radius
+        k = max(-kmax, min(kmax, k))
+        mh = math.radians(p.max_heading_deg)
+        if (psi > mh and k > 0) or (psi < -mh and k < 0):
+            k = 0.0
+        return k
+
     # ---------- pure pursuit (직선 y = 목표차선중심 따라가기) ----------
     def control(self, v, t=None, in_lane=False):
         p = self.p
         y, psi = self.pose.y, self.pose.psi
-        Ld = p.lookahead
+        Ld = self._ld()
         dy = self.center(self.target) - y
         # 목표점 (Ld, dy) 을 로봇 기준으로 회전
         xr = Ld * math.cos(psi) + dy * math.sin(psi)
