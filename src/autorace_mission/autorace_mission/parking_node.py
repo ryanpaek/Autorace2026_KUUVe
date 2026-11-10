@@ -318,6 +318,20 @@ class ParkingV2:
         # 선 위 점까지 차 앞 방향 거리: 차 앞 방향과 선 방향(ux,uy)은 거의 수직이니 그대로 앞 방향 투영
         return (cx - fx) * math.cos(yaw) + (cy - fy) * math.sin(yaw)
 
+    def _front_s(self, inp):
+        """앞범퍼 양 모서리 중 더 깊은 쪽의 깊이 s (칸 가운데 = 0, 들어가는 쪽 +)."""
+        p = self.p
+        cx, cy, ux, uy = self.line
+        yaw = inp['yaw'] or 0.0
+        c, sn = math.cos(yaw), math.sin(yaw)
+        front = p['body_center_from_rear_mm'] + p['body_length_mm'] / 2.0
+        out = []
+        for dy in (-p['body_width_mm'] / 2.0, p['body_width_mm'] / 2.0):
+            qx = self.px + front * c - dy * sn
+            qy = self.py + front * sn + dy * c
+            out.append((qx - cx) * ux + (qy - cy) * uy)
+        return max(out)
+
     def _body_s(self, inp, line=None):
         """차체 중심의 깊이 s (칸 가운데 = 0, 들어가는 쪽 +)."""
         cx, cy, ux, uy = line or self.line
@@ -536,8 +550,10 @@ class ParkingV2:
                 self._enter('ENTER', inp)
                 self.seen_ahead = False
             else:
-                k = 0.0                              # 기본: 바퀴 똑바로 후진 (꺾고 후진하면 앞이 옆으로 휘둘려 옆 리모에 닿음)
-                if p['pullout_steer']:
+                # 사람이 빼듯이: 앞범퍼가 옆 리모 끝을 지나기 전엔 바퀴 똑바로, 지나면 칸 가운데 선 따라 꺾으며 후진.
+                # (처음부터 꺾으면 앞이 옆으로 휘둘려 옆 리모에 닿음 — 11/06 시뮬레이션)
+                k = 0.0
+                if p['pullout_steer'] and self._front_s(inp) <= -(p['parked_half_len_mm'] + p['pullout_clear_mm']):
                     k = pursuit_kappa_on_line(self.px, self.py, inp['yaw'] or 0.0, self.line,
                                               p['pursuit_look_mm'], reverse=True)
                 return self._out(-p['realign_speed'], max(-2.0, min(2.0, k)))
@@ -620,9 +636,11 @@ DEFAULTS = {
     'realign_head_deg': 20.0,  # 방향이 이보다 틀어지면 모서리가 괜찮아도 재정렬
     'body_length_mm': 322.0,   # LIMO 길이 (팀 parking_node 주석)
     'body_width_mm': 220.0,
-    'pullout_mm': 450.0,       # 뒤로 빠지는 거리. 옆 10cm 고치는 데 앞으로 약 45cm 필요 (반지름 0.53m S자)
+    'pullout_mm': 650.0,       # 뒤로 빠지는 거리. 똑바로 빼서 앞범퍼가 옆 리모 끝을 지난 뒤 꺾으며 후진할 몫까지 (11/10)
     'pursuit_look_mm': 250.0,  # 선 따라가기 앞보기 거리
-    'pullout_steer': False,    # True면 후진하면서도 선을 따라감 (시험에서 옆 리모와 충돌 -> 기본 끔)
+    'pullout_steer': True,     # 후진 때도 꺾기 (앞범퍼가 옆 리모 끝 + pullout_clear_mm를 지난 뒤부터). False = 늘 똑바로
+    'pullout_clear_mm': 150.0, # 앞범퍼가 옆 리모 끝에서 이만큼 더 나온 뒤 꺾기 시작 (5cm면 차 옆면이 1번 리모 모서리에 1mm까지 닿음)
+    'parked_half_len_mm': 161.0,   # 정차 리모 길이 322의 절반 (칸 가운데 기준 리모 끝 = ±161)
     'realign_speed': 0.10,
     'enter_brake_mm': 13.0,    # 0.10 m/s 제동 거리 (calib 4번: 약 13 x 속도 cm)
     'cell_half_depth_mm': 300.0,   # 칸 깊이 600의 절반 (도면). 정차 리모가 칸 가운데라고 가정
