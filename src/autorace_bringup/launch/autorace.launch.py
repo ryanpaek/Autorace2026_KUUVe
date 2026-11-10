@@ -59,6 +59,7 @@ def generate_launch_description():
         DeclareLaunchArgument('route_file',
                               default_value=os.path.join(share, 'config', 'track_route.yaml')),
         DeclareLaunchArgument('use_detector', default_value='true'),
+        DeclareLaunchArgument('use_class_commands', default_value='true'),
         # 이 LIMO의 애커만 드라이버는 /limo/ack_cmd(AckermannDrive)만 받는다
         DeclareLaunchArgument('use_ackermann_bridge', default_value='true'),
         # M7 3차선 회피: limo_obstacle_avoid의 avoid_node를 켜고 FSM이 그 명령을 쓰게 한다.
@@ -77,7 +78,9 @@ def generate_launch_description():
              parameters=[params, {'bev_config': bev}], output='screen'),
         Node(package='autorace_mission', executable='mission_node', name='mission_node',
              parameters=[params, {'start_state': start_state, 'route_file': route,
-                                  'm7_external_avoid': ParameterValue(m7_avoid, value_type=bool)}],
+                                  'm7_external_avoid': ParameterValue(m7_avoid, value_type=bool),
+                                  'use_class_commands': ParameterValue(
+                                      LaunchConfiguration('use_class_commands'), value_type=bool)}],
              output='screen'),
         Node(package='autorace_mission', executable='parking_node', name='parking_node',
              parameters=[params], output='screen'),
@@ -93,4 +96,7 @@ def generate_launch_description():
              condition=IfCondition(LaunchConfiguration('use_fork_node'))),
         Node(package='autorace_perception', executable='detector_node', name='detector_node',
              parameters=[params], output='screen', condition=IfCondition(use_detector)),
+        Node(package='autorace_perception', executable='class_command_node',
+             name='class_command_node', parameters=[params], output='screen',
+             condition=IfCondition(LaunchConfiguration('use_class_commands'))),
     ])

@@ -4,7 +4,7 @@
   /lane/cmd_vel, /obstacle/cmd_vel, /parking/cmd_vel  ->  [mux]  ->  /cmd_vel
 
 구독
-  /perception/detections (String JSON)  {"detections":[{"cls":"red","conf":0.8,"bbox":[...]}]}
+  /perception/commands (기본, 확인된 지속 요청). use_class_commands=false면 /perception/detections (String JSON)  {"detections":[{"cls":"red","conf":0.8,"bbox":[...]}]}
   /lane/status, /obstacle/state, /parking/state (String JSON)
   odom_topic (nav_msgs/Odometry) -> 누적 주행 거리, imu_topic (sensor_msgs/Imu) -> yaw
   /mission/start (std_msgs/Empty)       출발
@@ -35,6 +35,7 @@ from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Imu
 from std_msgs.msg import Bool, Empty, Float32, String
 
+from autorace_mission.command_inbox import CommandInbox
 from autorace_mission.fsm import DEFAULT_PARAMS, Inputs, MissionFSM
 from autorace_mission.route import MapPose, RouteMap, RouteTracker
 
@@ -65,6 +66,9 @@ class MissionNode(Node):
             if not isinstance(v, dict):              # route_points는 yaml 파일에서 읽는다
                 self.declare_parameter(k, v, dyn)
         self.declare_parameter('tick_hz', 20.0)
+        self.declare_parameter('use_class_commands', True)
+        self.use_class_commands = self.get_parameter('use_class_commands').value
+        self.command_inbox = CommandInbox()
         self.declare_parameter('odom_topic', '/odom')
         self.declare_parameter('imu_topic', '/imu')
         self.declare_parameter('max_speed', 0.45)          # m/s 상한 (안전)
@@ -123,7 +127,10 @@ class MissionNode(Node):
         self._last_fallback_warn = 0.0
         self._auto_s_done = False
 
-        self.create_subscription(String, '/perception/detections', self._on_det, 10)
+        if self.use_class_commands:
+            self.create_subscription(String, '/perception/commands', self._on_commands, 10)
+        else:
+            self.create_subscription(String, '/perception/detections', self._on_det, 10)
         self.create_subscription(String, '/lane/status', self._on_lane, 10)
         self.create_subscription(String, '/obstacle/state', self._json_cb('obstacle'), 10)
         self.create_subscription(String, '/parking/state', self._json_cb('parking'), 10)
@@ -176,6 +183,12 @@ class MissionNode(Node):
             self.twists[source] = (msg, time.monotonic())
         return cb
 
+    def _on_commands(self, msg):
+        try:
+            self.command_inbox.receive(json.loads(msg.data), self.fsm.state)
+        except (ValueError, TypeError):
+            self.get_logger().warning('invalid class commands', throttle_duration_sec=5.0)
+
     def _on_det(self, msg):
         try:
             data = json.loads(msg.data)
@@ -226,7 +239,10 @@ class MissionNode(Node):
             xw = self.lane.get('crosswalk_lines_mm') if self.new_lane else None
             route_s = self.tracker.update(self.dist_mm, lines, xw)
             self.new_lane = False
+        self.command_inbox.set_mode(self.fsm.state)
         return Inputs(t=time.monotonic(), dist_mm=self.dist_mm, yaw=self.yaw,
+                      confirmed_classes=(dict(self.command_inbox.classes)
+                                         if self.use_class_commands else None),
                       detections=dict(self.det), new_detection_frame=self.new_det,
                       lane=self.lane, obstacle=self.obstacle, parking=self.parking,
                       start=self.start_flag, route_s=route_s, tilt_rate=self.tilt_peak)

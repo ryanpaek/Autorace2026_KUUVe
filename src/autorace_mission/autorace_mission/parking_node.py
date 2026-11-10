@@ -695,7 +695,8 @@ def main(args=None):
         def _tick(self):
             """20Hz: 주차 계산 -> /parking/cmd_vel, /parking/state, (바뀔 때만) /lane/config."""
             g = lambda k: self.get_parameter(k).value   # noqa: E731
-            active = self.mstate.get('state') == 'M4_PARKING'
+            active = (self.mstate.get('state') == 'M4_PARKING'
+                      and self.mstate.get('source') == 'parking')
             tw = Twist()
             info = {'phase': 'IDLE', 'done': False, 'result': ''}
             if active and g('enabled'):

@@ -31,6 +31,7 @@ def run(layout, p, exit_lane='auto', odom_scale=1.0, imu_drift_deg=0.0, jitter=0
     car = sc.SimCar(0.0, p.start_lane * p.lane_width, 0.0)
     pl = AvoidPlanner(p)
     pl.start(car.odom_x, car.odom_y, car.imu_yaw, 0.0)
+    last_v = 0.0
 
     n_beam, a_min = 360, -math.pi
     a_inc = 2 * math.pi / n_beam
@@ -40,7 +41,7 @@ def run(layout, p, exit_lane='auto', odom_scale=1.0, imu_drift_deg=0.0, jitter=0
     stuck = 0
     for k in range(int(60 / dt)):
         drift = math.radians(imu_drift_deg) * min(1.0, t / 20.0)
-        pl.pose.update(car.odom_x, car.odom_y, car.imu_yaw)
+        pl.pose.update(car.odom_x, car.odom_y, car.imu_yaw, forward=last_v >= 0.0)   # 후진(멈춤 탈출)도 반영
         if k % 2 == 0:   # 라이다 10Hz
             lx = car.x + p.lidar_x * math.cos(car.yaw)
             ly = car.y + p.lidar_x * math.sin(car.yaw)
@@ -49,6 +50,7 @@ def run(layout, p, exit_lane='auto', odom_scale=1.0, imu_drift_deg=0.0, jitter=0
             pl.update_scan(scan_to_base(rng, a_min, a_inc, p))
         v, w = pl.step(t)
         car.step(v, w, dt, odom_scale=odom_scale, imu_drift=drift, rnd=rnd)
+        last_v = v
         t += dt
         g = sc.min_gap(car.footprint(), rects)
         worst = min(worst, g)

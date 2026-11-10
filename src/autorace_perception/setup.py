@@ -20,6 +20,7 @@ setup(
     entry_points={
         'console_scripts': [
             'detector_node = autorace_perception.detector_node:main',
+            'class_command_node = autorace_perception.class_command_node:main',
             'image_collector = autorace_perception.image_collector:main',
         ],
     },

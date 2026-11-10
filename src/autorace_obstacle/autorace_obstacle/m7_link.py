@@ -13,6 +13,14 @@ obstacle_node가 매 틱 update()를 부르고, 돌려받은 동작을 토픽으
   5) 정지 유지(m7_hold): 회피 노드가 제어를 잡은 뒤 끝나기 전에 놓거나(Ctrl+C) 소식이 끊기면(죽음)
               FSM이 정지한다. 이게 없으면 Ctrl+C 때 차선 주행으로 넘어가 정차 LIMO 사이를 직진한다.
               (단독 시험의 cmd_mux failsafe_hold와 같은 역할. 팀 스택은 cmd_mux를 안 쓰므로 여기서 한다)
+  6) 켜기 방식 enable_mode (팀 설정은 params.yaml obstacle_node: m7_enable_mode)
+     'line'     : 1) 시작선(카메라 흰 선 + 오도메트리 / 도면 위치)에서 켬 (11/08까지 방식)
+     'obstacle' : 횡단보도를 벗어나면(M7 진입) 라이다로 앞 차로를 감시하다가, 시작선 근처(trigger_gate_mm)부터
+                  앞 차로 안 장애물이 trigger_front_mm 안에 들어오면 켬. 끝까지 없으면 trigger_fallback_mm에서 켬
+  7) 끄기 방식 off_mode
+     'none' : 회피 노드가 스스로 끝냄(섬 끝 + done_margin) / FSM 강제(섬 끝 + 50 cm)
+     'sign' : 위에 더해, YOLO 갈림길 표지(fork_a/fork_b)를 확실히 본 뒤 지나가면(안 보이게 되면) 또는 가까워지면 끔.
+              섬 앞 off_gate_mm 안이고 차가 바깥 차로(A/B)에 있을 때만 (가운데 차로에서 끄면 섬에 부딪힘)
 
 시작선 위치는 세 가지로 판단한다 (위에서부터 우선).
   a. 카메라 흰 가로선: 시작선 근처에서 본 선까지 거리 - 그 뒤 달린 거리 (StopApproach와 같은 방식.
@@ -24,8 +32,9 @@ obstacle_node가 매 틱 update()를 부르고, 돌려받은 동작을 토픽으
 from __future__ import annotations
 
 import math
+from collections import deque
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 M7_STATE = 'M7_OBSTACLE'
 
@@ -54,6 +63,39 @@ class M7LinkParams:
     # 정지 유지: 회피 노드는 실행 중 /avoid/active true를 20 Hz로 낸다
     active_timeout_sec: float = 0.5     # 이보다 오래 안 오면 죽은 것으로 보고 정지
     release_grace_sec: float = 0.3      # 정상 종료는 active false 직후 done이 온다 -> 이만큼 지나도 안 오면 '멈춤'으로 기록
+    # 켜기 방식 (모듈 설명 6)
+    enable_mode: str = 'line'           # 'line' | 'obstacle'
+    trigger_front_mm: float = 1000.0    # obstacle: 라이다 -> 앞 차로 장애물이 이 안이면 켬. 시뮬레이션: 0.7 m는 7조건 중 3만 성공(멈춤·이탈), 0.9 m 이상 멈춤 없음
+    trigger_half_width_mm: float = 200.0  # 앞 차로로 보는 좌우 폭(차 중심 ±). 옆 차로 LIMO(중심 ±520, 가장자리 ±410)는 안 들어옴
+    trigger_gate_mm: float = -250.0     # obstacle: 시작선 기준 이 위치부터 감시 결과로 켬 (코너 끝 = 시작선 -288 mm)
+    trigger_fallback_mm: float = 1000.0  # obstacle: 앞 차로에 장애물이 끝까지 없으면 시작선 + 이만큼에서 켬
+    # 끄기 방식 (모듈 설명 7)
+    off_mode: str = 'none'              # 'none' | 'sign'
+    off_sign_classes: Tuple[str, ...] = ('fork_a', 'fork_b')
+    off_sign_conf: float = 0.5
+    off_sign_window: int = 5            # 최근 이만큼 프레임 중
+    off_sign_need: int = 3              # 이만큼 보이면 '표지 확인'
+    off_sign_lost_frames: int = 5       # 확인한 뒤 이만큼 연속 안 보이면 '지나감'
+    off_sign_near_h_px: float = 0.0     # 표지 상자 높이가 이 이상이면 바로 '도착' (0 = 안 씀)
+    off_gate_mm: float = 1500.0         # 섬 앞 끝까지 이 안일 때만 표지로 끔 (멀리서 가려져 사라지는 오판 방지)
+
+
+LANE_NUMBER = {1: 1, 0: 2, -1: 3}          # 회피 차로(+1 왼쪽) -> 1차선(왼쪽, A) / 2차선 / 3차선(오른쪽, B)
+
+
+def exit_report(lane, by: str) -> Optional[dict]:
+    """M7이 끝날 때 /m7/exit_lane 으로 낼 내용. lane: 회피 노드 차로 번호(+1/0/-1)."""
+    try:
+        k = int(lane)
+    except (TypeError, ValueError):
+        return None
+    if k not in LANE_NUMBER:
+        return None
+    n = LANE_NUMBER[k]
+    fork = lane_to_fork(k)
+    side = {1: '왼쪽', 2: '가운데', 3: '오른쪽'}[n]
+    return {'lane': n, 'fork': fork, 'side': side, 'avoid_lane': k, 'by': by,
+            'text': f'M7 끝: {n}차선({side}{", 갈림길 " + fork if fork else ""}) — {by}'}
 
 
 def lane_to_fork(lane) -> Optional[str]:
@@ -86,6 +128,15 @@ class M7Link:
         self.hold = False
         self.avoid_running = False
         self.avoid_target = None
+        self.avoid_lane = None       # 회피 노드가 지금 있다고 보는 차로 (/avoid/state now_lane)
+        self.front_mm = None         # 라이다 -> 앞 차로 안 가장 가까운 장애물 (mm), obstacle_node가 넣어 줌
+        self.sign_buf = deque(maxlen=max(1, int(self.p.off_sign_window)))
+        self.sign_seen = False       # 표지를 확실히 봤나
+        self.sign_lost = 0           # 확인한 뒤 연속으로 안 보인 프레임
+        self.sign_near = False
+        self.off_by = None           # 'sign' | 'avoid_done'
+        self.report = None           # M7이 끝날 때 한 번 내보낼 차로 (exit_report), obstacle_node가 pop
+        self.trigger = None          # 켠 이유: 'line' | 'obstacle' | 'fallback'
         self.events: List[str] = []
 
     # --- 회피 노드 쪽 입력 ----------------------------------------------------
@@ -106,12 +157,44 @@ class M7Link:
         self.avoid_running = st.get('state') == 'RUN'
         if 'target' in st:
             self.avoid_target = st.get('target')
+        if 'now_lane' in st:
+            self.avoid_lane = st.get('now_lane')
         if self.avoid_running and self.phase == 'armed':
             self.phase = 'running'
 
+    def on_front(self, front_mm: Optional[float]) -> None:
+        """라이다: 앞 차로(차 중심 ±trigger_half_width_mm) 안 가장 가까운 장애물까지 거리 (라이다 기준, mm)."""
+        self.front_mm = front_mm
+
+    def on_detections(self, dets: Sequence[dict]) -> None:
+        """/perception/detections 한 프레임. 갈림길 표지를 확인한 뒤 지나감(안 보임)·가까워짐을 센다."""
+        if not self.in_m7:
+            return
+        hits = [d for d in dets if d.get('cls') in self.p.off_sign_classes
+                and float(d.get('conf', 0.0)) >= self.p.off_sign_conf]
+        seen = bool(hits)
+        self.sign_buf.append(seen)
+        if not self.sign_seen and sum(self.sign_buf) >= self.p.off_sign_need:
+            self.sign_seen = True
+            self.events.append('갈림길 표지 확인 (끄기 준비)')
+        if self.sign_seen:
+            self.sign_lost = 0 if seen else self.sign_lost + 1
+        if self.p.off_sign_near_h_px > 0 and any(
+                len(d.get('bbox') or []) == 4 and d['bbox'][3] >= self.p.off_sign_near_h_px for d in hits):
+            self.sign_near = True
+
+    def _end_lane(self):
+        return self.avoid_lane if self.avoid_lane is not None else self.avoid_target
+
+    def pop_report(self) -> Optional[dict]:
+        r, self.report = self.report, None
+        return r
+
     def on_avoid_done(self, done: bool) -> None:
         if done and self.phase in ('armed', 'running'):
+            self.off_by = 'avoid_done'
             self.phase = 'done'
+            self.report = exit_report(self._end_lane(), 'avoid_done')
             self.exit_fork = lane_to_fork(self.avoid_target)
             self.events.append(f'회피 완료 (마지막 차로 {self.avoid_target} -> {self.exit_fork})')
 
@@ -130,6 +213,7 @@ class M7Link:
                 out.append(('disable',))
                 self.events.append('FSM이 M7을 벗어남 -> 회피 중단')
                 self.phase = 'aborted'
+                self.report = exit_report(self._end_lane(), 'forced')
             self.in_m7 = False
             return out
 
@@ -143,6 +227,11 @@ class M7Link:
             self.fork_sent = None
             self.claimed = self.hold = False
             self.active_t = self.release_t = None
+            self.sign_buf.clear()
+            self.sign_seen = self.sign_near = False
+            self.sign_lost = 0
+            self.off_by = None
+            self.trigger = None
 
         fork = mission.get('fork_choice')
         if fork in ('A', 'B') and fork != self.fork_sent:
@@ -159,6 +248,28 @@ class M7Link:
         pos = self._front_from_start(s, dist)   # 앞바퀴 - 시작선 (mm, +면 지남)
         self.pos = pos
 
+        if self.phase == 'running' and self.p.off_mode == 'sign':
+            why = self._sign_off(pos)
+            if why:
+                self.phase = 'done'
+                self.off_by = 'sign'
+                lane_now = self._end_lane()
+                self.exit_fork = lane_to_fork(lane_now)
+                self.report = exit_report(lane_now, 'sign')
+                out.append(('disable',))
+                self.events.append(f'회피 끔: {why} (시작선 {pos:+.0f} mm, 차로 {lane_now} -> {self.exit_fork})')
+                return out
+
+        if self.phase == 'idle' and self.p.enable_mode == 'obstacle':
+            if pos is None or pos < self.p.trigger_gate_mm:
+                return out
+            near = self.front_mm is not None and self.front_mm <= self.p.trigger_front_mm
+            if not near and pos < self.p.trigger_fallback_mm:
+                return out
+            self.trigger = 'obstacle' if near else 'fallback'
+            why = f'앞 장애물 {self.front_mm:.0f} mm' if near else '앞 차로에 장애물이 없어 예비 위치'
+            return out + self._arm(t, pos, why)
+
         if self.phase == 'idle':
             if pos is None or pos < self.p.enable_at_mm:
                 return out
@@ -167,14 +278,8 @@ class M7Link:
                     return out
                 self.heading_forced = True
                 self.events.append('차선 방향이 계속 틀어져 있어 그대로 켬 (정렬 보정에 맡김)')
-            if self.fork_sent is None and self.p.fork_fallback in ('A', 'B'):
-                out.append(('fork', self.p.fork_fallback))
-                self.fork_sent = self.p.fork_fallback
-            self.section_m = self._section(pos)
-            self.phase = 'armed'
-            self.enable_t = t
-            out.append(('enable', self.section_m))
-            self.events.append(f'회피 켬: {self.how}, 시작선 {pos:+.0f} mm, section {self.section_m:.2f} m')
+            self.trigger = 'line'
+            return out + self._arm(t, pos, '시작선')
         elif self.phase == 'armed' and not (self.avoid_active or self.avoid_running):
             if t - self.enable_t >= self.p.retry_sec:
                 # 회피 노드가 아직 안 받았다 (센서 준비 전 등). 지금 위치로 다시 계산해 보냄
@@ -185,6 +290,30 @@ class M7Link:
         return out
 
     # --- 내부 -------------------------------------------------------------------
+    def _arm(self, t: float, pos: float, why: str) -> List[Tuple]:
+        out: List[Tuple] = []
+        if self.fork_sent is None and self.p.fork_fallback in ('A', 'B'):
+            out.append(('fork', self.p.fork_fallback))
+            self.fork_sent = self.p.fork_fallback
+        self.section_m = self._section(pos)
+        self.phase = 'armed'
+        self.enable_t = t
+        out.append(('enable', self.section_m))
+        self.events.append(f'회피 켬 ({why}): {self.trigger}, 위치 기준 {self.how}, 시작선 {pos:+.0f} mm, section {self.section_m:.2f} m')
+        return out
+
+    def _sign_off(self, pos: Optional[float]) -> Optional[str]:
+        """표지로 끌 때인지. 안전 조건: 섬 앞 off_gate_mm 안 + 바깥 차로(A/B)."""
+        if not (self.sign_seen and (self.sign_near or self.sign_lost >= self.p.off_sign_lost_frames)):
+            return None
+        island = self.p.island_s_mm - self.p.start_s_mm
+        if pos is None or pos < island - self.p.off_gate_mm:
+            return None
+        lane = self.avoid_lane if self.avoid_lane is not None else self.avoid_target
+        if lane in (None, 0):
+            return None                      # 아직 가운데 차로: 섬에 부딪히므로 끄지 않음
+        return '표지 가까움' if self.sign_near else '표지 지나감'
+
     def _check_hold(self, t: float) -> None:
         if self.hold or not self.claimed or self.phase != 'running':
             return
@@ -265,5 +394,9 @@ class M7Link:
                 'm7_section_m': self.section_m,
                 'm7_how': self.how,
                 'm7_pos_mm': None if self.pos is None else round(self.pos),
+                'm7_front_mm': None if self.front_mm is None else round(self.front_mm),
+                'm7_sign': 'near' if self.sign_near else (f'lost{self.sign_lost}' if self.sign_seen else None),
+                'm7_off_by': self.off_by,
+                'm7_trigger': self.trigger,
                 'm7_line_d_mm': None if self.line is None else round(self.line[0]),
                 'm7_heading_forced': self.heading_forced}

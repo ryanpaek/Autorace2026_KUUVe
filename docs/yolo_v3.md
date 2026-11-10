@@ -39,7 +39,7 @@
 | 7 | sign_slow | slow |
 | 8 | sign_parking | parking |
 
-- `parking`은 발행만 된다. 현재 주차 미션은 이 값을 시작 조건으로 쓰지 않고, `parking_node`도 기본적으로 꺼져 있다.
+- `parking` 검출과 별도로 `class_command_node`가 `START_PARKING` 요청을 발행한다. mission_node가 이 요청을 받아 주차 상태에 한 번 진입하며 반복 요청으로 재시작하지 않는다. `parking_node`는 기본적으로 비활성이다. 연결 규약은 [yolo_commands.md](yolo_commands.md)를 참고한다.
 
 ## 실행
 v3는 `params.yaml`을 읽는 팀 launch로 실행한다. `autorace.launch.py`는 `detector_node`에 `params`를 넘기고, `use_detector`의 기본값은 true다.
@@ -56,8 +56,8 @@ ros2 run autorace_perception detector_node --ros-args \
 ```
 
 > 주의할 점
-> - `detector_node.py`의 `DEFAULT_CLASSES`는 v3와 순서가 달라서 바꾸지 않고 그대로 두었다. params 없이 실행하면 ID 3~7이 잘못 해석된다. 예를 들어 ID 7은 `slow`가 아니라 `bump`로 나온다.
-> - 원본 `.pt`를 `model_path`에 넣으면 모델에 들어 있는 학습 라벨(`sign_slow` 등)이 그대로 발행되어 미션 코드와 맞지 않는다. 실행에는 ONNX를 쓴다.
+> - `detector_node.py`의 기본 클래스 순서와 기본 입력 크기는 v3에 맞췄다. 장비별 카메라·모델 경로·스레드 설정을 적용하려면 계속 params 파일을 전달한다.
+> - `.pt` 백엔드의 v3 학습 라벨(`sign_slow` 등)도 팀 라벨(`slow` 등)로 정규화한다. LIMO 배포 기준은 ONNX다.
 > - `model_path`는 기존 `seg_model_path`와 같은 `/home/wego/autorace_ws`를 기준으로 잡았다. **팀 LIMO의 실제 워크스페이스 경로가 맞는지는 확인이 필요하다.**
 
 ## ONNX 다시 내보내기
@@ -75,6 +75,6 @@ YOLO("autorace_yolo_v3_best.pt").export(format="onnx", imgsz=640, opset=12,
 
 ## LIMO 실차에서 확인할 것
 1. 모델이 로드되는지 확인한다. 정지 상태에서 `ros2 topic echo /perception/detections`를 띄우고, 서행 표지가 `slow`로, 좌·우 표지가 `fork_a`/`fork_b`로 나오는지 본다.
-2. `ros2 topic hz /perception/detections`와 메시지의 `infer_ms`를 본다. `infer_hz: 10`을 맞추려면 프레임당 100ms 안에 끝나야 한다. 참고로 2코어 클라우드 CPU에서 재 보니 약 81ms였다. 이 값은 LIMO 수치가 아니다.
+2. `ros2 topic hz /perception/detections`와 메시지의 `infer_ms`를 본다. 현재 설정은 `infer_hz: 5.0`, `ort_threads: 2`다. 과거 2코어 클라우드 CPU에서 약 81ms였다는 기록은 LIMO 수치가 아니다.
 3. 검출 임계값과 FSM `det_conf`는 둘 다 0.5다. 0.7로 돌린 영상 시험과 결과가 다를 수 있다.
 4. 주행이 허용된 조건에서 서행, 신호등, 갈림길 반응을 확인한다. 느리면 해상도나 주기를 조정한다. 해상도를 바꾸면 ONNX도 같은 크기로 다시 내보낸다.

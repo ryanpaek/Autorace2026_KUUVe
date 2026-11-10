@@ -112,6 +112,21 @@ obstacle_node:
     m7_max_heading_deg: 3.0                # 차선 방향이 이보다 틀어져 있으면 켜기를 미룸
     m7_heading_wait_mm: 300.0              # 그래도 시작선 + 이만큼에선 켬
     m7_fork_fallback: auto                 # 켤 때까지 갈림길 표지를 못 읽으면: auto | A | B
+    # M7 켜기 (11/09): 횡단보도를 벗어나면 라이다로 앞 차로 감시 -> 장애물이 가까워지면 켬. 예전 방식: line
+    m7_enable_mode: obstacle               # obstacle | line(시작선 흰 선)
+    m7_trigger_front_mm: 1000.0            # 라이다 -> 앞 차로 장애물이 이 안이면 켬. 0.7 m는 너무 가까움(시뮬레이션: 멈춤·차선 이탈)
+    m7_trigger_half_width_mm: 200.0        # 앞 차로 폭 (차 중심 ±). 옆 차로 LIMO는 안 들어옴
+    m7_trigger_gate_mm: -250.0             # 시작선 기준 이 위치부터 (코너 안에서 켜지지 않게, 코너 끝 = -288)
+    m7_trigger_fallback_mm: 1000.0         # 앞 차로에 장애물이 끝까지 없으면 시작선 + 이만큼에서 켬
+    # M7 끄기 (11/09): YOLO 갈림길 표지를 확인한 뒤 지나가면 끔. 예전 방식만: none
+    m7_off_mode: sign                      # sign | none (none이어도 회피 노드 자체 종료·FSM 강제 종료는 그대로)
+    m7_off_sign_classes: [fork_a, fork_b]
+    m7_off_sign_conf: 0.5
+    m7_off_sign_window: 5
+    m7_off_sign_need: 3                    # 최근 5프레임 중 3번 보이면 '표지 확인'
+    m7_off_sign_lost_frames: 5             # 확인한 뒤 5프레임 연속 안 보이면 '지나감' -> 끔
+    m7_off_sign_near_h_px: 0.0             # 표지 상자 높이가 이 이상이면 바로 끔 (0 = 안 씀, 실차로 정할 것)
+    m7_off_gate_mm: 1500.0                 # 섬 앞 끝 1.5 m 안에서만 (멀리서 LIMO에 가려 사라지는 오판 방지)
 
 detector_node:
   ros__parameters:
@@ -123,6 +138,27 @@ detector_node:
     # 11/09: 스레드 제한 없이 10Hz로 돌리면 실제 1.8Hz + 차선 노드 절반 속도. 2스레드·5Hz로 제한
     infer_hz: 5.0
     ort_threads: 2
+
+class_command_node:
+  ros__parameters:
+    detections_topic: /perception/detections
+    commands_topic: /perception/commands
+    mission_topic: /mission/state          # state + route.last_fix/fixes 재사용
+    context_timeout_sec: 1.0               # 구간/바닥 확인 유효 시간 (수신 후 단조 시계)
+    conf_threshold: 0.5
+    vote_window: 10                        # 최근 새 검출 프레임 10개
+    vote_need: 7                           # 그중 7개 이상 검출 시 해당 명령 발행
+    yellow_action: none                    # none: 명령 없음, pause: 정지선 앞 정지 요청
+    # 원본 영상 bbox 높이(px). 0=크기 필터 끔. 현장 시험 후 클래스별 조정.
+    min_bbox_height_px.red: 0.0
+    min_bbox_height_px.yellow: 0.0
+    min_bbox_height_px.green: 0.0
+    min_bbox_height_px.fork_a: 0.0
+    min_bbox_height_px.fork_b: 0.0
+    min_bbox_height_px.pedestrian: 0.0
+    min_bbox_height_px.bump: 0.0
+    min_bbox_height_px.slow: 0.0
+    min_bbox_height_px.parking: 0.0
 
 parking_node:
   ros__parameters:

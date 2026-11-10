@@ -137,6 +137,7 @@ class Inputs:
     obstacle: dict = field(default_factory=dict)  # /obstacle/state
     parking: dict = field(default_factory=dict)   # /parking/state
     start: bool = False
+    confirmed_classes: Optional[dict] = None   # 발행부에서 투표를 통과한 지속 요청. None=기존 원시 검출 경로
     route_s: Optional[float] = None            # 도면 경로상 위치 (route.RouteTracker). 없으면 거리 기준
     tilt_rate: Optional[float] = None          # 지난 틱 이후 IMU 앞뒤·좌우 회전 속도 최대값 (rad/s). 방지턱 감지
 
@@ -274,6 +275,8 @@ class MissionFSM:
 
     def _vote(self, inp: Inputs, *classes: str) -> bool:
         """classes 중 하나라도 다수결을 넘으면 True. 투표는 새 인식 프레임에서만."""
+        if inp.confirmed_classes is not None:
+            return any(c in inp.confirmed_classes for c in classes)
         hit = False
         for c in classes:
             v = self.votes.setdefault(c, Vote(self.p['vote_window'], self.p['vote_need']))
@@ -378,7 +381,8 @@ class MissionFSM:
     def _s_M5_BUMP(self, inp):
         """서행 표지(또는 방지턱 표지)를 보면 bump_slow_mm 동안 서행."""
         if self.sub == '':
-            near = self._past(inp, 'm5_slow_line', -self.p['route_slow_before_mm'])
+            near = (self._past(inp, 'm5_slow_line', -self.p['route_slow_before_mm'])
+                    if inp.confirmed_classes is None else False)
             if self._vote(inp, 'slow', 'bump') or near:
                 self._sub('slow', inp)
             else:
@@ -573,6 +577,11 @@ class MissionFSM:
         p = self.p
         red = self._vote(inp, 'red', 'yellow')
         green = self._vote(inp, 'green')
+        if inp.confirmed_classes is not None:
+            if red and self.sub not in ('approach', 'stopped'):
+                self._arm_stop(inp, 'm1_stop_line')
+            elif green and not red and self.sub in ('', 'approach'):
+                self._sub('go', inp)
         if self.sub == '':
             if red or green or self._stop_near(inp, 'm1_stop_line'):
                 self._arm_stop(inp, 'm1_stop_line')
@@ -597,6 +606,10 @@ class MissionFSM:
 
     def _s_M4_PARKING(self, inp):
         """주차는 parking 노드가 맡는다. 끝나면 /parking/state에 done=true."""
+        if inp.confirmed_classes is not None and self.sub == '':
+            if not self._vote(inp, 'parking'):
+                return Command('lane', self._lane(self.p['approach_speed']))
+            self._sub('parking', inp)
         if inp.parking.get('done', False):
             self._next(inp, 'parked')
             return Command('stop', self._lane(0.0))
