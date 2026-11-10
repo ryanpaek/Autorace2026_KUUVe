@@ -222,3 +222,43 @@ def test_rollback_at_most_0p3m():
     finally:
         sc.SimCar.step = orig
     assert back['d'] <= p.recover_max * (p.rollback_max_dist + 0.05)
+
+
+# ---------------------------------------------------------------- 11/10 밤 2: 1->2차선 중 3차선 장애물
+def _diag(y=0.10, deg=-40.0, band=True):
+    pl = running(y, math.radians(deg))
+    pl.target = 0                                                  # 1차선에서 2차선으로 들어오는 중
+    pl.p.emerg_lane_band = band
+    return pl
+
+
+def test_lane3_points_ignored_for_emergency_while_moving_1_to_2():
+    """오른쪽으로 비스듬히(-40°) 2차선에 들어올 때 범퍼 앞 박스에 3차선 장애물 점이 들어옴 -> 예전엔 비상, 이제 무시."""
+    pts = [(0.45, -0.10), (0.46, -0.11), (0.47, -0.10)]            # 지도 y 약 -0.32 (3차선)
+    old = _diag(band=False)
+    old.update_scan(pts)
+    assert old.emergency
+    new = _diag()
+    new.update_scan(pts)
+    assert not new.emergency
+
+
+def test_points_in_target_lane_still_emergency():
+    pts = [(0.30, 0.0), (0.31, 0.01), (0.32, 0.0)]                 # 지도 y 약 -0.10 (2차선, 가려는 차로)
+    pl = _diag()
+    pl.update_scan(pts)
+    assert pl.emergency
+
+
+def test_sharper_steering_after_reverse_until_new_lane():
+    pl = running(0.45)                                              # 목표 차로까지 7 cm (최대 조향에 안 걸리게)
+    pl.sharp = True
+    pl.target = 1
+    w_sharp = pl.control(0.2, None, False)
+    pl.sharp = False
+    w_norm = pl.control(0.2, None, False)
+    assert w_sharp > w_norm > 0                                     # 후진 뒤엔 더 크게 꺾음
+    pl.sharp = True
+    pl.pose.y = 0.52                                                # 새 차로 도착
+    pl.step(10.0)
+    assert pl.sharp is False
