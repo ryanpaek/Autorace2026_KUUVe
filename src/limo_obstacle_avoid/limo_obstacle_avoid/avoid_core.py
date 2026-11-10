@@ -72,6 +72,7 @@ class AvoidParams:
     merge_dist: float = 0.20          # 같은 장애물로 합치는 거리
     max_obs_width: float = 0.45       # 장애물 하나의 최대 폭 (LIMO 0.22)
     max_obs_len: float = 0.70         # 한 번에 본 덩어리가 앞뒤로 이보다 길면 벽·트랙 테두리로 보고 버림 (LIMO 0.32)
+    min_obs_size: float = 0.08        # 덩어리 가로·세로 중 긴 쪽이 이보다 작으면 버림 (기둥·다리. 리모 면 0.22)
     obs_min_len: float = 0.33         # 앞면만 보여도 이 길이만큼 차가 있다고 가정 (LIMO 길이)
     confirm_hits: int = 3             # 이 횟수 이상 보여야 진짜 장애물로 인정
     # ── 판단 ──
@@ -105,8 +106,16 @@ class AvoidParams:
     # ── 카메라 차선 보정 (팀 lane_node의 /lane/status 를 그대로 받아 옆 위치·방향을 맞춤) ──
     #   차선 코드를 복사하지 않고 같은 노드의 결과를 쓰므로 차선 주행과 항상 같은 기준
     lane_fix: bool = True
-    lane_fix_gain: float = 0.15       # 한 번에 옆 오차의 이만큼 반영 (차선 노드 약 20Hz)
-    lane_fix_heading_gain: float = 0.1
+    lane_fix_gain: float = 0.30       # 한 번에 옆 오차의 이만큼 반영 (차선 노드 약 20Hz). 11/10 0.15 -> 0.30
+    lane_fix_heading_gain: float = 0.2   # 11/10 0.1 -> 0.2
+    # 차로 번호: 차선 노드가 선 종류로 본 3차선 번호(lane_id)가 연속 lane_id_need/lane_id_window번 같고
+    #   지금 추정 차로와 다르면 옆 위치를 그 차로로 바로 옮긴다 (시작 위치·방향 오차로 차로를 잘못 아는 것 방지)
+    lane_id_fix: bool = True
+    lane_id_window: int = 7
+    lane_id_need: int = 5
+    # 차로 안에서 똑바로 갈 때 조향 = (1-a) x 회피 pure pursuit + a x 차선 노드 곡률 (양쪽 선 보임 + 같은 차로일 때만)
+    lane_keep_blend: float = 0.5
+    lane_fresh_sec: float = 0.3
     lane_fix_gate: float = 0.15       # 지금 추정과 이만큼 넘게 다르면 다른 차로를 본 것 → 안 씀 [m]
     lane_fix_max_deg: float = 10.0    # 차선 방향이 이보다 틀어져 보이면 안 씀 (차로 변경 중·3차선 입구 사선)
     lane_row: float = 0.55            # 차선 노드 offset_mm 을 재는 행 (기준점 앞 m)
@@ -117,6 +126,12 @@ class AvoidParams:
     recover_speed: float = 0.10       # 후진 속도 [m/s]
     recover_time: float = 4.0         # 이 시간 안에 못 끝내도 멈추고 다시 계획 [s]
     recover_max: int = 3              # 최대 횟수. 넘으면 예전처럼 정지 유지
+    # 온 길 되돌아가기(11/10): 막히면 지나온 길(trail)을 그대로 후진하면서, 갈 수 있는 차로가 생기는 순간 멈추고 그리로 간다
+    recover_mode: str = 'trail'       # 'trail' | 'swing'(예전: 25cm 후진하며 크게 꺾기)
+    trail_step: float = 0.05          # 지나온 길 점 간격 [m]
+    rollback_lookahead: float = 0.30  # 후진할 때 따라갈 뒤쪽 점 거리 [m]
+    rollback_max_dist: float = 1.50   # 한 번 되돌아갈 최대 거리 [m]
+    rollback_time: float = 15.0       # 한 번 되돌아가기 최대 시간 [s]
 
 
 # ──────────────────────────────────────────────────────────────
@@ -212,9 +227,17 @@ class AvoidPlanner:
         self._given_up_for = None
         self.stuck_since = None      # 막혀서 서 있기 시작한 시각
         self.rec = None              # 탈출 중이면 {'t0', 'x0', 'y0', 'side'}
+        self.rb = None               # 되돌아가기 중이면 {'t0', 'x0', 'y0', 'dist', 'blocked'}
         self.rec_n = 0               # 탈출 횟수
         self.lane_fix_n = 0          # 카메라 차선으로 보정한 횟수 (status)
         self.lane_fix_dy = 0.0       # 마지막 보정량 [m]
+        self.trail = []              # 지나온 길 [(x, y)] (되돌아가기)
+        self.lane_ids = []           # 차선 노드 차로 번호 기록
+        self.lane_id = None          # 확정된 카메라 차로 번호
+        self.lane_id_fix_n = 0
+        self.lane_last = None        # 마지막 /lane/status
+        self.lane_t = None
+        self.rollback_m = 0.0
 
     def start(self, ox, oy, yaw, t=0.0):
         self.reset()
@@ -259,7 +282,9 @@ class AvoidPlanner:
             if len(cur) >= p.cluster_min_pts:
                 xs = [q[0] for q in cur]
                 ys = [q[1] for q in cur]
-                if max(xs) - min(xs) <= p.max_obs_len:      # 길게 이어진 점들(옆 벽) 제외 (11/10 실차)
+                lx, wy = max(xs) - min(xs), max(ys) - min(ys)
+                # 너무 크면 벽·테두리(길이 max_obs_len, 폭 max_obs_width 초과), 너무 작으면 기둥·다리 -> 버림 (11/10)
+                if lx <= p.max_obs_len and wy <= p.max_obs_width and max(lx, wy) >= p.min_obs_size:
                     clusters.append((min(xs), max(xs), min(ys), max(ys)))
             cur.clear()
 
@@ -342,6 +367,7 @@ class AvoidPlanner:
         P.x, P.y = c * P.x - s * P.y, s * P.x + c * P.y + t
         P.psi = wrap(P.psi + d)
         P.yaw0 -= d                      # 이후 odom/IMU 갱신도 같은 좌표로 이어지게
+        self.trail = [(c * tx - s * ty, s * tx + c * ty + t) for tx, ty in self.trail]
         for o in self.obs:               # 장애물은 중심만 옮김 (크기는 그대로 → 반복 회전에도 안 커짐)
             cx, cy = 0.5 * (o.xmin + o.xmax), 0.5 * (o.ymin + o.ymax)
             nx, ny = c * cx - s * cy, s * cx + c * cy + t
@@ -472,7 +498,7 @@ class AvoidPlanner:
 
     # ---------- 한 주기 ----------
     # ---------- 카메라 차선 보정 ----------
-    def lane_fix(self, lane):
+    def lane_fix(self, lane, t=None):
         """팀 lane_node 의 /lane/status (dict) 로 옆 위치·방향 보정. 쓰면 True.
 
         offset_mm  : 기준점 앞 lane_row 행에서 차로 중심의 횡위치 (왼쪽 +, 차 기준)
@@ -480,7 +506,11 @@ class AvoidPlanner:
                      y_car = -off*cos(h) + row*sin(h),  차의 방향(차로 기준) = -h
         같은 차로를 봤다고 확신할 때만 쓴다: 양쪽 선(BOTH), 방향 작음, 지금 추정과 가까움."""
         p = self.p
-        if not p.lane_fix or self.state != 'RUN' or not lane:
+        if self.state != 'RUN' or not lane:
+            return False
+        self.lane_last, self.lane_t = lane, t
+        self._lane_id_fix(lane)
+        if not p.lane_fix:
             return False
         off, h = lane.get('offset_mm'), lane.get('heading_rad')
         if lane.get('status') != 'BOTH' or lane.get('low_conf') or off is None or h is None:
@@ -500,6 +530,85 @@ class AvoidPlanner:
         self.lane_fix_n += 1
         self.lane_fix_dy = dy
         return True
+
+    def _lane_id_fix(self, lane):
+        """차선 노드의 3차선 번호가 여러 번 같게 나오면, 지금 추정 차로가 다를 때 옆 위치를 그 차로로 옮긴다."""
+        p = self.p
+        lid = lane.get('lane_id')
+        self.lane_ids.append(lid if lid in self.lanes else None)
+        self.lane_ids = self.lane_ids[-p.lane_id_window:]
+        best = None
+        for k in self.lanes:
+            if self.lane_ids.count(k) >= p.lane_id_need:
+                best = k
+        self.lane_id = best
+        if not p.lane_id_fix or best is None or self.rb is not None:
+            return
+        now = self.nearest_lane(self.pose.y)
+        if best == now or self.target != now:          # 같은 차로 / 차로 바꾸는 중이면 안 건드림
+            return
+        h = lane.get('heading_rad')
+        off = lane.get('offset_mm')
+        if h is None or off is None or abs(math.degrees(float(h))) > p.lane_fix_max_deg:
+            return
+        off = float(off) / 1000.0
+        y_in_lane = -off * math.cos(float(h)) + p.lane_row * math.sin(float(h))
+        dy = self.center(best) + y_in_lane - self.pose.y
+        self._apply_transform(0.0, dy)
+        self.target = best
+        self.lane_id_fix_n += 1
+        self.lane_ids = []
+        self.events.append((self.pose.x, f'카메라 선 종류로 차로 확인: {lane_name(now)} → {lane_name(best)} (옆 {dy * 100:+.0f}cm)'))
+
+    # ---------- 온 길 되돌아가기 ----------
+    def _record_trail(self):
+        x, y = self.pose.x, self.pose.y
+        if not self.trail or math.hypot(x - self.trail[-1][0], y - self.trail[-1][1]) >= self.p.trail_step:
+            self.trail.append((x, y))
+            if len(self.trail) > 400:
+                self.trail = self.trail[-400:]
+
+    def _rollback_step(self, t):
+        """지나온 길을 따라 후진. 갈 차로가 생기면 그 차로로 정하고 끝(None). 너무 멀리·오래면 끝."""
+        p, rb = self.p, self.rb
+        x, y, psi = self.pose.x, self.pose.y, self.pose.psi
+        rb['dist'] = max(rb['dist'], math.hypot(x - rb['x0'], y - rb['y0']))
+        self.rollback_m = rb['dist']
+        obs = self.obstacles(True)
+        cur = self.nearest_lane(y)
+        nxt = self.choose(cur, obs)
+        if nxt is None and self.free_ahead(cur, obs) >= p.trigger_dist and cur != rb['blocked']:
+            nxt = cur                                  # 지금 차로 앞이 충분히 비었으면 그대로
+        if nxt is not None and nxt != cur:
+            # 옆 차로로 틀 공간이 생길 때까지는 더 물러난다 (차체가 지금 차로 장애물 옆을 벗어나는 데 필요한 앞 거리)
+            need = shift_distance(p, nxt - cur)[0] + 0.05
+            if self.free_ahead(cur, obs) < need:
+                nxt = None
+        if nxt is not None and rb['dist'] >= 0.05:
+            self.events.append((x, f'되돌아가기 {rb["dist"]:.2f}m → 갈 길 찾음: {lane_name(nxt)}'))
+            self.target = nxt
+            self.last_switch = t
+            self.rb = None
+            self.stuck_since = None
+            return None
+        while len(self.trail) > 1 and math.hypot(self.trail[-1][0] - x, self.trail[-1][1] - y) < p.rollback_lookahead:
+            self.trail.pop()
+        if (rb['dist'] >= p.rollback_max_dist or t - rb['t0'] >= p.rollback_time or not self.trail):
+            self.events.append((x, f'되돌아가기 끝 ({rb["dist"]:.2f}m, 갈 길 없음) → 다시 계획'))
+            self.rb = None
+            self.stuck_since = None
+            self.last_switch = t - p.hold_time
+            return None
+        tx, ty = self.trail[-1]
+        dx, dy = tx - x, ty - y
+        xr = dx * math.cos(psi) + dy * math.sin(psi)
+        yr = -dx * math.sin(psi) + dy * math.cos(psi)
+        d2 = xr * xr + yr * yr
+        k = 0.0 if d2 < 1e-6 else 2.0 * yr / d2
+        kmax = 1.0 / p.min_turn_radius
+        k = max(-kmax, min(kmax, k))
+        v = -p.recover_speed
+        return v, v * k
 
     # ---------- 멈춤 탈출 ----------
     def _recover_side(self, obs):
@@ -548,6 +657,11 @@ class AvoidPlanner:
             out = self._recover_step(t)
             if out is not None:
                 return out
+        if self.rb is not None:
+            out = self._rollback_step(t)
+            if out is not None:
+                return out
+        self._record_trail()
         x, y = self.pose.x, self.pose.y
 
         obs = self.obstacles(True)
@@ -607,6 +721,16 @@ class AvoidPlanner:
             # 서 있으면 상황이 안 바뀐다 → 잠시 뒤 후진하며 크게 꺾어 다시 잡기 (횟수 제한)
             if self.stuck_since is None:
                 self.stuck_since = t
+            elif (p.recover and p.recover_mode == 'trail' and self.rec_n < p.recover_max
+                  and t - self.stuck_since >= p.recover_after and len(self.trail) > 1):
+                self.rb = {'t0': t, 'x0': x, 'y0': y, 'dist': 0.0, 'blocked': self.target}
+                self.rec_n += 1
+                why = '앞 비상' if self.emergency else '갈 차선 막힘'
+                self.events.append((x, f'멈춤 {t - self.stuck_since:.1f}s ({why}) → 온 길 되돌아가기 '
+                                       f'{self.rec_n}/{p.recover_max} (최대 {p.rollback_max_dist:.1f}m, 갈 길 생기면 멈춤)'))
+                out = self._rollback_step(t)
+                if out is not None:
+                    return out
             elif p.recover and self.rec_n < p.recover_max and t - self.stuck_since >= p.recover_after:
                 side = self._recover_side(obs)
                 self.rec = {'t0': t, 'x0': x, 'y0': y, 'side': side}
@@ -625,10 +749,10 @@ class AvoidPlanner:
             self.events.append((x, f'완료 (차선 {self.target:+d})'))
             return 0.0, 0.0
 
-        return v, self.control(v)
+        return v, self.control(v, t, in_lane)
 
     # ---------- pure pursuit (직선 y = 목표차선중심 따라가기) ----------
-    def control(self, v):
+    def control(self, v, t=None, in_lane=False):
         p = self.p
         y, psi = self.pose.y, self.pose.psi
         Ld = p.lookahead
@@ -642,6 +766,16 @@ class AvoidPlanner:
         mh = math.radians(p.max_heading_deg)
         if (psi > mh and k > 0) or (psi < -mh and k < 0):
             k = 0.0
+        # 차로 안에서 똑바로 갈 때는 팀 차선 노드 곡률을 섞는다 (양쪽 선 보임, 같은 차로, 최근 값)
+        ln = self.lane_last
+        self.blend_used = False
+        if (p.lane_keep_blend > 0 and in_lane and ln and t is not None and self.lane_t is not None
+                and t - self.lane_t <= p.lane_fresh_sec and ln.get('status') == 'BOTH' and not ln.get('low_conf')
+                and ln.get('kappa') is not None and self.target == self.nearest_lane(y)
+                and (self.lane_id is None or self.lane_id == self.target)):
+            a = p.lane_keep_blend
+            k = max(-kmax, min(kmax, (1.0 - a) * k + a * float(ln['kappa'])))
+            self.blend_used = True
         return v * k
 
     def status(self):
@@ -652,7 +786,10 @@ class AvoidPlanner:
             'target': self.target,
             'now_lane': self.nearest_lane(self.pose.y),
             'emergency': self.emergency, 'blocked': self.blocked,
-            'recovering': self.rec is not None, 'recover_n': self.rec_n,
+            'recovering': self.rec is not None or self.rb is not None, 'recover_n': self.rec_n,
+            'rollback': self.rb is not None, 'rollback_m': round(self.rollback_m, 2),
+            'cam_lane': self.lane_id, 'lane_id_fix_n': self.lane_id_fix_n,
+            'lane_blend': getattr(self, 'blend_used', False),
             'lane_fix_n': self.lane_fix_n, 'lane_fix_dy_cm': round(self.lane_fix_dy * 100, 1),
             'exit_pref': self.exit_pref,
             'n_obs': len([o for o in self.obs if o.hits >= self.p.confirm_hits]),

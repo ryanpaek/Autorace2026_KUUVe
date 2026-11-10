@@ -121,7 +121,7 @@ class AvoidNode(Node):
         if not self.active:
             return
         try:
-            self.pl.lane_fix(json.loads(m.data))
+            self.pl.lane_fix(json.loads(m.data), self.now())
         except (ValueError, TypeError, AttributeError):
             pass
 

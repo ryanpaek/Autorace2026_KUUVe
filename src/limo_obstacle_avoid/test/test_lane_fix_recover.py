@@ -80,3 +80,55 @@ def test_recover_side_toward_target_lane():
     pl = running(-0.04)
     pl.target = -1
     assert pl._recover_side(pl.obstacles(True)) == -1
+
+
+# ---------------------------------------------------------------- 11/10 추가
+def test_lane_id_moves_pose_to_camera_lane():
+    """가운데 차로라고 알고 시작했는데 카메라 선 종류가 계속 1차선(왼쪽 노란 실선) → 옆 위치를 1차선으로 옮김."""
+    pl = running(0.0)
+    for _ in range(4):
+        pl.lane_fix({**lane(0.0), 'lane_id': 1}, 0.0)
+    assert pl.nearest_lane(pl.pose.y) == 0                       # 아직 4번: 안 옮김
+    pl.lane_fix({**lane(0.0), 'lane_id': 1}, 0.0)
+    assert abs(pl.pose.y - 0.52) < 0.01 and pl.target == 1
+    assert pl.status()['lane_id_fix_n'] == 1
+
+
+def test_lane_id_ignored_while_changing_lane():
+    pl = running(0.0)
+    pl.target = -1                                               # 오른쪽으로 옮기는 중
+    for _ in range(8):
+        pl.lane_fix({**lane(0.0), 'lane_id': 1}, 0.0)
+    assert pl.lane_id_fix_n == 0
+
+
+def test_small_and_huge_clusters_ignored():
+    pl = running(0.0)
+    pole = [(1.0, 0.02 * i) for i in range(3)]                   # 4cm 기둥
+    cross_wall = [(1.5, -0.5 + 0.02 * i) for i in range(50)]      # 앞을 가로지르는 1m 벽
+    for _ in range(4):
+        pl.update_scan(pole + [None] + cross_wall)
+    assert not [o for o in pl.obs if not o.virtual]
+
+
+def test_lane_keep_blends_lane_node_kappa():
+    pl = running(0.0)
+    pl.lane_fix({**lane(0.0), 'kappa': 0.5}, 10.0)
+    w_blend = pl.control(0.2, 10.1, in_lane=True)
+    assert pl.blend_used and abs(w_blend - 0.2 * 0.25) < 1e-6    # 회피 곡률 0 + 차선 0.5 x 0.5
+    pl.control(0.2, 11.0, in_lane=True)                         # 차선 값이 오래됨 -> 안 섞음
+    assert not pl.blend_used
+
+
+def _run_layout(layout, **kw):
+    import stress_sim as ss
+    p = AvoidParams()
+    return ss.run(layout, p, 4.38, seed=1, **{**ss.CONDITIONS[0][1], **kw})
+
+
+def test_rollback_finds_other_lane():
+    """가운데·왼쪽이 붙어서 막혀 있으면 온 길로 물러났다가 비어 있는 오른쪽 차로로 간다."""
+    from limo_obstacle_avoid.avoid_core import AvoidParams as P
+    lx = P().lidar_x
+    r = _run_layout([(0.6 + lx, 0), (0.75 + lx, 1)])
+    assert r['done'] and not r['collided']
