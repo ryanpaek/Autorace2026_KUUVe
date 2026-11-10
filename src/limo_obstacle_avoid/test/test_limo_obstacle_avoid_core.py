@@ -156,3 +156,18 @@ def test_two_lane_exit_in_simulation():
     assert r['ok'] and not r['collided'], r
     r = fork_sim.run(lay, AvoidParams(), 4.38, 'B', 1.0)            # 섬 1m 전에야 앎 → 불가, 충돌·멈춤 없이 통과
     assert not r['right_side'] and not r['collided'] and r['done']
+
+
+def test_side_wall_is_not_an_obstacle():
+    """왼쪽 차로 바깥에 붙은 벽(앞뒤로 길게 이어진 점)은 장애물로 안 잡고, 리모(0.32m)는 잡는다 (11/10 실차: n_obs 12, 왼쪽 막힘)."""
+    p = AvoidParams()
+    p.use_island = False
+    pl = AvoidPlanner(p)
+    pl.start(0, 0, 0)
+    wall = [(0.3 + 0.02 * i, 0.72) for i in range(80)]            # 0.3~1.9 m 앞, 왼쪽 0.72 m에 이어진 벽
+    limo = [(1.0 + 0.02 * i, 0.0) for i in range(17)] + [(1.0, -0.1 + 0.02 * i) for i in range(11)]
+    for _ in range(5):
+        pl.update_scan(wall + [None] + limo)
+    real = [o for o in pl.obs if not o.virtual]
+    assert len(real) == 1 and abs(0.5 * (real[0].ymin + real[0].ymax)) < 0.15
+    assert pl.free_ahead(1, pl.obstacles()) > 2.0                 # 왼쪽 차로는 비어 있음
