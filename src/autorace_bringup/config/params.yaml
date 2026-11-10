@@ -76,6 +76,9 @@ mission_node:
     route_gate_mm: 250.0                   # 흰 선을 도면 선으로 인정하는 오차 (달린 거리만큼 넓어짐)
     route_gain: 0.6
     odom_scale: 1.0                        # TODO 실측: 직선 3m 주행 -> 실제 거리 / /odom 거리
+    route_signed_dist: true                # 후진 거리는 경로 위치에서 뺌. TODO 실측: 후진 때 odom twist.linear.x < 0 인지
+    route_lost_misses: 2                   # 도면 선을 연속 2개 못 보고 지나치면 길 잃음 -> FSM은 표지·카메라·거리로만 (0 = 끔)
+    route_anchor_max_mm: 3000.0            # 카메라로 확인한 미션 선으로 위치 다시 맞출 때 최대 허용 차이
 
 obstacle_node:
   ros__parameters:

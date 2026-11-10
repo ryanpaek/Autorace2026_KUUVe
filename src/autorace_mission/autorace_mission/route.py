@@ -158,7 +158,8 @@ class RouteTracker:
     def __init__(self, route: RouteMap, gate_mm: float = 250.0, gate_per_m: float = 60.0,
                  gate_max_mm: float = 800.0, max_range_mm: float = 900.0,
                  gain: float = 0.6, odom_scale: float = 1.0, ordered_gate_mm: float = 0.0,
-                 same_gate_mm: float = 200.0, crosswalk_gate_mm: float = 400.0):
+                 same_gate_mm: float = 200.0, crosswalk_gate_mm: float = 400.0,
+                 lost_misses: int = 0):
         self.route = route
         # 예측 위치와 도면 선이 gate 안이어야 같은 선으로 본다.
         # 마지막 보정 뒤 많이 달렸을수록 오도메트리 오차가 커지므로 m당 gate_per_m씩 넓힌다
@@ -178,6 +179,10 @@ class RouteTracker:
         # 글자가 정지선이 됐다 (11/09). 글자는 정지선보다 앞(가까운 쪽)에 있으므로 "도면 선이 본 선보다
         # 이만큼 넘게 뒤"인 짝은 버린다. 반대쪽(지그재그 odom 과대, 본 선이 예측보다 가까움)은 그대로 허용
         self.crosswalk_gate_mm = crosswalk_gate_mm
+        # 길 잃음 (11/10): 마지막으로 맞춘 선 뒤로 도면 선을 이만큼 연속으로 못 보고 지나치면 lost.
+        # lost면 mission_node가 FSM에 경로 위치를 안 준다 (표지·카메라 선·구간 거리로만 판단). 0이면 끔
+        self.lost_misses = int(lost_misses)
+        self.missed = 0                   # 마지막으로 맞춘 선 뒤로 못 보고 지나친 선 수
         self.last_idx: Optional[int] = None
         self.s = 0.0
         self._dist_ref = None
@@ -192,6 +197,23 @@ class RouteTracker:
         # 출발 위치보다 앞(뒤쪽)에 있는 마지막 선 = 이미 지난 선
         passed = [i for i, m in enumerate(self.route.landmarks) if m['s'] < s - 50.0]
         self.last_idx = passed[-1] if passed else -1
+        self.missed = 0
+
+    @property
+    def lost(self) -> bool:
+        return self.lost_misses > 0 and self.missed >= self.lost_misses
+
+    def _count_missed(self) -> int:
+        """마지막으로 맞춘 선 다음부터, 지금 위치가 '선 + 게이트'를 넘은(= 보였어야 할) 선 수."""
+        lms = self.route.landmarks
+        i0 = (self.last_idx if self.last_idx is not None else -1) + 1
+        n = 0
+        for lm in lms[i0:]:
+            if lm['s'] + self.gate < self.s:
+                n += 1
+            else:
+                break
+        return n
 
     @property
     def gate(self) -> float:
@@ -207,6 +229,7 @@ class RouteTracker:
         self.s += step
         self._since_fix += abs(step)
         self._dist_ref = dist_mm
+        self.missed = self._count_missed()
         # 이 프레임의 선 중 도면 선과 가장 잘 맞는 것 하나만 쓴다.
         # (11/09: 가장 가까운 선부터 쓰면 정지선 앞 '천천히' 글자가 순서 짝짓기로 정지선 자리를 먼저 차지했다)
         best = None
@@ -231,6 +254,7 @@ class RouteTracker:
                 self._since_fix = 0.0      # 남은 오차가 작으면 게이트를 다시 좁힌다
             self.last_fix = {'name': lm['name'], 'err_mm': round(err), 'd_mm': round(d)}
             self.last_idx = self.route.landmarks.index(lm)
+            self.missed = self._count_missed()
         return self.s
 
     def match(self, s_line: float, is_xw: Optional[bool] = None) -> Optional[dict]:
@@ -249,9 +273,11 @@ class RouteTracker:
             i = self.last_idx
             if 0 <= i < len(lms) and abs(lms[i]['s'] - s_line) <= self.same_gate_mm and ok(lms[i]):
                 return lms[i]                       # 방금 맞춘 선을 다시 봄
-            for j in (i + 1, i + 2):                 # 다음 선 (하나 놓쳤으면 그다음)
+            # 다음 선 (하나 놓쳤으면 그다음). 11/10: 이미 못 보고 지나친 선(missed)이 있으면 그만큼 더 뒤까지 본다.
+            # 예전엔 i+1, i+2만 봐서 선 2개를 놓치면 다시는 못 맞췄다 (한 번 길을 잃으면 끝까지 틀림)
+            for j in range(i + 1, i + 3 + self.missed):
                 g = self.ordered_gate_mm
-                if j == i + 2 and 0 <= i + 1 < len(lms) and lms[i + 1]['s'] > s_line:
+                if j >= i + 2 and 0 <= j - 1 < len(lms) and lms[j - 1]['s'] > s_line:
                     # 건너뛸 선이 본 선보다 앞(아직 안 지남)이면 놓친 게 아니다 -> 일반 게이트로만
                     # (11/09: 정지선으로 못 맞춘 글자가 건너뛰기로 횡단보도 끝선이 됐다)
                     g = self.gate
@@ -282,6 +308,8 @@ class RouteTracker:
                           if self.last_idx is not None and self.last_idx >= 0 else None),
             'fixes': self.fixes,
             'last_fix': self.last_fix,
+            'missed': self.missed,
+            'lost': self.lost,
         }
 
 

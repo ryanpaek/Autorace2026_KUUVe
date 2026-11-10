@@ -243,7 +243,8 @@ class M7Link:
         self._check_hold(t)
 
         route = mission.get('route') or {}
-        s = route.get('s_mm')
+        # 11/10: mission_node가 '길 잃음(lost)'으로 표시하면 도면 위치를 안 쓴다 (카메라 선 / 진입 후 거리로)
+        s = None if route.get('lost') else route.get('s_mm')
         self._watch_line(lane, s, dist)
         pos = self._front_from_start(s, dist)   # 앞바퀴 - 시작선 (mm, +면 지남)
         self.pos = pos
