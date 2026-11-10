@@ -121,5 +121,6 @@ scp가 안 되면: 리모에서 `hostname -I`로 IP 확인 → 노트북에서 `
 ## 8. 시뮬레이션 (노트북·서버, ROS 없이)
 ```bash
 python3 tools/course_sim.py          # 출발~주차 상태 전환 6가지 상황
+python3 tools/parking_sim_plot.py out.png   # 주차만: 6가지 상황 궤적 그림
 python3 -m pytest -q src             # 전체 시험
 ```
