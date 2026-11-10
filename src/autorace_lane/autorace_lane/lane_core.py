@@ -154,6 +154,12 @@ class LaneParams:
 
     # 색 마스크 (OpenCV HSV: H 0~179). 트랙 실물 색을 보고 lane_color를 정할 것
     lane_color: str = 'both'          # 'white' | 'yellow' | 'both'
+    # 선 종류 판단 (M7 3차선 차로 번호). 점선 마디·간격은 실측 필요 — cov 값을 보고 line_solid_cov 조정
+    line_types: bool = True
+    line_type_range_mm: float = 900.0    # 가까운 이 거리 안만 봄
+    line_type_min_mm: float = 300.0      # 이만큼 이상 따라간 선만 판단
+    line_type_half_mm: float = 30.0      # 선 좌우 띠 반폭
+    line_solid_cov: float = 0.8          # 띠에 선이 있는 행 비율이 이보다 낮으면 점선
     white_v_min: int = 180
     white_s_max: int = 60
     yellow_h_min: int = 15
@@ -312,6 +318,12 @@ class LaneOutput:
     crosswalk_lines_mm: List[float] = field(default_factory=list)  # 그중 횡단보도 막대가 뒤따르는 선
     # 흰·노란 가로선 모두 (차 정면 기준). 주차 칸 끝 선(줄 사이 흰 선, 바깥 노란 테두리)용
     end_lines_mm: List[float] = field(default_factory=list)
+    # 양쪽 선 종류 (M7 3차선에서 몇 번 차로인지): {'color': 'yellow'|'white', 'dashed': bool, 'cov': 0~1}
+    line_left: Optional[dict] = None
+    line_right: Optional[dict] = None
+    # 3차선 차로 번호 (진행 방향 기준 +1 왼쪽/1차선, 0 가운데/2차선, -1 오른쪽/3차선). 모르면 None
+    #   왼쪽 노란 실선 + 오른쪽 흰 점선 = +1, 양쪽 흰 점선 = 0, 왼쪽 흰 점선 + 오른쪽 노란 실선 = -1
+    lane_id: Optional[int] = None
     mem_pts: int = 0                    # 기억 점 수 (차선 기억이 켜졌을 때)
     ff_kappa: Optional[float] = None    # 도면 곡률 (왼쪽 +, 1/m). 미리 넣기가 켜졌을 때
     lookahead_mm: Optional[float] = None
@@ -322,7 +334,7 @@ class LaneOutput:
             'mem_pts', 'ff_kappa', 'lookahead_mm',
             'kappa', 'speed_scale', 'status', 'source', 'offset_mm',
             'heading_rad', 'path_kappa', 'low_conf', 'stoplines_mm',
-            'crosswalk_lines_mm', 'end_lines_mm')}
+            'crosswalk_lines_mm', 'end_lines_mm', 'line_left', 'line_right', 'lane_id')}
         d['target_mm'] = list(self.target_mm) if self.target_mm else None
         cl = self.debug.get('centerline')
         d['model'] = ('circle' if cl.circle is not None else 'poly') if cl is not None else None
@@ -510,6 +522,61 @@ def track_line(bev: np.ndarray, x0: float, cfg: BevConfig,
                 break
             x += shift
     return out
+
+
+def classify_line(track: Optional[np.ndarray], lane_mask: np.ndarray, white_mask: Optional[np.ndarray],
+                  cfg: BevConfig, p: 'LaneParams') -> Optional[dict]:
+    """따라간 선(track)의 색(노랑/흰)과 실선/점선. 선 열을 행마다 보간해 좌우 ±line_type_half_mm 띠를 본다.
+
+    점선: 띠 안에 선 화소가 있는 행 비율(cov)이 line_solid_cov보다 낮음. 색: 선 화소 중 흰 마스크가 아닌 비율.
+    가까운 line_type_range_mm 안에서 line_type_min_mm 이상 따라갔을 때만 판단 (모르면 None)."""
+    if track is None or white_mask is None:
+        return None
+    ok = ~np.isnan(track[:, 0])
+    if ok.sum() < 2:
+        return None
+    h, w = lane_mask.shape[:2]
+    rows_t, cols_t = track[ok, 1], track[ok, 0]
+    r_lo = max(int(rows_t.min()), h - int(p.line_type_range_mm / cfg.mm_per_px_y))
+    r_hi = min(int(rows_t.max()), h - 1)
+    if (r_hi - r_lo) * cfg.mm_per_px_y < p.line_type_min_mm:
+        return None
+    order = np.argsort(rows_t)
+    rows = np.arange(r_lo, r_hi + 1)
+    cols = np.interp(rows, rows_t[order], cols_t[order])
+    hw = max(2, int(round(p.line_type_half_mm / cfg.mm_per_px_x)))
+    hit, n_lane, n_white = 0, 0, 0
+    for r, c in zip(rows, cols):
+        lo, hi = max(0, int(c) - hw), min(w, int(c) + hw + 1)
+        band = lane_mask[r, lo:hi] > 0
+        k = int(band.sum())
+        if k:
+            hit += 1
+            n_lane += k
+            n_white += int((white_mask[r, lo:hi][band] > 0).sum())
+    if n_lane == 0:
+        return None
+    cov = hit / float(len(rows))
+    yellow = 1.0 - n_white / float(n_lane)
+    return {'color': 'yellow' if yellow >= 0.5 else 'white', 'dashed': cov < p.line_solid_cov,
+            'cov': round(cov, 2), 'yellow': round(yellow, 2)}
+
+
+def lane_id_from_types(left: Optional[dict], right: Optional[dict]) -> Optional[int]:
+    """3차선에서 차로 번호 (+1 왼쪽 / 0 가운데 / -1 오른쪽). 규칙이 안 맞으면 None."""
+    if not left or not right:
+        return None
+    ly = left['color'] == 'yellow' and not left['dashed']
+    ry = right['color'] == 'yellow' and not right['dashed']
+    lw = left['color'] == 'white' and left['dashed']
+    rw = right['color'] == 'white' and right['dashed']
+    if ly and rw:
+        return 1
+    if lw and rw:
+        return 0
+    if lw and ry:
+        return -1
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1331,6 +1398,10 @@ class LaneFollower:
         left = track_line(bev_lane, det.left_x0, cfg, p) if det.left_x0 is not None else None
         right = track_line(bev_lane, det.right_x0, cfg, p) if det.right_x0 is not None else None
         out.debug['left'], out.debug['right'] = left, right
+        if p.line_types:
+            out.line_left = classify_line(left, raw_lane, bev_white, cfg, p)
+            out.line_right = classify_line(right, raw_lane, bev_white, cfg, p)
+            out.lane_id = lane_id_from_types(out.line_left, out.line_right) if det.status == 'BOTH' else None
         self.prev_line_masks = (self._line_mask(lab_full, left), self._line_mask(lab_full, right))
 
         fit_order = self.fit_order_override or (1 if self.mode == 'zigzag' else p.fit_order)

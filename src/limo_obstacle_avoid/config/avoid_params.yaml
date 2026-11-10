@@ -58,6 +58,7 @@
     merge_dist: 0.20
     max_obs_width: 0.45
     max_obs_len: 0.70        # 앞뒤로 이보다 긴 덩어리는 벽으로 보고 버림 (LIMO 0.32)
+    min_obs_size: 0.08       # 가로·세로 중 긴 쪽이 이보다 작으면 버림 (기둥·다리)
     obs_min_len: 0.33
     confirm_hits: 3
 
@@ -90,8 +91,13 @@
 
     # ── 카메라 차선 보정 (11/09): 팀 lane_node /lane/status 로 옆 위치·방향 보정 (차선 코드 복사 아님, 같은 결과 사용) ──
     lane_fix: true
-    lane_fix_gain: 0.15      # 한 번에 옆 오차의 이만큼 반영
-    lane_fix_heading_gain: 0.1
+    lane_fix_gain: 0.30      # 한 번에 옆 오차의 이만큼 반영 (11/10 0.15 -> 0.30)
+    lane_fix_heading_gain: 0.2   # (11/10 0.1 -> 0.2)
+    lane_id_fix: true        # 차선 노드 선 종류(노란 실선/흰 점선)로 본 차로 번호가 5/7번 같으면 그 차로로 위치 옮김
+    lane_id_window: 7
+    lane_id_need: 5
+    lane_keep_blend: 0.5     # 차로 안 직진: 조향 = 0.5 x 회피 + 0.5 x 차선 노드 (양쪽 선 보이고 같은 차로일 때)
+    lane_fresh_sec: 0.3
     lane_fix_gate: 0.15      # 지금 추정과 15 cm 넘게 다르면 다른 차로를 본 것 → 안 씀
     lane_fix_max_deg: 10.0   # 차선 방향이 10° 넘게 보이면 안 씀 (차로 변경 중, 3차선 입구 사선)
     lane_row: 0.55           # 차선 노드 offset 을 재는 행 (기준점 앞 m)
@@ -103,3 +109,8 @@
     recover_speed: 0.10
     recover_time: 4.0
     recover_max: 3
+    recover_mode: trail      # trail: 막히면 온 길 그대로 후진, 갈 차로(틀 공간 포함)가 생기면 멈추고 그리로 / swing: 예전
+    trail_step: 0.05
+    rollback_lookahead: 0.30
+    rollback_max_dist: 1.50  # 한 번 되돌아갈 최대 거리 [m]
+    rollback_time: 15.0

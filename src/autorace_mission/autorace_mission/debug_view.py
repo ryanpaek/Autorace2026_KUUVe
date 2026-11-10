@@ -34,15 +34,23 @@ LANE_HALF = 250.0
 
 def track_geometry(route: RouteMap) -> dict:
     """화면에 그릴 도면: 중심선·양쪽 선(차로 폭 500 근사)·흰 선·구간 점·주차칸. 단위 mm, 도면 좌표."""
-    center, left, right = [], [], []
+    center, left, right = [], [[]], [[]]
+    names = {lm['name']: lm['s'] for lm in route.landmarks}
+    z0, z1 = names.get('m7_start_line'), route.points.get('m7_island_tip')
     s = 0.0
     while s <= route.length:
         x, y = route.xy(s)
         h = route.heading(s)
         center.append((round(x), round(y)))
-        left.append((round(x - LANE_HALF * math.sin(h)), round(y + LANE_HALF * math.cos(h))))
-        right.append((round(x + LANE_HALF * math.sin(h)), round(y - LANE_HALF * math.cos(h))))
+        if z0 is not None and z1 is not None and z0 <= s <= z1:     # 3차선 구간은 아래 lanes3로 따로 그림
+            if left[-1]:
+                left.append([])
+                right.append([])
+        else:
+            left[-1].append((round(x - LANE_HALF * math.sin(h)), round(y + LANE_HALF * math.cos(h))))
+            right[-1].append((round(x + LANE_HALF * math.sin(h)), round(y - LANE_HALF * math.cos(h))))
         s += 50.0
+    left, right = [seg for seg in left if seg], [seg for seg in right if seg]
     lines = []
     for lm in route.landmarks:
         x, y = route.xy(lm['s'])
@@ -67,8 +75,21 @@ def track_geometry(route: RouteMap) -> dict:
                 quad = [(a, d), (a + 500, d), (a + 500, d + 600), (a, d + 600)]
                 cells.append({'n': row * 3 + col + 1,
                               'poly': [(round(x0 + u * fx + v * rx), round(y0 + u * fy + v * ry)) for u, v in quad]})
+    # 3차선 구간 (3차선 시작선 ~ 섬 끝): 가운데 차로 중심선 기준 차로 3개 (중심 간격 520, 도면)
+    lanes3 = []
+    if 'm7_start_line' in {lm['name'] for lm in route.landmarks} and 'm7_island_tip' in route.points:
+        s0 = next(lm['s'] for lm in route.landmarks if lm['name'] == 'm7_start_line')
+        s1 = route.points['m7_island_tip']
+        for off, kind in ((780.0, 'edge'), (260.0, 'dash'), (-260.0, 'dash'), (-780.0, 'edge')):
+            line, s = [], s0
+            while s <= s1:
+                x, y = route.xy(s)
+                h = route.heading(s)
+                line.append((round(x - off * math.sin(h)), round(y + off * math.cos(h))))
+                s += 50.0
+            lanes3.append({'kind': kind, 'pts': line})
     return {'center': center, 'left': left, 'right': right, 'lines': lines, 'points': pts, 'cells': cells,
-            'length': round(route.length)}
+            'lanes3': lanes3, 'length': round(route.length)}
 
 
 class DebugView(Node):
@@ -221,8 +242,9 @@ document.getElementById('follow').onclick=()=>{follow=!follow;upd()};document.ge
 function upd(){document.getElementById('follow').textContent='차 따라가기: '+(follow?'켬':'끔')}
 function poly(p,close){cx.beginPath();p.forEach((q,i)=>{const[a,b]=W2S(q[0],q[1]);i?cx.lineTo(a,b):cx.moveTo(a,b)});if(close)cx.closePath()}
 function draw(){cx.clearRect(0,0,cv.width,cv.height);const L=devicePixelRatio;
- if(T){cx.lineWidth=2*L;cx.strokeStyle='#fbbc04';poly(T.left);cx.stroke();cx.strokeStyle='#dadce0';poly(T.right);cx.stroke();
+ if(T){cx.lineWidth=2*L;T.left.forEach(g=>{cx.strokeStyle='#fbbc04';poly(g);cx.stroke()});T.right.forEach(g=>{cx.strokeStyle='#dadce0';poly(g);cx.stroke()});
   cx.setLineDash([6*L,6*L]);cx.strokeStyle='#5f6368';cx.lineWidth=1*L;poly(T.center);cx.stroke();cx.setLineDash([]);
+  (T.lanes3||[]).forEach(l=>{cx.strokeStyle=l.kind=='edge'?'#fbbc04':'#dadce0';cx.lineWidth=2*L;if(l.kind=='dash')cx.setLineDash([8*L,8*L]);poly(l.pts);cx.stroke();cx.setLineDash([])});
   T.cells.forEach(c=>{cx.strokeStyle='#80868b';cx.lineWidth=1*L;poly(c.poly,true);cx.stroke();const m=c.poly.reduce((a,p)=>[a[0]+p[0]/4,a[1]+p[1]/4],[0,0]);const[a,b]=W2S(m[0],m[1]);cx.fillStyle='#80868b';cx.fillText(c.n,a,b)});
   cx.font=(11*L)+'px sans-serif';T.lines.forEach(l=>{cx.strokeStyle='#ffffff';cx.lineWidth=3*L;poly([l.a,l.b]);cx.stroke();const[a,b]=W2S(l.a[0],l.a[1]);cx.fillStyle='#bdc1c6';cx.fillText(l.name,a+4,b-4)});
   T.points.forEach(p=>{const[a,b]=W2S(p.xy[0],p.xy[1]);cx.fillStyle='#8ab4f8';cx.beginPath();cx.arc(a,b,3*L,0,7);cx.fill();cx.fillText(p.name,a+4,b+12)})}
@@ -241,7 +263,7 @@ async function poll(){try{const r=await fetch('/state');S=await r.json();const d
  const old=k=>a[k]==null?'<span class=stale>없음</span>':(a[k]>1.5?`<span class=stale>${a[k]}초 전</span>`:'');
  kv('car',{'도면 위치 s':rt.s_mm!=null?rt.s_mm+' mm '+old('mission'):'-','다음 선':rt.next?`${rt.next} (${rt.next_in_mm} mm)`:'-','마지막 맞춤':j(rt.last_fix),
   '자세':S.pose?(S.pose.ok?'차선 기준':'<span class=fb>경로 방향(추정)</span>'):'-','주행 거리':m.dist_mm,'명령 v / w':S.cmd?S.cmd.join(' / '):'-',
-  '차선':`${ln.status||'-'} ${old('lane')}`,'차선 오프셋':ln.offset_mm,'흰 선(mm)':j(ln.stoplines_mm),'라이다':S.scan?S.scan.length+'점 '+old('scan'):'<span class=stale>없음</span>'});
+  '차선':`${ln.status||'-'} ${old('lane')}`,'선 종류':(ln.line_left?(ln.line_left.color[0]+(ln.line_left.dashed?'점':'실')):'-')+' | '+(ln.line_right?(ln.line_right.color[0]+(ln.line_right.dashed?'점':'실')):'-')+(ln.lane_id!=null?` → 카메라 차로 ${({1:'1차선',0:'2차선','-1':'3차선'})[ln.lane_id]}`:''),'차선 오프셋':ln.offset_mm,'흰 선(mm)':j(ln.stoplines_mm),'라이다':S.scan?S.scan.length+'점 '+old('scan'):'<span class=stale>없음</span>'});
  const cm=d.commands||{};kv('perc',{'YOLO 확인':j(cm.confirmed_classes)+' '+old('commands'),'명령':(cm.commands||[]).map(c=>c.command+(c.route?'('+c.route+')':'')).join(', ')||'-',
   '이번 프레임':j(cm.observed_classes),'갈림길':m.fork_choice||'-','주차 표지':m.parking_sign?'봄':'-','주차 무장':m.parking_armed?'예':'-'});
  const pk=d.parking||{},ob=d.obstacle||{},fk=d.fork||{};kv('nodes',{'주차':`${pk.phase||'-'} ${pk.row||''} ${pk.stop_how||''} ${pk.result||''}`,
