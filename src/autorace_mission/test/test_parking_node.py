@@ -115,7 +115,7 @@ def drive(parked, target, overrides=None, y0=240.0, fov_deg=360.0, camera=False,
                                  'points': pn.scan_points(rng, amin, ainc, 0.05, 8.0, p['front_axle_from_lidar_mm']),
                                  'clusters_pair': pn.scan_clusters(rng, amin, ainc, 0.05, 8.0, p['front_axle_from_lidar_mm'], 0.0,
                                                                    max_dist_mm=max(1500.0, p['side_far_mm'] + 200.0),
-                                                                   x_mode='extent'),
+                                                                   x_mode='extent', min_size_mm=p['car_min_size_mm']),
                                  'clusters_box': pn.scan_clusters(rng, amin, ainc, 0.05, 8.0, p['front_axle_from_lidar_mm'], 0.0,
                                                                   max_dist_mm=1500.0, x_mode='box')})
         if log is not None:
@@ -267,6 +267,33 @@ def test_wait_line_ignores_line_until_armed():
     assert info['phase'] == 'FOLLOW'
 
 
+def test_wait_line_starts_on_pair_without_line():
+    """표지를 흰 선 뒤에 확정해 선을 놓쳐도, armed 상태에서 1·3번 짝을 연속으로 보면 주차 모드로 간다."""
+    logic = pn.ParkingV2(dict(pn.DEFAULTS))
+    pair = [(500.0, -420.0), (-540.0, -420.0)]          # 오른쪽 같은 줄, 사이 1040mm
+    base = {'yaw': 0.0, 'lane_v': 0.2, 'lane_w': 0.0, 'stoplines_mm': [], 'end_lines_mm': [],
+            'clusters': pair, 'blocked': False}
+    _, _, info = logic.step({**base, 't': 0.0, 'dist_mm': 0.0, 'armed': False})
+    for i in range(1, 5):                                 # armed 전: 짝이 보여도 안 켜짐
+        _, _, info = logic.step({**base, 't': i * 0.05, 'dist_mm': i * 5.0, 'armed': False})
+    assert info['phase'] == 'WAIT_LINE'
+    for i in range(5, 7):                                 # armed 후 2번: 아직
+        _, _, info = logic.step({**base, 't': i * 0.05, 'dist_mm': i * 5.0, 'armed': True})
+    assert info['phase'] == 'WAIT_LINE'
+    _, _, info = logic.step({**base, 't': 0.4, 'dist_mm': 40.0, 'armed': True})
+    assert info['phase'] != 'WAIT_LINE' and info['trigger'] == 'pair'
+
+
+def test_wait_line_single_limo_does_not_trigger():
+    """커브 등에 리모 한 대만 서 있으면 짝이 안 생겨 주차 모드로 안 간다."""
+    logic = pn.ParkingV2(dict(pn.DEFAULTS))
+    base = {'yaw': 0.0, 'lane_v': 0.2, 'lane_w': 0.0, 'stoplines_mm': [], 'end_lines_mm': [],
+            'clusters': [(300.0, -420.0)], 'blocked': False, 'armed': True}
+    for i in range(20):
+        _, _, info = logic.step({**base, 't': i * 0.05, 'dist_mm': i * 20.0})
+    assert info['phase'] == 'WAIT_LINE'
+
+
 # ---------------------------------------------------------------- 11/10 대회 배치: 1·3·4·5·6에 정차 리모, 목표 2번
 FIVE = [1, 3, 4, 5, 6]
 
@@ -310,3 +337,14 @@ def test_col5_centerline_found_and_followed():
         assert abs(col5_x - 1230.0) < 20.0, (lidar, col5_x)  # 2번 칸 가운데 x = 1230
         x, y, th = out['pose']
         assert abs(x + 105.0 * math.cos(th) - 1230.0) < 40.0     # 차체 중심 옆 위치
+
+
+def test_pair_ignores_small_objects():
+    """칸 사이·앞의 가는 기둥(표지판, 사람 다리)은 짝 후보가 아니다. 리모 면(220mm)은 남는다."""
+    pole = (285.0, 315.0, -515.0, -485.0)            # 오른쪽 50cm, 굵기 3cm 기둥 (xmin, xmax, ymin, ymax)
+    limo = (790.0, 1010.0, -760.0, -440.0)           # 리모 220 x 320
+    rng, amin, ainc = raycast(0.0, 0.0, 0.0, [pole, limo], n=1440)
+    small = pn.scan_clusters(rng, amin, ainc, 0.05, 8.0, 0.0, 0.0)
+    big = pn.scan_clusters(rng, amin, ainc, 0.05, 8.0, 0.0, 0.0, min_size_mm=pn.DEFAULTS['car_min_size_mm'])
+    assert len(small) == 2 and len(big) == 1
+    assert big[0][0] > 700.0

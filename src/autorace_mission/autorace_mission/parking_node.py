@@ -28,7 +28,8 @@
   - 라이다가 첫 리모(1/4번)를 놓치면 짝이 안 생겨 예비 방식이 약 1m 늦게 꺾는다 (시뮬레이션 0점).
 
 흐름도
-① WAIT_LINE: 차선 노드 명령을 넘기며 흰 선 기다림 → 보이면 주차 모드
+① WAIT_LINE: 차선 노드 명령을 넘기며 기다림 (armed = 주차 표지 봤거나 도면상 근처)
+│   └─ armed이고 (흰 선 보임 또는 1·3번 짝 연속 3번) → 주차 모드
 │
 ├─② FOLLOW: 차선 따라가기, 왼쪽 차선과 8cm (target_offset_mm 50)
 │   ├─③ 라이다: 오른쪽 리모 두 대 짝 찾기 (사이 약 104cm) → 중점 = 목표 칸 가운데
@@ -71,10 +72,13 @@ def yaw_from_quaternion(q):
 
 def scan_clusters(ranges, angle_min, angle_inc, rng_min, rng_max,
                   front_axle_from_lidar_mm=-47.0, laser_yaw=0.0,
-                  gap_mm=80.0, min_pts=3, max_size_mm=450.0, max_dist_mm=1500.0, x_mode='mean'):
+                  gap_mm=80.0, min_pts=3, max_size_mm=450.0, max_dist_mm=1500.0, x_mode='mean',
+                  min_size_mm=0.0):
     """라이다 스캔 -> 물체 덩어리 중심 목록 [(x, y)] (앞바퀴 기준, 앞 +, 왼쪽 +, mm).
 
     가까운 점끼리 묶고(gap_mm), LIMO 크기(max_size_mm)보다 큰 덩어리(벽 등)는 버린다.
+    min_size_mm: 덩어리의 가로·세로 중 긴 쪽이 이보다 작으면 버린다 (표지판 기둥·사람 다리·라바콘 등.
+    리모 차선 쪽 면 폭 220mm. 시야 끝에 반쯤 걸린 리모도 버려져 짝 위치가 쏠리지 않는다)
     """
     pts = []
     for i, r in enumerate(ranges):
@@ -101,7 +105,8 @@ def scan_clusters(ranges, angle_min, angle_inc, rng_min, rng_max,
         if len(c) < min_pts:
             continue
         xs, ys = [p[0] for p in c], [p[1] for p in c]
-        if max(max(xs) - min(xs), max(ys) - min(ys)) > max_size_mm:
+        size = max(max(xs) - min(xs), max(ys) - min(ys))
+        if size > max_size_mm or size < min_size_mm:
             continue
         # x_mode 'extent': 앞뒤(x)는 점들의 양 끝 가운데. 차선에서 리모를 보면 차선 쪽 끝면(폭 전체) + 한쪽 옆면이
         # 보여 평균이 우리 차 쪽으로 쏠린다 -> 짝의 앞뒤 위치는 양 끝 가운데가 정확 (11/10 시뮬레이션 약 6cm)
@@ -265,6 +270,8 @@ class ParkingV2:
         self.col5 = None           # 5번 리모 앞면 가운데 (자기 위치 좌표, 평균) -> 2번 칸 세로 가운데선
         self.col5_n = 0
         self.pair_n = 0            # 짝을 본 횟수 (평균 낼 때 씀)
+        self.trig_n = 0            # WAIT_LINE에서 짝을 연속으로 본 횟수
+        self.trigger = None        # 주차 모드 시작 이유: 'line' | 'pair'
         self.pair_side_mm = None   # 짝 중점까지 옆 거리 (앞줄 약 0.5m, 뒷줄 약 1.1m) -> row
         self.row = None            # 'front' | 'back' (정차 리모가 있는 줄 = 들어갈 줄)
         self.side_seen = False
@@ -531,7 +538,17 @@ class ParkingV2:
         if self.phase == 'WAIT_LINE':       # ① 흰 선 기다림 (차선 노드 명령 넘김)
             lines = [d for d in inp['stoplines_mm'] if d >= p['line_min_mm']]
             # armed: 미션 노드가 주차 표지를 봤거나 도면상 주차 앞 선 근처 (/mission/state parking_armed)
-            if moved >= p['ignore_mm'] and lines and inp.get('armed', True):
+            # 11/10: 표지를 흰 선 지난 뒤에 확정하면 선을 놓친다 -> 오른쪽 두 리모 짝(1·3번)을 연속으로 보면 그것도 시작 신호.
+            # 짝은 같은 줄 두 대가 약 104cm 떨어져야 생겨서, 커브 등에 한 대만 서 있는 리모로는 안 켜진다.
+            armed = inp.get('armed', True)
+            seen = (p['pair_trigger'] and armed and find_pair(
+                inp.get('clusters_pair') or inp['clusters'], p['side_far_mm'], p['pair_dist_mm'],
+                p['pair_tol_mm']) is not None)
+            self.trig_n = self.trig_n + 1 if seen else 0
+            by_line = moved >= p['ignore_mm'] and lines and armed
+            by_pair = self.trig_n >= p['pair_trigger_frames']
+            if by_line or by_pair:
+                self.trigger = 'line' if by_line else 'pair'
                 self.lane_cfg = {'target_offset_mm': p['target_offset_mm']}
                 self._enter('FOLLOW', inp)
             else:
@@ -763,7 +780,7 @@ class ParkingV2:
         """/parking/state에 실을 내용."""
         return {'phase': self.phase, 'done': self.phase == 'DONE', 'result': self.result,
                 'backs': self.backs, 'realigns': self.realigns, 'last_err': self.err,
-                'row': self.row, 'stop_how': self.stop_how,
+                'row': self.row, 'stop_how': self.stop_how, 'trigger': self.trigger,
                 'end_mm': None if self.end_d is None else round(self.end_d)}
 
 
@@ -773,6 +790,11 @@ DEFAULTS = {
     'target_offset_mm': 50.0,  # ② 캡틴 값 "왼쪽 차선과 8cm" -> 차로 중심에서 왼쪽 50mm
                                #    (차로 안쪽 폭 480 가정: 240 - 80 - 차 반폭 110 = 50. 확인 필요)
     'follow_max_mm': 2500.0,   # 흰 선 뒤 이만큼 가도 리모를 못 찾으면 멈춤 (주차 구역 끝까지 약 2m)
+    # 정차 리모로 인정하는 덩어리 크기 (긴 쪽, mm). 짝(1·3/4·6) 찾기에만 씀 (꺾는 시점을 정하는 것).
+    # 리모 면은 220mm지만 라이다 시야 끝(약 ±105도)에 반쯤 걸린 리모가 60~130mm로 보이고, 짝은 이걸로 잡힐 때가 많다
+    # (11/10 시뮬레이션: 80 이상이면 뒷줄·1번 놓침 상황에서 짝을 못 찾음). 그래서 60: 표지판 기둥·가는 막대(약 30)만 버림.
+    # 사람 다리·라바콘(약 60~100)은 못 거름 -> 주차 구역 옆에 사람이 서 있지 않게
+    'car_min_size_mm': 60.0,
     'side_far_mm': 1300.0,     # ③ 오른쪽 리모 찾는 거리 (앞줄 약 0.4m, 뒷줄 약 1.0m)
     'extra_mm': 200.0,         # (추가) 리모 옆 확인 후 더 갈 거리. 0 = 캡틴 원래 계획 (시뮬레이션: 0이면 0점)
     'brake_mm': 23.0,          # 0.18 m/s 제동 거리 (calib 4번)
@@ -796,6 +818,8 @@ DEFAULTS = {
     'pair_dist_mm': 1040.0,    # 두 정차 리모 사이 (칸 2개: 500 + 20 + 500 + 20, 도면)
     'pair_tol_mm': 150.0,      # 짝 인정 오차. 칸 1개(520)나 3개 간격과 헷갈리지 않게
     'pair_min_frames': 3,      # 짝을 이만큼 본 뒤에 믿는다 (한 번 튄 값 무시)
+    'pair_trigger': True,      # 흰 선을 못 봐도 오른쪽 두 리모 짝을 보면 주차 모드 시작 (armed일 때만)
+    'pair_trigger_frames': 3,  # 짝을 연속 이만큼 봐야 시작 (한 번 튄 값 무시)
     'turn_lead_mm': 320.0,     # 칸 가운데가 앞바퀴보다 이만큼 앞일 때 꺾기 시작 (회전반경 530 - 축거 210)
     'stop_min_turn_deg': 60.0, # 이만큼 돈 뒤에만 양옆 옆면으로 '칸 가운데 도착'을 판단 (도는 도중 오판 방지)
     # ---- 줄(앞줄 1~3 / 뒷줄 4~6)과 칸 끝에서 멈추기 (11/09 park_02 반영)
@@ -942,7 +966,8 @@ def main(args=None):
                                          g('front_axle_from_lidar_mm'), g('laser_yaw'))
                     clusters_pair = scan_clusters(s.ranges, s.angle_min, s.angle_increment, s.range_min,
                                                   s.range_max, g('front_axle_from_lidar_mm'), g('laser_yaw'),
-                                                  max_dist_mm=max(1500.0, g('side_far_mm') + 200.0), x_mode='extent')
+                                                  max_dist_mm=max(1500.0, g('side_far_mm') + 200.0), x_mode='extent',
+                                                  min_size_mm=g('car_min_size_mm'))
                     clusters_box = scan_clusters(s.ranges, s.angle_min, s.angle_increment, s.range_min,
                                                  s.range_max, g('front_axle_from_lidar_mm'), g('laser_yaw'),
                                                  max_dist_mm=1500.0, x_mode='box')
