@@ -446,3 +446,57 @@ def test_exit_report_on_sign_and_forced():
     link2.update(9.0, mission(18500.0, state='M2_FORK'), {})  # FSM 강제 종료
     r2 = link2.pop_report()
     assert r2['lane'] == 3 and r2['by'] == 'forced'          # now_lane 우선
+
+
+# --- 0단계: 늘 몇 차로에 있는지 (lane_now, /m7/lane) ---------------------------------
+def test_lane_known_from_camera_vote_outside_m7():
+    """M7 밖(M5 등)에서도 차선 노드 lane_id 7번 중 5번이면 차로를 안다."""
+    link = M7Link()
+    assert link.lane_now() is None
+    for i in range(4):
+        link.update(i * 0.05, mission(9000.0, state='M5_SLOW'), {'lane_id': 0})
+    assert link.lane_now() is None                            # 4번은 아직 부족
+    link.update(0.3, mission(9000.0, state='M5_SLOW'), {'lane_id': 0})
+    ln = link.lane_now()
+    assert ln['lane'] == 2 and ln['src'] == 'camera' and ln['side'] == '가운데'
+    assert link.state()['m7_lane'] == 2 and link.state()['m7_lane_src'] == 'camera'
+
+
+def test_lane_noise_does_not_flip():
+    link = M7Link()
+    for lid in (1, 1, 1, 1, 1, -1, None):
+        link.update(0.0, mission(9000.0, state='M5_SLOW'), {'lane_id': lid})
+    assert link.lane_now()['lane'] == 1
+    for lid in (-1, -1):                                       # 섞이면 확정 못 함 -> 마지막 값 유지
+        link.update(0.0, mission(9000.0, state='M5_SLOW'), {'lane_id': lid})
+    ln = link.lane_now()
+    assert ln['lane'] == 1 and ln['src'] == 'last'
+
+
+def test_lane_from_avoid_node_while_running():
+    """회피 중에는 회피 노드 now_lane(odom+IMU+카메라 보정)을 쓴다."""
+    link = running_link()
+    link.on_avoid_state({'state': 'RUN', 'target': -1, 'now_lane': 0})
+    assert link.lane_now()['lane'] == 2 and link.lane_now()['src'] == 'avoid'
+    link.on_avoid_state({'state': 'RUN', 'target': -1, 'now_lane': -1})
+    assert link.lane_now()['lane'] == 3
+
+
+def test_lane_kept_when_camera_lost():
+    link = M7Link()
+    for _ in range(7):
+        link.update(0.0, mission(9000.0, state='M5_SLOW'), {'lane_id': -1})
+    assert link.lane_now()['src'] == 'camera'
+    for _ in range(7):
+        link.update(0.0, mission(9000.0, state='M5_SLOW'), {'status': 'NONE'})
+    ln = link.lane_now()
+    assert ln['lane'] == 3 and ln['src'] == 'last'
+
+
+def test_lane_remembered_right_after_avoid_done():
+    """회피가 끝나 회피 노드 값을 안 쓰게 돼도, 카메라가 확정하기 전까지 마지막 차로를 유지."""
+    link = running_link()
+    link.on_avoid_state({'state': 'RUN', 'target': -1, 'now_lane': -1})
+    link.phase = 'done'
+    ln = link.lane_now()
+    assert ln['lane'] == 3 and ln['src'] == 'last'

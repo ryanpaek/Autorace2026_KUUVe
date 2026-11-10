@@ -136,6 +136,10 @@ class M7Link:
         self.sign_near = False
         self.off_by = None           # 'sign' | 'avoid_done'
         self.report = None           # M7이 끝날 때 한 번 내보낼 차로 (exit_report), obstacle_node가 pop
+        # 지금 몇 차선인지 (늘): 회피 중이면 회피 노드 차로(카메라 선 종류로 이미 맞춘 값), 아니면 차선 노드 lane_id 투표
+        self.cam_ids = deque(maxlen=7)
+        self.cam_lane = None         # 차선 노드 lane_id 를 7번 중 5번 같으면 확정 (+1/0/-1)
+        self.last_lane = None        # (차로, 출처) 마지막으로 안 값 — 잠깐 못 봐도 유지
         self.trigger = None          # 켠 이유: 'line' | 'obstacle' | 'fallback'
         self.events: List[str] = []
 
@@ -159,6 +163,8 @@ class M7Link:
             self.avoid_target = st.get('target')
         if 'now_lane' in st:
             self.avoid_lane = st.get('now_lane')
+            if self.phase in ('armed', 'running') and self.avoid_lane in LANE_NUMBER:
+                self.last_lane = (self.avoid_lane, 'avoid')   # 회피가 끝난 직후에도 그 차로를 기억
         if self.avoid_running and self.phase == 'armed':
             self.phase = 'running'
 
@@ -198,6 +204,32 @@ class M7Link:
             self.exit_fork = lane_to_fork(self.avoid_target)
             self.events.append(f'회피 완료 (마지막 차로 {self.avoid_target} -> {self.exit_fork})')
 
+    # --- 지금 몇 차선 (늘) ------------------------------------------------------
+    def watch_lane_id(self, lane: dict) -> None:
+        """차선 노드 /lane/status 의 lane_id (선 종류로 본 3차선 번호, +1/0/-1, 양쪽 선이 보일 때만)."""
+        lid = (lane or {}).get('lane_id')
+        self.cam_ids.append(lid if lid in LANE_NUMBER else None)
+        best = None
+        for k in LANE_NUMBER:
+            if list(self.cam_ids).count(k) >= 5:
+                best = k
+        self.cam_lane = best
+
+    def lane_now(self) -> Optional[dict]:
+        """{'lane': 1|2|3, 'avoid_lane': +1|0|-1, 'side', 'src': 'avoid'|'camera'|'last'} 또는 None."""
+        if self.phase in ('armed', 'running') and self.avoid_lane in LANE_NUMBER:
+            k, src = self.avoid_lane, 'avoid'          # 회피 노드: odom+IMU + 카메라 선 종류·차선 보정
+        elif self.cam_lane is not None:
+            k, src = self.cam_lane, 'camera'           # 회피 전·후: 차선 노드 선 종류
+        elif self.last_lane is not None:
+            k, src = self.last_lane[0], 'last'         # 잠깐 못 봄: 마지막 값
+        else:
+            return None
+        if src != 'last':
+            self.last_lane = (k, src)
+        n = LANE_NUMBER[k]
+        return {'lane': n, 'avoid_lane': k, 'side': {1: '왼쪽', 2: '가운데', 3: '오른쪽'}[n], 'src': src}
+
     # --- 매 틱 -----------------------------------------------------------------
     def update(self, t: float, mission: dict, lane: dict) -> List[Tuple]:
         """mission: /mission/state, lane: /lane/status. 보낼 동작 목록을 돌려준다.
@@ -205,6 +237,7 @@ class M7Link:
         ('enable', section_m) | ('disable',) | ('fork', 'A'|'B')
         """
         out: List[Tuple] = []
+        self.watch_lane_id(lane)
         state = mission.get('state')
         dist = float(mission.get('dist_mm') or 0.0)
 
@@ -398,5 +431,7 @@ class M7Link:
                 'm7_sign': 'near' if self.sign_near else (f'lost{self.sign_lost}' if self.sign_seen else None),
                 'm7_off_by': self.off_by,
                 'm7_trigger': self.trigger,
+                'm7_lane': (self.lane_now() or {}).get('lane'),
+                'm7_lane_src': (self.lane_now() or {}).get('src'),
                 'm7_line_d_mm': None if self.line is None else round(self.line[0]),
                 'm7_heading_forced': self.heading_forced}

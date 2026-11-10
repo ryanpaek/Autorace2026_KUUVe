@@ -174,6 +174,9 @@ class ObstacleNode(Node):
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
                              reliability=ReliabilityPolicy.RELIABLE)
         self.exit_pub = self.create_publisher(String, '/m7/exit_lane', latched)
+        # 지금 몇 차선인지 늘 (회피 중: 회피 노드 / 그 밖: 차선 노드 선 종류). 알 때만, 바뀌거나 1초마다
+        self.lane_pub = self.create_publisher(String, '/m7/lane', 10)
+        self.lane_pub_last = (None, 0.0)
         self.param_cli = self.create_client(
             SetParameters, g_name(g('m7_avoid_node').value) + '/set_parameters')
         self.create_timer(1.0 / float(g('control_hz').value), self._tick)
@@ -353,6 +356,13 @@ class ObstacleNode(Node):
                 self.enable_pub.publish(Bool(data=False))
             elif act[0] == 'fork':
                 self.fork_pub.publish(String(data=act[1]))
+        ln = self.link.lane_now()
+        if ln is not None:
+            key = (ln['lane'], ln['src'])
+            if key != self.lane_pub_last[0] or now - self.lane_pub_last[1] >= 1.0:
+                ln['state'] = self.mstate
+                self.lane_pub.publish(String(data=json.dumps(ln, ensure_ascii=False)))
+                self.lane_pub_last = (key, now)
         rep = self.link.pop_report()
         if rep is not None:
             self.exit_pub.publish(String(data=json.dumps(rep, ensure_ascii=False)))
