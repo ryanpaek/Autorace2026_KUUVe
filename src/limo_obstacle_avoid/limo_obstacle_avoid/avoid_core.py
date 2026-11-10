@@ -125,13 +125,17 @@ class AvoidParams:
     recover_dist: float = 0.25        # 후진 거리 [m] (방금 지나온 길이라 비어 있음)
     recover_speed: float = 0.10       # 후진 속도 [m/s]
     recover_time: float = 4.0         # 이 시간 안에 못 끝내도 멈추고 다시 계획 [s]
-    recover_max: int = 3              # 최대 횟수. 넘으면 예전처럼 정지 유지
+    recover_max: int = 0              # 최대 횟수. 0이면 제한 없음 (11/10 실차: 3회 뒤 멈춰 버림). 넘으면 정지 유지
     # 온 길 되돌아가기(11/10): 막히면 지나온 길(trail)을 그대로 후진하면서, 갈 수 있는 차로가 생기는 순간 멈추고 그리로 간다
     recover_mode: str = 'trail'       # 'trail' | 'swing'(예전: 25cm 후진하며 크게 꺾기)
     trail_step: float = 0.05          # 지나온 길 점 간격 [m]
     rollback_lookahead: float = 0.30  # 후진할 때 따라갈 뒤쪽 점 거리 [m]
     rollback_max_dist: float = 1.50   # 한 번 되돌아갈 최대 거리 [m]
-    rollback_time: float = 15.0       # 한 번 되돌아가기 최대 시간 [s]
+    rollback_time: float = 15.0       # 한 번 되돌아가기 최대 시간 [s] (먼 후진은 거리 비율만큼 늘림)
+    # 같은 자리에서 또 막히면(11/10 시뮬레이션: 1.5m 후진 -> 같은 길로 전진 -> 같은 곳에서 막힘 반복) 매번 더 멀리 간다
+    rollback_same_spot: float = 0.40  # 지난번 막힌 곳에서 이만큼 안이고 같은 차로면 '같은 자리' [m]
+    rollback_grow: float = 1.00       # 같은 자리 반복마다 최대 후진 거리 늘림 [m] (지나온 길 끝까지만)
+    rollback_grow_min: float = 0.30   # 같은 자리 반복마다 '갈 길 찾음'으로 멈추기 전 최소 후진 거리 늘림 [m]
 
 
 # ──────────────────────────────────────────────────────────────
@@ -229,6 +233,9 @@ class AvoidPlanner:
         self.rec = None              # 탈출 중이면 {'t0', 'x0', 'y0', 'side'}
         self.rb = None               # 되돌아가기 중이면 {'t0', 'x0', 'y0', 'dist', 'blocked'}
         self.rec_n = 0               # 탈출 횟수
+        self.block_x = None          # 마지막으로 막혀 되돌아가기 시작한 곳 (x, 차로)
+        self.block_lane = None
+        self.rb_rep = 0              # 같은 자리에서 연속으로 막힌 횟수 (0 = 처음)
         self.lane_fix_n = 0          # 카메라 차선으로 보정한 횟수 (status)
         self.lane_fix_dy = 0.0       # 마지막 보정량 [m]
         self.trail = []              # 지나온 길 [(x, y)] (되돌아가기)
@@ -568,6 +575,9 @@ class AvoidPlanner:
             if len(self.trail) > 400:
                 self.trail = self.trail[-400:]
 
+    def _may_recover(self):
+        return self.p.recover_max <= 0 or self.rec_n < self.p.recover_max
+
     def _rollback_step(self, t):
         """지나온 길을 따라 후진. 갈 차로가 생기면 그 차로로 정하고 끝(None). 너무 멀리·오래면 끝."""
         p, rb = self.p, self.rb
@@ -584,7 +594,7 @@ class AvoidPlanner:
             need = shift_distance(p, nxt - cur)[0] + 0.05
             if self.free_ahead(cur, obs) < need:
                 nxt = None
-        if nxt is not None and rb['dist'] >= 0.05:
+        if nxt is not None and rb['dist'] >= rb['min']:
             self.events.append((x, f'되돌아가기 {rb["dist"]:.2f}m → 갈 길 찾음: {lane_name(nxt)}'))
             self.target = nxt
             self.last_switch = t
@@ -593,7 +603,7 @@ class AvoidPlanner:
             return None
         while len(self.trail) > 1 and math.hypot(self.trail[-1][0] - x, self.trail[-1][1] - y) < p.rollback_lookahead:
             self.trail.pop()
-        if (rb['dist'] >= p.rollback_max_dist or t - rb['t0'] >= p.rollback_time or not self.trail):
+        if (rb['dist'] >= rb['max'] or t - rb['t0'] >= rb['tmax'] or not self.trail):
             self.events.append((x, f'되돌아가기 끝 ({rb["dist"]:.2f}m, 갈 길 없음) → 다시 계획'))
             self.rb = None
             self.stuck_since = None
@@ -721,17 +731,27 @@ class AvoidPlanner:
             # 서 있으면 상황이 안 바뀐다 → 잠시 뒤 후진하며 크게 꺾어 다시 잡기 (횟수 제한)
             if self.stuck_since is None:
                 self.stuck_since = t
-            elif (p.recover and p.recover_mode == 'trail' and self.rec_n < p.recover_max
+            elif (p.recover and p.recover_mode == 'trail' and self._may_recover()
                   and t - self.stuck_since >= p.recover_after and len(self.trail) > 1):
-                self.rb = {'t0': t, 'x0': x, 'y0': y, 'dist': 0.0, 'blocked': self.target}
+                same = (self.block_x is not None and abs(x - self.block_x) < p.rollback_same_spot
+                        and self.target == self.block_lane)
+                self.rb_rep = self.rb_rep + 1 if same else 0
+                self.block_x, self.block_lane = x, self.target
+                mx = p.rollback_max_dist + self.rb_rep * p.rollback_grow
+                self.rb = {'t0': t, 'x0': x, 'y0': y, 'dist': 0.0, 'blocked': self.target, 'max': mx,
+                           'min': max(0.05, self.rb_rep * p.rollback_grow_min),
+                           'tmax': p.rollback_time * mx / max(p.rollback_max_dist, 1e-3)}
                 self.rec_n += 1
                 why = '앞 비상' if self.emergency else '갈 차선 막힘'
+                lim = '' if p.recover_max <= 0 else f'/{p.recover_max}'
+                rep = f', 같은 자리 {self.rb_rep + 1}번째' if self.rb_rep else ''
                 self.events.append((x, f'멈춤 {t - self.stuck_since:.1f}s ({why}) → 온 길 되돌아가기 '
-                                       f'{self.rec_n}/{p.recover_max} (최대 {p.rollback_max_dist:.1f}m, 갈 길 생기면 멈춤)'))
+                                       f'{self.rec_n}{lim} (최대 {mx:.1f}m{rep}, 갈 길 생기면 멈춤)'))
                 out = self._rollback_step(t)
                 if out is not None:
                     return out
-            elif p.recover and self.rec_n < p.recover_max and t - self.stuck_since >= p.recover_after:
+            elif (p.recover and p.recover_mode != 'trail' and self._may_recover()
+                  and t - self.stuck_since >= p.recover_after):
                 side = self._recover_side(obs)
                 self.rec = {'t0': t, 'x0': x, 'y0': y, 'side': side}
                 self.rec_n += 1
@@ -787,7 +807,7 @@ class AvoidPlanner:
             'now_lane': self.nearest_lane(self.pose.y),
             'emergency': self.emergency, 'blocked': self.blocked,
             'recovering': self.rec is not None or self.rb is not None, 'recover_n': self.rec_n,
-            'rollback': self.rb is not None, 'rollback_m': round(self.rollback_m, 2),
+            'rollback': self.rb is not None, 'rollback_m': round(self.rollback_m, 2), 'rollback_rep': self.rb_rep,
             'cam_lane': self.lane_id, 'lane_id_fix_n': self.lane_id_fix_n,
             'lane_blend': getattr(self, 'blend_used', False),
             'lane_fix_n': self.lane_fix_n, 'lane_fix_dy_cm': round(self.lane_fix_dy * 100, 1),

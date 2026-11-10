@@ -206,10 +206,16 @@ class MissionNode(Node):
     def _on_odom(self, msg):
         p = msg.pose.pose.position
         if self._last_xy is not None:
-            step = 1000.0 * math.hypot(p.x - self._last_xy[0], p.y - self._last_xy[1])
+            dx, dy = p.x - self._last_xy[0], p.y - self._last_xy[1]
+            step = 1000.0 * math.hypot(dx, dy)
             # 한 메시지에 이만큼 넘게 튀면 odom 오류(11/09 체크섬 오류 때 7.5km)로 보고 버린다.
             # FSM뿐 아니라 도면 위치(RouteTracker)도 이 거리를 쓰므로 여기서 거른다 (11/10 통주행 시뮬레이션에서 발견)
             if step <= self.odom_step_max_mm:
+                # 후진은 빼기 (11/10 실차: M7 롤백 1.5m x3 후진이 앞으로 간 거리로 쌓여 도면 위치가
+                # 최대 9m 앞서고 갈림길·라바콘·신호등 모드가 다 어긋남). 차 방향으로 투영해 부호를 정한다
+                yaw = yaw_from_quaternion(msg.pose.pose.orientation)
+                if 1000.0 * (dx * math.cos(yaw) + dy * math.sin(yaw)) < -0.5 * step:
+                    step = -step
                 self.dist_mm += step
             else:
                 self.odom_jumps += 1

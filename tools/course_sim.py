@@ -50,7 +50,9 @@ def sign_windows(P):
     }
 
 
-def run(name, miss=(), odom_scale=1.0, jump_at=None, camera=True, seed=1, verbose=True, guard_source=True):
+def run(name, miss=(), odom_scale=1.0, jump_at=None, camera=True, seed=1, verbose=True, guard_source=True,
+        m7_reverse=None, signed_odom=True):
+    """m7_reverse=(횟수, m): M7 회피 중 막혀서 이만큼 후진 (실차 11/10). signed_odom: 후진을 거리에서 빼는지 (mission_node 11/10부터 뺌)"""
     rnd = random.Random(seed)
     route = RouteMap.from_yaml(os.path.join(CFG, 'track_route.yaml'))
     P = dict(route.points)
@@ -75,6 +77,8 @@ def run(name, miss=(), odom_scale=1.0, jump_at=None, camera=True, seed=1, verbos
     stop_at = {}
     tracker.reset(0.0, 0.0)
     started = False
+    rev_left, rev_m, rev_run = (m7_reverse or (0, 0.0))[0], (m7_reverse or (0, 0.0))[1], 0.0
+    rev_at = None
     for k in range(int(900 / DT)):
         # --- 카메라 흰 선 (차선 노드) -------------------------------------------------
         lines, xw = [], []
@@ -147,8 +151,19 @@ def run(name, miss=(), odom_scale=1.0, jump_at=None, camera=True, seed=1, verbos
         v = 0.0 if cmd.source == 'stop' else (cmd.lane or {}).get('speed', fsm.p['base_speed'])
         if cmd.source == 'obstacle':
             v = fsm.p['base_speed']
+        if fsm.state == 'M7_OBSTACLE' and rev_left > 0 and s >= P['m7_start_line'] + 1200.0 and rev_at is None:
+            rev_at, rev_run = s, 0.0
+        if rev_at is not None:                       # 회피 노드가 막혀서 온 길로 후진 중
+            v = -0.15
+            rev_run += 0.15 * DT
+            if rev_run >= rev_m:
+                rev_left -= 1
+                rev_at = None
+                if rev_left > 0:                     # 다시 1.2m 앞까지 갔다가 또 막힘
+                    s_block = s + rev_m * 1000.0
+                    pass
         s += v * 1000.0 * DT
-        odo += v * 1000.0 * DT
+        odo += (v if signed_odom else abs(v)) * 1000.0 * DT
         t += DT
         if fsm.state == 'FINISHED':
             break
@@ -177,6 +192,8 @@ SCENARIOS = {
     'odom_jump': {'jump_at': 15000.0},
     'odom_5pct_long': {'odom_scale': 1.05},
     'no_camera_lines': {'camera': False},
+    'm7_rollback_3x1.5m': {'m7_reverse': (3, 1.5)},
+    'm7_rollback_old_unsigned': {'m7_reverse': (3, 1.5), 'signed_odom': False},
 }
 
 if __name__ == '__main__':
