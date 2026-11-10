@@ -108,9 +108,12 @@
     recover_dist: 0.25
     recover_speed: 0.10
     recover_time: 4.0
-    recover_max: 3
+    recover_max: 0           # 0 = 제한 없음 (11/10: 3회 뒤 멈춤)
     recover_mode: trail      # trail: 막히면 온 길 그대로 후진, 갈 차로(틀 공간 포함)가 생기면 멈추고 그리로 / swing: 예전
     trail_step: 0.05
     rollback_lookahead: 0.30
     rollback_max_dist: 1.50  # 한 번 되돌아갈 최대 거리 [m]
     rollback_time: 15.0
+    rollback_same_spot: 0.40 # 같은 자리에서 또 막히면
+    rollback_grow: 1.00      #   최대 후진 거리를 이만큼씩 늘림 (지나온 길 끝까지)
+    rollback_grow_min: 0.30  #   "갈 길 찾음"으로 멈추기 전 최소 후진도 이만큼씩 늘림

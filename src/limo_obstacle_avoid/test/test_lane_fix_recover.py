@@ -132,3 +132,47 @@ def test_rollback_finds_other_lane():
     lx = P().lidar_x
     r = _run_layout([(0.6 + lx, 0), (0.75 + lx, 1)])
     assert r['done'] and not r['collided']
+
+
+def _run_capture(layout, island, **over):
+    """stress_sim으로 돌리고 플래너(이벤트 기록)도 돌려준다."""
+    import stress_sim as ss
+    p = AvoidParams()
+    for k, v in over.items():
+        setattr(p, k, v)
+    cap = {}
+    orig = AvoidPlanner.__init__
+
+    def init(self, *a, **k):
+        orig(self, *a, **k)
+        cap['pl'] = self
+    AvoidPlanner.__init__ = init
+    try:
+        r = ss.run(layout, p, island, seed=0)
+    finally:
+        AvoidPlanner.__init__ = orig
+    return r, cap['pl']
+
+
+# 지나갈 길이 없는 배치 (줄 간격이 좁아 앞줄을 지나서는 차로를 못 바꿈, 11/10 시뮬레이션)
+_DEAD_END = [(0.9, 0), (2.256, 1), (3.222, -1), (3.222, 1), (4.148, 0)]
+
+
+def test_rollback_not_limited_to_three():
+    """11/10 실차: 3번 후진하면 그 뒤로 멈춰 버림 -> 기본은 횟수 제한 없음."""
+    _, pl = _run_capture(_DEAD_END, 5.27)
+    assert AvoidParams().recover_max == 0
+    assert pl.rec_n > 3 or pl.rb is not None and pl.rec_n == 3
+
+
+def test_rollback_goes_further_when_blocked_at_same_spot():
+    """같은 자리에서 또 막히면 매번 더 멀리 후진한다 (1.5 -> 2.5 -> ...)."""
+    _, pl = _run_capture(_DEAD_END, 5.27)
+    starts = [e for _, e in pl.events if '온 길 되돌아가기' in e]
+    assert len(starts) >= 2
+    assert '최대 1.5m' in starts[0] and '최대 2.5m' in starts[1] and '같은 자리 2번째' in starts[1]
+
+
+def test_rollback_limit_still_works_when_set():
+    _, pl = _run_capture(_DEAD_END, 5.27, recover_max=3)
+    assert pl.rec_n == 3
