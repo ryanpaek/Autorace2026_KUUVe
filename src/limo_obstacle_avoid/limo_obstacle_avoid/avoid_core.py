@@ -71,6 +71,7 @@ class AvoidParams:
     cluster_min_pts: int = 3          # 점이 이보다 적으면 노이즈
     merge_dist: float = 0.20          # 같은 장애물로 합치는 거리
     max_obs_width: float = 0.45       # 장애물 하나의 최대 폭 (LIMO 0.22)
+    max_obs_len: float = 0.70         # 한 번에 본 덩어리가 앞뒤로 이보다 길면 벽·트랙 테두리로 보고 버림 (LIMO 0.32)
     obs_min_len: float = 0.33         # 앞면만 보여도 이 길이만큼 차가 있다고 가정 (LIMO 길이)
     confirm_hits: int = 3             # 이 횟수 이상 보여야 진짜 장애물로 인정
     # ── 판단 ──
@@ -258,7 +259,8 @@ class AvoidPlanner:
             if len(cur) >= p.cluster_min_pts:
                 xs = [q[0] for q in cur]
                 ys = [q[1] for q in cur]
-                clusters.append((min(xs), max(xs), min(ys), max(ys)))
+                if max(xs) - min(xs) <= p.max_obs_len:      # 길게 이어진 점들(옆 벽) 제외 (11/10 실차)
+                    clusters.append((min(xs), max(xs), min(ys), max(ys)))
             cur.clear()
 
         for pt in pts_base:
@@ -355,6 +357,8 @@ class AvoidPlanner:
                 if x0 <= o.xmax + md and x1 >= o.xmin - md and y0 <= o.ymax + md and y1 >= o.ymin - md:
                     ny0, ny1 = min(o.ymin, y0), max(o.ymax, y1)
                     if ny1 - ny0 > p.max_obs_width:
+                        continue
+                    if max(o.xmax, x1) - min(o.xmin, x0) > p.max_obs_len:   # 벽 조각이 이어 붙어 길어지는 것 방지
                         continue
                     o.xmin, o.xmax = min(o.xmin, x0), max(o.xmax, x1)
                     o.ymin, o.ymax = ny0, ny1

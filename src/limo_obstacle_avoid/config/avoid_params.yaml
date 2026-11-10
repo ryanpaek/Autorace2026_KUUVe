@@ -57,6 +57,7 @@
     cluster_min_pts: 3
     merge_dist: 0.20
     max_obs_width: 0.45
+    max_obs_len: 0.70        # 앞뒤로 이보다 긴 덩어리는 벽으로 보고 버림 (LIMO 0.32)
     obs_min_len: 0.33
     confirm_hits: 3
 
