@@ -306,6 +306,7 @@ class MissionNode(Node):
                 msg['pose_ok'] = mp.valid(self.dist_mm) and self.yaw is not None
                 if msg['pose_ok']:
                     msg['d_mm'] = round(mp.d)
+                    msg['psi'] = round(self.yaw + mp.yaw_off, 4)      # 도면 좌표계 차 방향 (디버그 화면용)
                     msg['pts'] = mp.points_ahead(inp.route_s, self.yaw)
             self.preview_pub.publish(String(data=json.dumps(msg)))
 

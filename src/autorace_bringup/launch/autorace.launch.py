@@ -71,6 +71,8 @@ def generate_launch_description():
         # M2 갈림길 판단 노드(autorace_fork): YOLO fork_a/fork_b 투표 + 지금 차선 기준 이동 차선 수 판단 -> /fork_direction.
         #   FSM이 이미 정했으면 그걸 따르므로 켜도 결정이 엇갈리지 않는다. /fork/state 로 상황을 볼 수 있다.
         DeclareLaunchArgument('use_fork_node', default_value='false'),
+        # 웹 디버그 화면 (노트북 브라우저 http://<리모IP>:8080). 구독만 함
+        DeclareLaunchArgument('debug_view', default_value='true'),
         # 주차 켜기 (parking_node enabled). 통주행은 full.launch.py가 true로 준다
         DeclareLaunchArgument('parking', default_value='false'),
         DeclareLaunchArgument('fork_params', default_value=_fork_params()),
@@ -84,6 +86,9 @@ def generate_launch_description():
                                   'use_class_commands': ParameterValue(
                                       LaunchConfiguration('use_class_commands'), value_type=bool)}],
              output='screen'),
+        Node(package='autorace_mission', executable='debug_view', name='debug_view',
+             parameters=[params, {'route_file': route}], output='screen',
+             condition=IfCondition(LaunchConfiguration('debug_view'))),
         Node(package='autorace_mission', executable='parking_node', name='parking_node',
              parameters=[params, {'enabled': ParameterValue(LaunchConfiguration('parking'), value_type=bool)}],
              output='screen'),
