@@ -168,3 +168,57 @@ def test_tight_pair_no_wrong_heading_alignment():
     p = AvoidParams()
     r = ss.run([(0.6 + p.lidar_x, 0), (0.75 + p.lidar_x, 1)], p, 4.38, seed=1)
     assert r['ok'] and r['off_edge'] <= 0
+
+
+# ---------------------------------------------------------------- 11/10 밤: 정지·후진은 바로 앞만, 후진 0.3 m
+def _with_obs(pl, *boxes):
+    from limo_obstacle_avoid.avoid_core import Obstacle
+    for b in boxes:
+        o = Obstacle(*b)
+        o.hits = pl.p.confirm_hits
+        pl.obs.append(o)
+    return pl.obstacles(True)
+
+
+def test_side_obstacle_does_not_stop_or_reverse():
+    """왼쪽 차로로 옮기는 중, 그 차로 장애물이 차 '옆'에 있음 -> 예전엔 막힘(정지·후진), 이제 앞길이 비면 그대로 간다."""
+    pl = running(0.0)
+    pl.target = 1
+    obs = _with_obs(pl, (-0.10, 0.25, 0.41, 0.63))
+    assert pl.free_ahead(1, obs) < pl.p.stop_dist                  # 예전 판단이면 막힘
+    v, w = pl.step(10.0)
+    assert not pl.blocked and v > 0 and pl.rb is None and pl.rec is None
+
+
+def test_obstacle_right_in_front_stops():
+    pl = running(0.0)
+    _with_obs(pl, (0.20 + 0.25, 0.80, -0.11, 0.11))                # 앞범퍼 25 cm 앞, 내 차로
+    v, _ = pl.step(10.0)
+    assert pl.blocked and v == 0.0 and 0.0 < pl.hit_dist <= 0.30
+
+
+def test_obstacle_in_front_beyond_0p3_does_not_stop():
+    pl = running(0.0)
+    _with_obs(pl, (0.20 + 0.45, 1.00, -0.11, 0.11))                # 45 cm 앞: 차로는 바꾸되 서지는 않음
+    v, _ = pl.step(10.0)
+    assert not pl.blocked and v > 0
+
+
+def test_rollback_at_most_0p3m():
+    import stress_sim as ss
+    from limo_obstacle_avoid import sim_common as sc
+    back = {'d': 0.0}
+    orig = sc.SimCar.step
+
+    def step(self, v, w, dt, **k):
+        if v < 0:
+            back['d'] += -v * dt
+        orig(self, v, w, dt, **k)
+    sc.SimCar.step = step
+    try:
+        p = AvoidParams()
+        p.recover_swing_max = 0
+        ss.run([(0.6 + p.lidar_x, 0), (0.75 + p.lidar_x, 1)], p, 4.38, seed=1)
+    finally:
+        sc.SimCar.step = orig
+    assert back['d'] <= p.recover_max * (p.rollback_max_dist + 0.05)
