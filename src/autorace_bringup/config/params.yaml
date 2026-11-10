@@ -148,6 +148,17 @@ class_command_node:
     conf_threshold: 0.5
     vote_window: 10                        # 최근 새 검출 프레임 10개
     vote_need: 7                           # 그중 7개 이상 검출 시 해당 명령 발행
+    # 미션별 투표 기준 (최근 vote_window 프레임 중 몇 번). 0 = 위 vote_need. 제안값, TODO bag으로 조정
+    #   잘못 보면 되돌릴 수 없는 것(갈림길 A/B는 한 번 정하면 안 바뀜, 신호등)은 엄하게
+    #   놓치는 손해가 더 큰 것(서행·방지턱, 주차)은 느슨하게
+    mode_vote_need.M1_TRAFFIC: 7                # 신호등 빨강/초록 (+ 보행자)
+    mode_vote_need.M2_FORK: 7                   # 갈림길 A/B
+    mode_vote_need.M7_OBSTACLE: 7               # 3차선에서 미리 보는 갈림길 A/B
+    mode_vote_need.M3_PEDESTRIAN: 6             # 보행자: 잘못 보면 엉뚱한 선에 설 수 있어 중간
+    mode_vote_need.M4_PARKING: 5                # 주차: 주차 노드가 선·리모 짝으로 다시 확인
+    mode_vote_need.M5_BUMP: 5                   # 서행·방지턱: 잘못 봐도 시간만 조금 손해
+    mode_vote_need.M6_ZIGZAG: 0                 # (받는 표지 없음)
+    mode_vote_need.M8_CONES: 0                  # (받는 표지 없음)
     yellow_action: none                    # none: 명령 없음, pause: 정지선 앞 정지 요청
     # 원본 영상 bbox 높이(px). 0=크기 필터 끔. 현장 시험 후 클래스별 조정.
     min_bbox_height_px.red: 0.0
