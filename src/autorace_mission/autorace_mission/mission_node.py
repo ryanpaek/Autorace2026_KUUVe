@@ -290,7 +290,8 @@ class MissionNode(Node):
                                          if self.use_class_commands else None),
                       detections=dict(self.det), new_detection_frame=self.new_det,
                       lane=self.lane, obstacle=self.obstacle, parking=self.parking,
-                      start=self.start_flag, route_s=route_s, tilt_rate=getattr(self, 'tilt_peak', None))
+                      start=self.start_flag, route_s=route_s, tilt_rate=getattr(self, 'tilt_peak', None),
+                      dist_signed_mm=self.route_dist_mm)
 
     # --- 틱 -----------------------------------------------------------------
     def _tick(self):
@@ -350,6 +351,7 @@ class MissionNode(Node):
 
         state = {'state': self.fsm.state, 'sub': self.fsm.sub, 'source': source,
                  'fork_choice': self.fsm.fork_choice, 'dist_mm': round(self.dist_mm),
+                 'dist_signed_mm': round(self.route_dist_mm),     # 후진을 뺀 거리 (m7_link 위치용)
                  'estop': self.estop, 'note': cmd.note,
                  'parking_sign': self.fsm.parking_sign, 'parking_armed': self.fsm.parking_armed,
                  'route': self.tracker.state() if self.route_active else None}

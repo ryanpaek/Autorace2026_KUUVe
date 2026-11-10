@@ -9,6 +9,7 @@ LIMO 드라이버·카메라·라이다를 먼저 띄운 뒤 실행한다 (애�
   ros2 launch autorace_bringup autorace.launch.py m7_avoid:=true            # M7을 limo_obstacle_avoid로
   ros2 launch autorace_bringup autorace.launch.py m7_avoid:=true m7_dry_run:=true   # 판단만 (바퀴는 차선)
   ros2 launch autorace_bringup autorace.launch.py m7_avoid:=true use_fork_node:=true  # + 갈림길 판단 노드
+  ros2 launch autorace_bringup autorace.launch.py m7_avoid:=true use_map:=false     # 맵 없이 (표지·카메라 선·차선·구간 거리)
 출발: ros2 topic pub --once /mission/start std_msgs/msg/Empty
 """
 
@@ -18,7 +19,7 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.conditions import IfCondition
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
@@ -48,6 +49,9 @@ def generate_launch_description():
     use_detector = LaunchConfiguration('use_detector')
     use_bridge = LaunchConfiguration('use_ackermann_bridge')
     route = LaunchConfiguration('route_file')
+    # use_map:=false 면 mission_node에 경로 지도를 안 준다 (debug_view는 그림용으로 계속 받음)
+    route_mission = PythonExpression(["'", route, "' if '", LaunchConfiguration('use_map'),
+                                      "'.lower() == 'true' else ''"])
     m7_avoid = LaunchConfiguration('m7_avoid')
     m7_dry = LaunchConfiguration('m7_dry_run')
     return LaunchDescription([
@@ -58,6 +62,8 @@ def generate_launch_description():
         # 도면 경로 지도. 끄려면 route_file:=''
         DeclareLaunchArgument('route_file',
                               default_value=os.path.join(share, 'config', 'track_route.yaml')),
+        # 맵 없이 달리기: false면 FSM·M7 연결이 도면 위치 없이 표지·카메라 선·차선 종류·구간 거리로만 판단
+        DeclareLaunchArgument('use_map', default_value='true'),
         DeclareLaunchArgument('use_detector', default_value='true'),
         DeclareLaunchArgument('use_class_commands', default_value='true'),
         # 이 LIMO의 애커만 드라이버는 /limo/ack_cmd(AckermannDrive)만 받는다
@@ -81,7 +87,7 @@ def generate_launch_description():
         Node(package='autorace_lane', executable='lane_node', name='lane_node',
              parameters=[params, {'bev_config': bev}], output='screen'),
         Node(package='autorace_mission', executable='mission_node', name='mission_node',
-             parameters=[params, {'start_state': start_state, 'route_file': route,
+             parameters=[params, {'start_state': start_state, 'route_file': route_mission,
                                   'm7_external_avoid': ParameterValue(m7_avoid, value_type=bool),
                                   'use_class_commands': ParameterValue(
                                       LaunchConfiguration('use_class_commands'), value_type=bool)}],

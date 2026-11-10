@@ -206,7 +206,9 @@ class M7Link:
         """
         out: List[Tuple] = []
         state = mission.get('state')
-        dist = float(mission.get('dist_mm') or 0.0)
+        # 11/10: 후진을 뺀 거리가 있으면 그걸 쓴다 (회피 노드 되돌아가기로 pos가 부풀어 표지 끄기가 일찍 켜지지 않게)
+        ds = mission.get('dist_signed_mm')
+        dist = float(ds if ds is not None else (mission.get('dist_mm') or 0.0))
 
         if state != M7_STATE:
             if self.in_m7 and self.phase in ('armed', 'running'):

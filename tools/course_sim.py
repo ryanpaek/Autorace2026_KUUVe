@@ -50,12 +50,13 @@ def sign_windows(P):
     }
 
 
-def run(name, miss=(), odom_scale=1.0, jump_at=None, camera=True, seed=1, verbose=True, guard_source=True):
+def run(name, miss=(), odom_scale=1.0, jump_at=None, camera=True, seed=1, verbose=True, guard_source=True,
+        use_map=True):
     rnd = random.Random(seed)
     route = RouteMap.from_yaml(os.path.join(CFG, 'track_route.yaml'))
     P = dict(route.points)
     fsm_p, mp, cp = load_params()
-    fsm_p.update(route_points=route.points, m7_external_avoid=True)
+    fsm_p.update(route_points=route.points if use_map else {}, m7_external_avoid=True)   # use_map=False: 맵 없이
     fsm = MissionFSM(fsm_p)
     tracker = RouteTracker(route, gate_mm=mp.get('route_gate_mm', 250.0), gain=mp.get('route_gain', 0.6))
     router = ClassCommandRouter(cp.get('conf_threshold', 0.5), cp.get('yellow_action', 'none'),
@@ -131,9 +132,9 @@ def run(name, miss=(), odom_scale=1.0, jump_at=None, camera=True, seed=1, verbos
             obstacle = {'cone_any_ahead_mm': min(ahead) if ahead else None, 'cones_done': False,
                         'cone_ahead_mm': None}
         lane = {'status': 'NONE' if P['m8_start_line'] < s < P['m8_end_line'] + 200 else 'BOTH',
-                'stoplines_mm': lines}
+                'stoplines_mm': lines, 'crosswalk_lines_mm': xw}   # 차선 노드는 횡단보도 선을 따로 줌
         parking = {'done': fsm.state == 'M4_PARKING' and fsm.parking_armed and s > P['m4_parking_from'] + 300}
-        inp = Inputs(t=t, dist_mm=dist, route_s=route_s, lane=lane, obstacle=obstacle, parking=parking,
+        inp = Inputs(t=t, dist_mm=dist, route_s=route_s if use_map else None, lane=lane, obstacle=obstacle, parking=parking,
                      confirmed_classes=dict(inbox.classes), new_detection_frame=(k % 4 == 0),
                      start=not started, tilt_rate=tilt)
         started = True
@@ -177,6 +178,10 @@ SCENARIOS = {
     'odom_jump': {'jump_at': 15000.0},
     'odom_5pct_long': {'odom_scale': 1.05},
     'no_camera_lines': {'camera': False},
+    # 맵 없이 (use_map:=false): 표지·카메라 선·구간 거리로만
+    'nomap_nominal': {'use_map': False},
+    'nomap_signs_missed': {'use_map': False, 'miss': ('slow', 'bump', 'pedestrian', 'fork_b', 'parking')},
+    'nomap_odom_5pct_long': {'use_map': False, 'odom_scale': 1.05},
 }
 
 if __name__ == '__main__':

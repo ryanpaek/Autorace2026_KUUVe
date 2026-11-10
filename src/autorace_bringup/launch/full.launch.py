@@ -27,7 +27,8 @@ def _inc(pkg, *path, args=None, condition=None):
 
 def generate_launch_description():
     sensors = IfCondition(LaunchConfiguration('sensors'))
-    passed = ('start_state', 'parking', 'm7_avoid', 'use_fork_node', 'use_detector', 'use_class_commands')
+    passed = ('start_state', 'parking', 'm7_avoid', 'use_fork_node', 'use_detector', 'use_class_commands',
+              'use_map')
     return LaunchDescription([
         DeclareLaunchArgument('sensors', default_value='true'),
         DeclareLaunchArgument('start_state', default_value='WAIT_START'),
@@ -36,6 +37,7 @@ def generate_launch_description():
         DeclareLaunchArgument('use_fork_node', default_value='true'),
         DeclareLaunchArgument('use_detector', default_value='true'),
         DeclareLaunchArgument('use_class_commands', default_value='true'),
+        DeclareLaunchArgument('use_map', default_value='true'),     # false: 맵 없이
         _inc('limo_base', 'launch', 'limo_base_ackerman.launch.py', condition=sensors),
         _inc('ydlidar_ros2_driver', 'launch', 'ydlidar.launch.py', condition=sensors),
         _inc('orbbec_camera', 'launch', 'dabai.launch.py',

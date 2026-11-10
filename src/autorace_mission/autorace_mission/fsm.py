@@ -98,6 +98,9 @@ DEFAULT_PARAMS = {
     # route_s가 들어오면 위의 *_len_mm 거리 대신 도면 위치로 구간을 넘긴다.
     'route_points': {},
     'route_slow_before_mm': 300.0,   # 서행 선 이만큼 앞에서 표지를 못 봐도 서행 시작
+    # 맵 없이 달릴 때(route_file:='' / use_map:=false) 도면 위치 대신 쓰는 구간 거리 (도면값에서 계산, TODO 실측)
+    'noroute_m5_slow_mm': 1210.0,    # M5(출발) 진입 후 이만큼: 서행 선(1510) - route_slow_before_mm(300)
+    'noroute_m4_arm_mm': 1000.0,     # M4 진입(신호등 횡단보도 끝 지남) 후 이만큼: 주차 앞 선 800 mm 앞 (도면 1831 - 800)
     'route_island_margin_mm': 300.0, # 섬 끝 이만큼 앞에서 M7 -> M2
 }
 
@@ -140,6 +143,7 @@ class Inputs:
     confirmed_classes: Optional[dict] = None   # 발행부에서 투표를 통과한 지속 요청. None=기존 원시 검출 경로
     route_s: Optional[float] = None            # 도면 경로상 위치 (route.RouteTracker). 없으면 거리 기준
     tilt_rate: Optional[float] = None          # 지난 틱 이후 IMU 앞뒤·좌우 회전 속도 최대값 (rad/s). 방지턱 감지
+    dist_signed_mm: Optional[float] = None     # 후진을 뺀 누적 거리 (mission_node route_dist_mm). M7 강제 종료 거리에 씀
 
 
 @dataclass
@@ -257,6 +261,7 @@ class MissionFSM:
         self.log.append(f'{self.state or "-"} -> {state} {why}'.strip())
         self.state = state
         self.enter_t, self.enter_dist = inp.t, inp.dist_mm
+        self.enter_dist_s = inp.dist_signed_mm
         self._sub('', inp)
         for v in self.votes.values():
             v.reset()
@@ -381,6 +386,8 @@ class MissionFSM:
         if self.state in SEQUENCE[1:-1]:
             # 표지판·선·도면 위치가 1순위. 거리는 마지막 안전장치(2순위)로만 쓴다.
             _, d = self._since(inp)
+            if inp.dist_signed_mm is not None and self.enter_dist_s is not None:
+                d = inp.dist_signed_mm - self.enter_dist_s     # 11/10: 후진(M7 되돌아가기·주차 재정렬)은 빼고 셈
             if d > self.p['state_max_mm']:
                 self._next(inp, f'FALLBACK: state distance limit {d:.0f}mm (no sign/line seen)')
         cmd = getattr(self, '_s_' + self.state)(inp)
@@ -404,8 +411,11 @@ class MissionFSM:
         if self.sub == '':
             # 1순위 표지(명령), 2순위 도면 위치. 명령 경로(use_class_commands)에서도 표지를 놓치면 도면으로 서행
             sign = self._vote(inp, 'slow', 'bump')
-            if sign or self._past(inp, 'm5_slow_line', -self.p['route_slow_before_mm']):
-                self._sub('slow', inp, 'sign' if sign else 'FALLBACK: slow line by route')
+            near = self._past(inp, 'm5_slow_line', -self.p['route_slow_before_mm'])
+            if near is None:                  # 맵 없음: 출발(M5 진입)부터 거리. 출발 직후라 오도메트리 오차 작음
+                near = self._since(inp)[1] >= self.p['noroute_m5_slow_mm']
+            if sign or near:
+                self._sub('slow', inp, 'sign' if sign else 'FALLBACK: slow line by route/distance')
             else:
                 return Command('lane', self._lane(self.p['base_speed']))
         _, d = self._since(inp, sub=True)
@@ -433,6 +443,11 @@ class MissionFSM:
             self._sub('zigzag', inp, f'start line ({self.line.how or "route/distance"})')
         _, dz = self._since(inp, sub=True)
         end = self._past(inp, 'm6_zigzag_end')
+        if end is None and self._crosswalk_near(inp):
+            # 맵 없음 (11/10): 거리(zigzag_len_mm)로만 끝내면 M3가 정지선 약 20cm 앞(카메라 사각지대)에서 시작해
+            # 횡단보도를 못 보고 지나친다 -> 카메라가 횡단보도를 arm_on_crosswalk_mm 안에서 보면 바로 M3로
+            self._next(inp, f'zigzag done: crosswalk ahead (camera) {dz:.0f}mm')
+            return Command('lane', self._lane(self.p['slow_speed']))
         if (dz >= self.p['zigzag_len_mm']) if end is None else end:
             self._next(inp, f'zigzag done {dz:.0f}mm')
             return Command('lane', self._lane(self.p['slow_speed']))
@@ -493,6 +508,10 @@ class MissionFSM:
         예전처럼 섬 끝 30 cm 앞에서 넘기면 마지막 차로 변경 도중에 차선 주행이 끼어든다 -> m7_done을 기다린다."""
         force = self._past(inp, 'm7_island_tip', self.p['m7_force_after_island_mm'])
         if force is None:
+            # 맵 없음: M7 진입 후 거리. 회피 노드가 후진(되돌아가기)하면 누적 거리가 부풀어 섬 전에 끝나므로
+            # 후진을 뺀 거리가 있으면 그걸 쓴다 (11/10)
+            if inp.dist_signed_mm is not None and self.enter_dist_s is not None:
+                d = inp.dist_signed_mm - self.enter_dist_s
             force = d >= self.p['m7_len_mm'] + self.p['m7_force_after_island_mm']
         if done or force:
             self._next(inp, 'obstacle zone done' if done else f'm7 forced end at {d:.0f}mm')
@@ -634,7 +653,10 @@ class MissionFSM:
             return Command('stop', self._lane(0.0))
         if not self.parking_armed:
             near = self._past(inp, 'm4_pre_line', -self.p['m4_arm_before_mm'])
-            # 표지(명령) 1순위, 도면상 앞 선 근처 2순위. 경로 지도가 없으면: 원시 검출 경로는 바로, 명령 경로는 표지만
+            # 표지(명령) 1순위, 도면상 앞 선 근처 2순위. 경로 지도가 없으면: 원시 검출 경로는 바로,
+            # 명령 경로는 표지 또는 M4 진입 후 거리 (11/10: 예전엔 표지를 놓치면 영영 주차를 안 했다)
+            if near is None and inp.confirmed_classes is not None:
+                near = self._since(inp)[1] >= self.p['noroute_m4_arm_mm']
             if self.parking_sign or near or (near is None and inp.confirmed_classes is None):
                 self.parking_armed = True
                 self._sub('armed', inp, 'parking sign' if self.parking_sign
