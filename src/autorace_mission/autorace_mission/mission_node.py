@@ -31,7 +31,7 @@ from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from sensor_msgs.msg import Imu
 from std_msgs.msg import Bool, Empty, Float32, String
 
@@ -119,6 +119,7 @@ class MissionNode(Node):
         self.lane = {}
         self.new_lane = False
         self.obstacle = {}
+        self.m7_exit_lane = None     # /m7/exit_lane: M7이 끝난 차로 {'lane': 1|2|3, 'fork': 'A'|'B'|None, ...}
         self.parking = {}
         self.start_flag = False
         self.estop = False
@@ -135,6 +136,10 @@ class MissionNode(Node):
             self.create_subscription(String, '/perception/detections', self._on_det, 10)
         self.create_subscription(String, '/lane/status', self._on_lane, 10)
         self.create_subscription(String, '/obstacle/state', self._json_cb('obstacle'), 10)
+        # M7이 끝난 차로 (latched): M2 시작 때 이 차로에서 이어 주행. /obstacle/state의 m7_exit가 없을 때 대신 씀
+        latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                             reliability=ReliabilityPolicy.RELIABLE)
+        self.create_subscription(String, '/m7/exit_lane', self._on_m7_exit, latched)
         self.create_subscription(String, '/parking/state', self._json_cb('parking'), 10)
         self.create_subscription(Odometry, self.get_parameter('odom_topic').value,
                                  self._on_odom, qos_profile_sensor_data)
@@ -162,6 +167,21 @@ class MissionNode(Node):
             except json.JSONDecodeError:
                 pass
         return cb
+
+    def _on_m7_exit(self, msg):
+        try:
+            self.m7_exit_lane = json.loads(msg.data)
+        except json.JSONDecodeError:
+            return
+        self.get_logger().info(f'/m7/exit_lane 받음: {self.m7_exit_lane.get("text") or self.m7_exit_lane}')
+
+    def _obstacle_input(self) -> dict:
+        """M2에서 /obstacle/state에 m7_exit가 없으면(obstacle_node 재시작 등) /m7/exit_lane 값으로 채운다."""
+        ob = self.obstacle
+        ex = getattr(self, 'm7_exit_lane', None) or {}
+        if self.fsm.state == 'M2_FORK' and ob.get('m7_exit') not in ('A', 'B') and ex.get('fork') in ('A', 'B'):
+            ob = dict(ob, m7_exit=ex['fork'])
+        return ob
 
     def _on_lane(self, msg):
         try:
@@ -254,7 +274,7 @@ class MissionNode(Node):
                       confirmed_classes=(dict(self.command_inbox.classes)
                                          if self.use_class_commands else None),
                       detections=dict(self.det), new_detection_frame=self.new_det,
-                      lane=self.lane, obstacle=self.obstacle, parking=self.parking,
+                      lane=self.lane, obstacle=self._obstacle_input(), parking=self.parking,
                       start=self.start_flag, route_s=route_s, tilt_rate=getattr(self, 'tilt_peak', None))
 
     # --- 틱 -----------------------------------------------------------------
@@ -314,10 +334,17 @@ class MissionNode(Node):
                  'fork_choice': self.fsm.fork_choice, 'dist_mm': round(self.dist_mm),
                  'estop': self.estop, 'note': cmd.note,
                  'parking_sign': self.fsm.parking_sign, 'parking_armed': self.fsm.parking_armed,
+                 'm7_exit_lane': (self.m7_exit_lane or {}).get('lane'),
                  'route': self.tracker.state() if self.route_active else None}
         self.state_pub.publish(String(data=json.dumps(state)))
         if (self.fsm.state, self.fsm.sub) != self._last_state:
             self.get_logger().info(f'[{self.fsm.state}/{self.fsm.sub}] {self.fsm.log[-1]}')
+            if self.fsm.state == 'M7_OBSTACLE' and (self._last_state or (None,))[0] != 'M7_OBSTACLE':
+                self.m7_exit_lane = None             # 지난 주행의 latched 값은 버림
+            if self.fsm.state == 'M2_FORK' and (self._last_state or (None,))[0] != 'M2_FORK':
+                ex = self.m7_exit_lane or {}
+                self.get_logger().info(f'[M2] 시작 차로: {ex.get("lane", "?")}차선 (fork {ex.get("fork")}, '
+                                       f'/m7/exit_lane) / 표지 {self.fsm.fork_choice}')
             self._last_state = (self.fsm.state, self.fsm.sub)
 
 

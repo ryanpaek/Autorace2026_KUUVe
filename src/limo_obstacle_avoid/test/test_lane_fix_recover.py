@@ -113,6 +113,7 @@ def test_small_and_huge_clusters_ignored():
 
 def test_lane_keep_blends_lane_node_kappa():
     pl = running(0.0)
+    pl.p.lane_keep_blend = 0.5
     pl.lane_fix({**lane(0.0), 'kappa': 0.5}, 10.0)
     w_blend = pl.control(0.2, 10.1, in_lane=True)
     assert pl.blend_used and abs(w_blend - 0.2 * 0.25) < 1e-6    # 회피 곡률 0 + 차선 0.5 x 0.5
@@ -132,3 +133,38 @@ def test_rollback_finds_other_lane():
     lx = P().lidar_x
     r = _run_layout([(0.6 + lx, 0), (0.75 + lx, 1)])
     assert r['done'] and not r['collided']
+
+
+# ---------------------------------------------------------------- 11/10 오후 (M7 3~5단계)
+def test_lane_keep_default_is_exactly_team_lane_driving():
+    """기본(1.0): 차로 안 직진 조향 = 팀 차선 주행과 같은 v x kappa."""
+    pl = running(0.0)
+    pl.lane_fix({**lane(0.0), 'kappa': 0.37}, 10.0)
+    w = pl.control(0.2, 10.1, in_lane=True)
+    assert pl.blend_used and abs(w - 0.2 * 0.37) < 1e-9
+
+
+def test_single_lidar_point_is_not_emergency():
+    pl = running(0.0)
+    pl.update_scan([(0.30, 0.0)])                                # 범퍼 앞 10cm 점 하나 (튀는 값)
+    assert not pl.emergency
+    pl.update_scan([(0.30, 0.0), (0.30, 0.01)])                  # 두 점 이상이면 비상
+    assert pl.emergency
+
+
+def test_swing_after_trail_used_up_instead_of_standing():
+    """trail을 다 써도(여기선 0번) 서 있지 않고 최대 조향 후진으로 방향을 다시 잡아 통과."""
+    import stress_sim as ss
+    for sw, want in ((0, False), (6, True)):
+        p = AvoidParams()
+        p.recover_max, p.recover_swing_max = 0, sw
+        r = ss.run([(0.6 + p.lidar_x, 0)], p, 4.38, seed=1)
+        assert r['done'] is want and not r['collided']
+
+
+def test_tight_pair_no_wrong_heading_alignment():
+    """앞뒤 15cm로 붙은 두 대로 방향을 재면 6° 틀어져 가장자리를 넘었다 -> 옆 위치만 보정."""
+    import stress_sim as ss
+    p = AvoidParams()
+    r = ss.run([(0.6 + p.lidar_x, 0), (0.75 + p.lidar_x, 1)], p, 4.38, seed=1)
+    assert r['ok'] and r['off_edge'] <= 0

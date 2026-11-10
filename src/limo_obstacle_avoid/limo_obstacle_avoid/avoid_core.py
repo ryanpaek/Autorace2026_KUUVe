@@ -82,10 +82,11 @@ class AvoidParams:
     better_margin: float = 0.3        # 옮길 차선이 지금보다 이만큼 더 비어야 옮김
     hold_time: float = 0.8            # 차선 바꾼 뒤 최소 유지 시간 [s]
     stop_dist: float = 0.25           # 갈 곳 없고 앞이 이만큼 가까우면 정지
+    emerg_min_pts: int = 2            # 비상정지 박스 안에 점이 이만큼 있어야 비상 (라이다 점 하나 튀어서 서는 것 방지)
     # ── 제어 (pure pursuit) ──
     v_cruise: float = 0.25            # 차선 안에서 속도
     v_change: float = 0.20            # 차선 변경 중 속도
-    lookahead: float = 0.50           # pure pursuit 전방주시거리
+    lookahead: float = 0.40           # pure pursuit 전방주시거리 (11/10 0.50 -> 0.40: 시뮬레이션 장애물 최소 간격 7.7 -> 12cm 이상)
     min_turn_radius: float = 0.53     # LIMO 아커만 최소 회전반경 실측값 (이보다 작게 두면 못 도는 경로를 계획)
     max_heading_deg: float = 40.0     # 이 이상 비틀어지면 더 꺾지 않음
     reach_tol: float = 0.08           # 차선 중심에서 이 안이면 '도착'
@@ -103,6 +104,8 @@ class AvoidParams:
     align_max_heading_deg: float = 6.0    # 누적 방향 보정 한계 [deg]
     align_w_min: float = 0.14         # 폭이 이 범위인 장애물만 사용 (일부만 보인 것 제외)
     align_w_max: float = 0.32
+    align_min_span: float = 0.8       # 방향 보정은 앞뒤로 이만큼 떨어진 장애물들이 있을 때만 (가까우면 옆 위치만)
+    align_max_psi_deg: float = 15.0   # 차가 이보다 비틀어져 있거나 후진(탈출) 중이면 정렬 보정 안 함
     # ── 카메라 차선 보정 (팀 lane_node의 /lane/status 를 그대로 받아 옆 위치·방향을 맞춤) ──
     #   차선 코드를 복사하지 않고 같은 노드의 결과를 쓰므로 차선 주행과 항상 같은 기준
     lane_fix: bool = True
@@ -114,18 +117,19 @@ class AvoidParams:
     lane_id_window: int = 7
     lane_id_need: int = 5
     # 차로 안에서 똑바로 갈 때 조향 = (1-a) x 회피 pure pursuit + a x 차선 노드 곡률 (양쪽 선 보임 + 같은 차로일 때만)
-    lane_keep_blend: float = 0.5
+    lane_keep_blend: float = 1.0      # 11/10 오후 0.5 -> 1.0: 차로 안 직진은 팀 차선 주행과 완전히 같은 조향 (v x kappa)
     lane_fresh_sec: float = 0.3
     lane_fix_gate: float = 0.15       # 지금 추정과 이만큼 넘게 다르면 다른 차로를 본 것 → 안 씀 [m]
     lane_fix_max_deg: float = 10.0    # 차선 방향이 이보다 틀어져 보이면 안 씀 (차로 변경 중·3차선 입구 사선)
     lane_row: float = 0.55            # 차선 노드 offset_mm 을 재는 행 (기준점 앞 m)
     # ── 멈춤 탈출: 막혀서 서 있으면 상황이 안 바뀌어 계속 선다 → 조금 후진하며 크게 꺾어 다시 잡음 ──
     recover: bool = True
-    recover_after: float = 0.8        # 이만큼 계속 막혀 있으면 탈출 시작 [s]
+    recover_after: float = 0.4        # 이만큼 계속 막혀 있으면 탈출 시작 [s] (0.8 -> 0.4: 서 있는 시간 줄임)
     recover_dist: float = 0.25        # 후진 거리 [m] (방금 지나온 길이라 비어 있음)
     recover_speed: float = 0.10       # 후진 속도 [m/s]
     recover_time: float = 4.0         # 이 시간 안에 못 끝내도 멈추고 다시 계획 [s]
-    recover_max: int = 3              # 최대 횟수. 넘으면 예전처럼 정지 유지
+    recover_max: int = 3              # trail 방식 횟수
+    recover_swing_max: int = 6        # trail을 다 쓰고도 막히면: 후진하며 최대 조향으로 머리를 빈 쪽으로 돌리기 횟수 (0이면 예전처럼 정지)
     # 온 길 되돌아가기(11/10): 막히면 지나온 길(trail)을 그대로 후진하면서, 갈 수 있는 차로가 생기는 순간 멈추고 그리로 간다
     recover_mode: str = 'trail'       # 'trail' | 'swing'(예전: 25cm 후진하며 크게 꺾기)
     trail_step: float = 0.05          # 지나온 길 점 간격 [m]
@@ -228,7 +232,9 @@ class AvoidPlanner:
         self.stuck_since = None      # 막혀서 서 있기 시작한 시각
         self.rec = None              # 탈출 중이면 {'t0', 'x0', 'y0', 'side'}
         self.rb = None               # 되돌아가기 중이면 {'t0', 'x0', 'y0', 'dist', 'blocked'}
-        self.rec_n = 0               # 탈출 횟수
+        self.rec_n = 0               # 탈출 횟수 (trail + swing)
+        self.rec_side_last = None    # 마지막 swing 방향
+        self.rec_same_side = 0
         self.lane_fix_n = 0          # 카메라 차선으로 보정한 횟수 (status)
         self.lane_fix_dy = 0.0       # 마지막 보정량 [m]
         self.trail = []              # 지나온 길 [(x, y)] (되돌아가기)
@@ -274,7 +280,7 @@ class AvoidPlanner:
         c, s = math.cos(psi), math.sin(psi)
         ylim = (p.num_side_lanes + 0.5) * p.lane_width + p.roi_side_extra
 
-        emerg = False
+        emerg_n = 0
         clusters, cur = [], []
         prev = None
 
@@ -295,7 +301,7 @@ class AvoidPlanner:
             px, py = pt
             # 비상정지 박스: 앞범퍼 바로 앞, 차폭 안
             if p.robot_front < px < p.robot_front + p.stop_dist and abs(py) < p.robot_half_width:
-                emerg = True
+                emerg_n += 1
             X = x + px * c - py * s
             Y = y + px * s + py * c
             if not (x - p.roi_back <= X <= x + p.roi_front and -ylim <= Y <= ylim):
@@ -307,7 +313,7 @@ class AvoidPlanner:
             prev = (X, Y)
         close()
 
-        self.emergency = emerg
+        self.emergency = emerg_n >= max(1, p.emerg_min_pts)
         self.last_clusters = clusters
         self._merge(clusters)
         self._align()
@@ -321,6 +327,8 @@ class AvoidPlanner:
         p = self.p
         if not p.lane_align:
             return
+        if self.rec is not None or self.rb is not None or abs(math.degrees(self.pose.psi)) > p.align_max_psi_deg:
+            return      # 후진·크게 비틀어진 동안은 장애물 옆면이 비스듬히 보여 중심이 틀어짐 -> 정렬에 안 씀
         xs, rs = [], []
         for o in self.obs:
             if o.virtual or o.hits < p.confirm_hits:
@@ -348,6 +356,9 @@ class AvoidPlanner:
             return
         a = (t0 * s2 - s1 * t1) / det
         b = (s0 * t1 - s1 * t0) / det
+        if max(xs) - min(xs) < p.align_min_span:
+            # 장애물들이 앞뒤로 가까이 붙어 있으면 방향(기울기)은 잴 수 없다 (5cm 오차 / 15cm 간격 = 18°) -> 옆 위치만
+            a, b = t0 / s0, 0.0
         g = p.align_gain
         d = -g * b
         t = -g * a
@@ -634,6 +645,12 @@ class AvoidPlanner:
             return 1 if want > now else -1
         return 1 if d > 0 else -1
 
+    def _recover_limit(self):
+        p = self.p
+        if p.recover_mode == 'trail':
+            return p.recover_max + p.recover_swing_max
+        return p.recover_max
+
     def _recover_step(self, t):
         """후진하며 크게 꺾어 머리를 갈 쪽으로 돌린다. 끝나면 None."""
         p, r = self.p, self.rec
@@ -731,13 +748,19 @@ class AvoidPlanner:
                 out = self._rollback_step(t)
                 if out is not None:
                     return out
-            elif p.recover and self.rec_n < p.recover_max and t - self.stuck_since >= p.recover_after:
+            elif (p.recover and t - self.stuck_since >= p.recover_after
+                  and self.rec_n < self._recover_limit()):
+                # swing: trail을 다 썼거나(또는 recover_mode: swing) 지나온 길이 없음 -> 후진하며 최대 조향으로 머리를 빈 쪽으로
                 side = self._recover_side(obs)
+                if self.rec_side_last == side and self.rec_same_side >= 2:
+                    side = -side                       # 같은 쪽으로 두 번 돌려도 안 되면 반대쪽도 해 본다
+                self.rec_same_side = self.rec_same_side + 1 if side == self.rec_side_last else 1
+                self.rec_side_last = side
                 self.rec = {'t0': t, 'x0': x, 'y0': y, 'side': side}
                 self.rec_n += 1
                 why = '앞 비상' if self.emergency else '갈 차선 막힘'
-                self.events.append((x, f'멈춤 {t - self.stuck_since:.1f}s ({why}) → 탈출 {self.rec_n}/{p.recover_max}: '
-                                       f'{p.recover_dist:.2f}m 후진하며 {"왼쪽" if side > 0 else "오른쪽"}으로 머리 돌림'))
+                self.events.append((x, f'멈춤 {t - self.stuck_since:.1f}s ({why}) → 탈출 {self.rec_n}/{self._recover_limit()}: '
+                                       f'{p.recover_dist:.2f}m 후진하며 {"왼쪽" if side > 0 else "오른쪽"}으로 최대 조향'))
                 return self._recover_step(t)
         else:
             self.stuck_since = None
