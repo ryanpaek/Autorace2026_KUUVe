@@ -115,7 +115,7 @@ def drive(parked, target, overrides=None, y0=240.0, fov_deg=360.0, camera=False,
                                  'points': pn.scan_points(rng, amin, ainc, 0.05, 8.0, p['front_axle_from_lidar_mm']),
                                  'clusters_pair': pn.scan_clusters(rng, amin, ainc, 0.05, 8.0, p['front_axle_from_lidar_mm'], 0.0,
                                                                    max_dist_mm=max(1500.0, p['side_far_mm'] + 200.0),
-                                                                   x_mode='extent'),
+                                                                   x_mode='extent', min_size_mm=p['car_min_size_mm']),
                                  'clusters_box': pn.scan_clusters(rng, amin, ainc, 0.05, 8.0, p['front_axle_from_lidar_mm'], 0.0,
                                                                   max_dist_mm=1500.0, x_mode='box')})
         if log is not None:
@@ -337,3 +337,14 @@ def test_col5_centerline_found_and_followed():
         assert abs(col5_x - 1230.0) < 20.0, (lidar, col5_x)  # 2번 칸 가운데 x = 1230
         x, y, th = out['pose']
         assert abs(x + 105.0 * math.cos(th) - 1230.0) < 40.0     # 차체 중심 옆 위치
+
+
+def test_pair_ignores_small_objects():
+    """칸 사이·앞의 가는 기둥(표지판, 사람 다리)은 짝 후보가 아니다. 리모 면(220mm)은 남는다."""
+    pole = (285.0, 315.0, -515.0, -485.0)            # 오른쪽 50cm, 굵기 3cm 기둥 (xmin, xmax, ymin, ymax)
+    limo = (790.0, 1010.0, -760.0, -440.0)           # 리모 220 x 320
+    rng, amin, ainc = raycast(0.0, 0.0, 0.0, [pole, limo], n=1440)
+    small = pn.scan_clusters(rng, amin, ainc, 0.05, 8.0, 0.0, 0.0)
+    big = pn.scan_clusters(rng, amin, ainc, 0.05, 8.0, 0.0, 0.0, min_size_mm=pn.DEFAULTS['car_min_size_mm'])
+    assert len(small) == 2 and len(big) == 1
+    assert big[0][0] > 700.0

@@ -72,10 +72,13 @@ def yaw_from_quaternion(q):
 
 def scan_clusters(ranges, angle_min, angle_inc, rng_min, rng_max,
                   front_axle_from_lidar_mm=-47.0, laser_yaw=0.0,
-                  gap_mm=80.0, min_pts=3, max_size_mm=450.0, max_dist_mm=1500.0, x_mode='mean'):
+                  gap_mm=80.0, min_pts=3, max_size_mm=450.0, max_dist_mm=1500.0, x_mode='mean',
+                  min_size_mm=0.0):
     """라이다 스캔 -> 물체 덩어리 중심 목록 [(x, y)] (앞바퀴 기준, 앞 +, 왼쪽 +, mm).
 
     가까운 점끼리 묶고(gap_mm), LIMO 크기(max_size_mm)보다 큰 덩어리(벽 등)는 버린다.
+    min_size_mm: 덩어리의 가로·세로 중 긴 쪽이 이보다 작으면 버린다 (표지판 기둥·사람 다리·라바콘 등.
+    리모 차선 쪽 면 폭 220mm. 시야 끝에 반쯤 걸린 리모도 버려져 짝 위치가 쏠리지 않는다)
     """
     pts = []
     for i, r in enumerate(ranges):
@@ -102,7 +105,8 @@ def scan_clusters(ranges, angle_min, angle_inc, rng_min, rng_max,
         if len(c) < min_pts:
             continue
         xs, ys = [p[0] for p in c], [p[1] for p in c]
-        if max(max(xs) - min(xs), max(ys) - min(ys)) > max_size_mm:
+        size = max(max(xs) - min(xs), max(ys) - min(ys))
+        if size > max_size_mm or size < min_size_mm:
             continue
         # x_mode 'extent': 앞뒤(x)는 점들의 양 끝 가운데. 차선에서 리모를 보면 차선 쪽 끝면(폭 전체) + 한쪽 옆면이
         # 보여 평균이 우리 차 쪽으로 쏠린다 -> 짝의 앞뒤 위치는 양 끝 가운데가 정확 (11/10 시뮬레이션 약 6cm)
@@ -786,6 +790,11 @@ DEFAULTS = {
     'target_offset_mm': 50.0,  # ② 캡틴 값 "왼쪽 차선과 8cm" -> 차로 중심에서 왼쪽 50mm
                                #    (차로 안쪽 폭 480 가정: 240 - 80 - 차 반폭 110 = 50. 확인 필요)
     'follow_max_mm': 2500.0,   # 흰 선 뒤 이만큼 가도 리모를 못 찾으면 멈춤 (주차 구역 끝까지 약 2m)
+    # 정차 리모로 인정하는 덩어리 크기 (긴 쪽, mm). 짝(1·3/4·6) 찾기에만 씀 (꺾는 시점을 정하는 것).
+    # 리모 면은 220mm지만 라이다 시야 끝(약 ±105도)에 반쯤 걸린 리모가 60~130mm로 보이고, 짝은 이걸로 잡힐 때가 많다
+    # (11/10 시뮬레이션: 80 이상이면 뒷줄·1번 놓침 상황에서 짝을 못 찾음). 그래서 60: 표지판 기둥·가는 막대(약 30)만 버림.
+    # 사람 다리·라바콘(약 60~100)은 못 거름 -> 주차 구역 옆에 사람이 서 있지 않게
+    'car_min_size_mm': 60.0,
     'side_far_mm': 1300.0,     # ③ 오른쪽 리모 찾는 거리 (앞줄 약 0.4m, 뒷줄 약 1.0m)
     'extra_mm': 200.0,         # (추가) 리모 옆 확인 후 더 갈 거리. 0 = 캡틴 원래 계획 (시뮬레이션: 0이면 0점)
     'brake_mm': 23.0,          # 0.18 m/s 제동 거리 (calib 4번)
@@ -957,7 +966,8 @@ def main(args=None):
                                          g('front_axle_from_lidar_mm'), g('laser_yaw'))
                     clusters_pair = scan_clusters(s.ranges, s.angle_min, s.angle_increment, s.range_min,
                                                   s.range_max, g('front_axle_from_lidar_mm'), g('laser_yaw'),
-                                                  max_dist_mm=max(1500.0, g('side_far_mm') + 200.0), x_mode='extent')
+                                                  max_dist_mm=max(1500.0, g('side_far_mm') + 200.0), x_mode='extent',
+                                                  min_size_mm=g('car_min_size_mm'))
                     clusters_box = scan_clusters(s.ranges, s.angle_min, s.angle_increment, s.range_min,
                                                  s.range_max, g('front_axle_from_lidar_mm'), g('laser_yaw'),
                                                  max_dist_mm=1500.0, x_mode='box')
