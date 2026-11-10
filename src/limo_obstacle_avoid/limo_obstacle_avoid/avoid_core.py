@@ -81,7 +81,8 @@ class AvoidParams:
     clear_back: float = 0.0           # 옮길 차선의 차 끝이 (뒤범퍼 - 이값)보다 뒤여야 들어감 (음수=더 일찍)
     better_margin: float = 0.3        # 옮길 차선이 지금보다 이만큼 더 비어야 옮김
     hold_time: float = 0.8            # 차선 바꾼 뒤 최소 유지 시간 [s]
-    stop_dist: float = 0.25           # 갈 곳 없고 앞이 이만큼 가까우면 정지
+    stop_dist: float = 0.30           # 지금 조향대로 이만큼 더 가면 차체가 부딪힐 때만 정지(→ 후진). 옆 차로·옆에 붙은 장애물은 안 봄
+    path_margin: float = 0.02         # 위 판단에서 차체 둘레 여유 [m]
     emerg_min_pts: int = 2            # 비상정지 박스 안에 점이 이만큼 있어야 비상 (라이다 점 하나 튀어서 서는 것 방지)
     # ── 제어 (pure pursuit) ──
     v_cruise: float = 0.25            # 차선 안에서 속도
@@ -134,7 +135,7 @@ class AvoidParams:
     recover_mode: str = 'trail'       # 'trail' | 'swing'(예전: 25cm 후진하며 크게 꺾기)
     trail_step: float = 0.05          # 지나온 길 점 간격 [m]
     rollback_lookahead: float = 0.30  # 후진할 때 따라갈 뒤쪽 점 거리 [m]
-    rollback_max_dist: float = 1.50   # 한 번 되돌아갈 최대 거리 [m]
+    rollback_max_dist: float = 0.30   # 한 번 되돌아갈 최대 거리 [m] (11/10 1.5 -> 0.3: 크게 물러나지 않음)
     rollback_time: float = 15.0       # 한 번 되돌아가기 최대 시간 [s]
 
 
@@ -203,6 +204,23 @@ class Obstacle:
         return max(self.xmax, self.xmin + min_len)
 
 
+def _rect_hits_box(poly, xmin, xmax, ymin, ymax):
+    """돌아간 사각형(꼭짓점 4개)과 축 정렬 상자가 겹치나 (분리축)."""
+    xs = [q[0] for q in poly]
+    ys = [q[1] for q in poly]
+    if max(xs) < xmin or min(xs) > xmax or max(ys) < ymin or min(ys) > ymax:
+        return False
+    box = ((xmin, ymin), (xmax, ymin), (xmax, ymax), (xmin, ymax))
+    for i in range(2):
+        ex, ey = poly[i + 1][0] - poly[i][0], poly[i + 1][1] - poly[i][1]
+        ax, ay = -ey, ex
+        a = [qx * ax + qy * ay for qx, qy in poly]
+        b = [qx * ax + qy * ay for qx, qy in box]
+        if max(a) < min(b) or max(b) < min(a):
+            return False
+    return True
+
+
 # ──────────────────────────────────────────────────────────────
 # 3) 회피 플래너
 # ──────────────────────────────────────────────────────────────
@@ -221,6 +239,7 @@ class AvoidPlanner:
         self.last_switch = -1e9
         self.emergency = False
         self.blocked = False
+        self.hit_dist = INF          # 지금 조향대로 가면 부딪히는 거리 (status)
         self.exit_pref = parse_exit(self.p.exit_lane)
         self.note = ''
         self.events = []             # (x, '설명') 기록
@@ -731,8 +750,11 @@ class AvoidPlanner:
         # ③ 속도
         in_lane = abs(y - self.center(self.target)) < p.reach_tol
         v = p.v_cruise if in_lane else p.v_change
-        f_t = self.free_ahead(self.target, obs)
-        self.blocked = f_t < p.stop_dist
+        # 정지(→ 후진)는 '지금 조향대로 stop_dist 더 가면 차체가 부딪힘'일 때만.
+        #   예전: 가려는 차로 전체(옆에 붙은 장애물 포함, 거리 음수)를 봐서 옆 장애물만으로도 서고 후진했다.
+        k_now = self.control(1.0, t, in_lane)
+        self.hit_dist = self.path_hit(obs, k_now, p.stop_dist)
+        self.blocked = self.hit_dist < INF
         if self.blocked or self.emergency:
             v = 0.0
             # 서 있으면 상황이 안 바뀐다 → 잠시 뒤 후진하며 크게 꺾어 다시 잡기 (횟수 제한)
@@ -774,6 +796,33 @@ class AvoidPlanner:
 
         return v, self.control(v, t, in_lane)
 
+    # ---------- 바로 앞 충돌 판단 ----------
+    def path_hit(self, obs, k, dist):
+        """곡률 k로 dist[m] 더 갈 때 차체(여유 path_margin)가 장애물과 처음 겹치는 거리. 없으면 INF.
+        실제 장애물과 섬만 본다 (출구 선호 가상벽은 차로 고르기용이라 제외)."""
+        p = self.p
+        boxes = [o for o in obs if not (o.virtual and o.tag == 'exit')]
+        if not boxes:
+            return INF
+        x0, y0, psi0 = self.pose.x, self.pose.y, self.pose.psi
+        hw = p.robot_half_width + p.path_margin
+        front, rear = p.robot_front + p.path_margin, p.robot_rear
+        n = max(1, int(math.ceil(dist / 0.05)))
+        for i in range(n + 1):
+            sd = dist * i / n
+            if abs(k) < 1e-6:
+                x, y, h = x0 + sd * math.cos(psi0), y0 + sd * math.sin(psi0), psi0
+            else:
+                h = psi0 + k * sd
+                x = x0 + (math.sin(h) - math.sin(psi0)) / k
+                y = y0 - (math.cos(h) - math.cos(psi0)) / k
+            c, s = math.cos(h), math.sin(h)
+            car = [(x + a * c - b * s, y + a * s + b * c) for a, b in ((front, hw), (front, -hw), (-rear, -hw), (-rear, hw))]
+            for o in boxes:
+                if _rect_hits_box(car, o.xmin, o.x_end(p.obs_min_len), o.ymin, o.ymax):
+                    return sd
+        return INF
+
     # ---------- pure pursuit (직선 y = 목표차선중심 따라가기) ----------
     def control(self, v, t=None, in_lane=False):
         p = self.p
@@ -809,6 +858,7 @@ class AvoidPlanner:
             'target': self.target,
             'now_lane': self.nearest_lane(self.pose.y),
             'emergency': self.emergency, 'blocked': self.blocked,
+            'hit_m': None if self.hit_dist == INF else round(self.hit_dist, 2),
             'recovering': self.rec is not None or self.rb is not None, 'recover_n': self.rec_n,
             'rollback': self.rb is not None, 'rollback_m': round(self.rollback_m, 2),
             'cam_lane': self.lane_id, 'lane_id_fix_n': self.lane_id_fix_n,
