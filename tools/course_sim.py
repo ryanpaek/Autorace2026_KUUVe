@@ -50,7 +50,8 @@ def sign_windows(P):
     }
 
 
-def run(name, miss=(), odom_scale=1.0, jump_at=None, camera=True, seed=1, verbose=True, guard_source=True):
+def run(name, miss=(), odom_scale=1.0, jump_at=None, camera=True, seed=1, verbose=True, guard_source=True,
+        m7_exit='B'):
     rnd = random.Random(seed)
     route = RouteMap.from_yaml(os.path.join(CFG, 'track_route.yaml'))
     P = dict(route.points)
@@ -125,7 +126,9 @@ def run(name, miss=(), odom_scale=1.0, jump_at=None, camera=True, seed=1, verbos
         obstacle = {}
         if fsm.state == 'M7_OBSTACLE':
             obstacle = {'m7_active': s >= P['m7_start_line'],
-                        'm7_done': s >= P['m7_island_tip'] - 300, 'm7_exit': 'B'}
+                        'm7_done': s >= P['m7_island_tip'] - 300, 'm7_exit': m7_exit}
+        elif fsm.state == 'M2_FORK':
+            obstacle = {'m7_exit': m7_exit}      # 실제 obstacle_node도 M7이 끝난 뒤 m7_exit를 계속 낸다
         if fsm.state == 'M8_CONES':
             ahead = [cs - s for cs, _ in cones if 0 < cs - s <= 1500]
             obstacle = {'cone_any_ahead_mm': min(ahead) if ahead else None, 'cones_done': False,
@@ -173,6 +176,8 @@ def run(name, miss=(), odom_scale=1.0, jump_at=None, camera=True, seed=1, verbos
 SCENARIOS = {
     'nominal': {},
     'signs_missed': {'miss': ('slow', 'bump', 'pedestrian', 'fork_b', 'parking')},
+    # 표지는 B인데 회피가 섬 전에 못 옮겨 A(왼쪽) 차로에서 끝남 -> 표지 B를 따르고 엇갈림을 로그로 남김
+    'fork_lane_conflict': {'m7_exit': 'A'},
     'slow_sign_only': {'miss': ('bump',)},
     'odom_jump': {'jump_at': 15000.0},
     'odom_5pct_long': {'odom_scale': 1.05},

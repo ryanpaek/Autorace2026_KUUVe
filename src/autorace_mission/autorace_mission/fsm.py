@@ -66,6 +66,8 @@ DEFAULT_PARAMS = {
     'm7_external_avoid': False,
     'm7_force_after_island_mm': 500.0,
     'fork_from_m7_exit': True,   # 갈림길 표지를 못 읽었으면 회피가 끝난 차로(A/B)를 그대로 쓴다 (섬을 건너지 않게)
+    'fork_follow_m7_exit': False,  # 표지(A/B)와 회피가 끝난 차로가 다를 때 차로를 따를지. 기본 false = 표지를 따른다:
+                                   # 규정상 반대 갈림길 진입은 M2 실패(10점)이고, 섬은 바닥 선이라 가로지르면 차로 이탈(1점)
     # 3차선: 차로 500mm, 바깥 실선은 노랑·안쪽 점선은 흰색(모의 맵 10/30 확인) -> 두 색 다 차선으로
     'three_lane_width_mm': 520.0,       # 도면: 선 사이 500 + 점선 20 = 선 가운데끼리 520 (회피 lane_width 0.52와 같게)
     'three_lane_color': 'both',         # 도면: M3 종료 ~ 우하단 코너(약1.6m) + 3차선 약4.5m(섬 오른쪽 끝까지)
@@ -489,6 +491,15 @@ class MissionFSM:
         exit_lane = inp.obstacle.get('m7_exit')
         if self.fork_choice is None and self.p['fork_from_m7_exit'] and exit_lane in ('A', 'B'):
             self.fork_choice = exit_lane          # 이미 그 차로에 있다
+        if (self.sub == '' and exit_lane in ('A', 'B') and self.fork_choice in ('A', 'B')
+                and self.fork_choice != exit_lane):
+            # 회피가 섬 전에 표지 쪽 차로로 못 옮김 (거리 부족·장애물)
+            if self.p['fork_follow_m7_exit']:
+                self.log.append(f'M2 fork conflict: sign {self.fork_choice}, car in {exit_lane} lane -> follow lane {exit_lane}')
+                self.fork_choice = exit_lane
+            else:
+                self.log.append(f'M2 fork conflict: sign {self.fork_choice}, car in {exit_lane} lane -> follow sign '
+                                f'{self.fork_choice} (섬을 가로지름: 차로 이탈 감점 < 반대 진입 실패)')
         if self.fork_choice is None:
             t, _ = self._since(inp)
             if t <= self.p['fork_seek_timeout_sec']:

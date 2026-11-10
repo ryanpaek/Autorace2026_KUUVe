@@ -163,3 +163,32 @@ def test_m7_external_hold_stops():
     assert held.source == 'stop' and fsm.state == 'M7_OBSTACLE'
     lost = fsm.step(Inputs(t=0.2, dist_mm=20.0, route_s=14020.0, obstacle={'m7_active': False}))
     assert lost.source == 'lane'                   # hold가 없으면 예전대로 (코너 구간 등)
+
+
+def _m2_fsm(**kw):
+    return MissionFSM({'start_state': 'M2_FORK', 'route_points': {'m7_island_tip': 17973.0, 'm2_merge_end': 20272.0},
+                       **kw})
+
+
+def test_m2_sign_wins_over_m7_exit_lane_and_logs_conflict():
+    """표지는 A인데 회피가 섬 전에 못 옮겨 B 차로에서 끝남 -> 표지 A (반대 진입은 M2 실패, 섬 가로지르기는 이탈 1점)."""
+    fsm = _m2_fsm()
+    fsm.fork_choice = 'A'
+    cmd = fsm.step(Inputs(t=0.0, dist_mm=0.0, route_s=18300.0, obstacle={'m7_exit': 'B'}))
+    assert fsm.fork_choice == 'A' and cmd.lane.get('mode') == 'left_only'
+    assert any('fork conflict' in l and 'follow sign' in l for l in fsm.log)
+
+
+def test_m2_follow_lane_option():
+    fsm = _m2_fsm(fork_follow_m7_exit=True)
+    fsm.fork_choice = 'A'
+    cmd = fsm.step(Inputs(t=0.0, dist_mm=0.0, route_s=18300.0, obstacle={'m7_exit': 'B'}))
+    assert fsm.fork_choice == 'B' and cmd.lane.get('mode') == 'right_only'
+
+
+def test_m2_agreeing_sign_and_lane_unchanged():
+    fsm = _m2_fsm()
+    fsm.fork_choice = 'A'
+    cmd = fsm.step(Inputs(t=0.0, dist_mm=0.0, route_s=18300.0, obstacle={'m7_exit': 'A'}))
+    assert fsm.fork_choice == 'A' and cmd.lane.get('mode') == 'left_only'
+    assert not any('fork conflict' in l for l in fsm.log)
