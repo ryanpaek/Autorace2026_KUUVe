@@ -86,8 +86,11 @@ def camera_lines(fx, fy, th):
     return sorted(d for d in out if 350.0 <= d <= 1900.0)
 
 
-def drive(parked, target, overrides=None, y0=240.0, fov_deg=360.0, camera=False, log=None):
-    """주차 논리(ParkingV2)를 가상 트랙에서 끝까지 돌린다 -> (칸 안 모서리 수, 충돌, 결과)."""
+def drive(parked, target, overrides=None, y0=240.0, fov_deg=360.0, camera=False, log=None, hide=(), out=None):
+    """주차 논리(ParkingV2)를 가상 트랙에서 끝까지 돌린다 -> (칸 안 모서리 수, 충돌, 결과).
+
+    hide: 라이다가 못 보는 리모의 parked 안 순서 (충돌 검사에는 그대로 들어감)
+    """
     p = dict(pn.DEFAULTS)
     p.update(overrides or {})
     logic = pn.ParkingV2(p)
@@ -96,7 +99,8 @@ def drive(parked, target, overrides=None, y0=240.0, fov_deg=360.0, camera=False,
     info = {'done': False, 'result': ''}
     for _ in range(int(60 / dt)):
         fx, fy = x + WB * math.cos(th), y + WB * math.sin(th)
-        rng, amin, ainc = raycast(fx + LIDAR_AHEAD * math.cos(th), fy + LIDAR_AHEAD * math.sin(th), th, boxes,
+        seen = [b for i, b in enumerate(boxes) if i not in hide]
+        rng, amin, ainc = raycast(fx + LIDAR_AHEAD * math.cos(th), fy + LIDAR_AHEAD * math.sin(th), th, seen,
                                   fov_deg=fov_deg)
         cl = pn.scan_clusters(rng, amin, ainc, 0.05, 8.0, p['front_axle_from_lidar_mm'], 0.0,
                               max_dist_mm=max(1500.0, p['side_far_mm'] + 200.0))
@@ -107,7 +111,13 @@ def drive(parked, target, overrides=None, y0=240.0, fov_deg=360.0, camera=False,
         lane_w = 0.18 * max(-1.89, min(1.89, 0.004 * (240.0 + offset - y) - 2.0 * th))   # 가짜 차선 노드
         v, k, info = logic.step({'t': t, 'dist_mm': dist, 'yaw': th, 'lane_v': 0.18, 'lane_w': lane_w,
                                  'stoplines_mm': lines, 'clusters': cl, 'blocked': bl,
-                                 'end_lines_mm': camera_lines(fx, fy, th) if camera else []})
+                                 'end_lines_mm': camera_lines(fx, fy, th) if camera else [],
+                                 'points': pn.scan_points(rng, amin, ainc, 0.05, 8.0, p['front_axle_from_lidar_mm']),
+                                 'clusters_pair': pn.scan_clusters(rng, amin, ainc, 0.05, 8.0, p['front_axle_from_lidar_mm'], 0.0,
+                                                                   max_dist_mm=max(1500.0, p['side_far_mm'] + 200.0),
+                                                                   x_mode='extent'),
+                                 'clusters_box': pn.scan_clusters(rng, amin, ainc, 0.05, 8.0, p['front_axle_from_lidar_mm'], 0.0,
+                                                                  max_dist_mm=1500.0, x_mode='box')})
         if log is not None:
             log.append(dict(info))
         if logic.lane_cfg:
@@ -129,6 +139,8 @@ def drive(parked, target, overrides=None, y0=240.0, fov_deg=360.0, camera=False,
             break
     x0, x1, yt, yb = cell(target)
     n_in = sum(1 for cx, cy in corners(x, y, th) if x0 < cx < x1 and yb < cy < yt)
+    if out is not None:
+        out.update(pose=(x, y, th), logic=logic, start=(-900.0, y0))
     return n_in, hit, info['result']
 
 
@@ -190,13 +202,13 @@ def test_park_front_row_cell2():
 
 
 def test_park_back_row_cell5():
-    n_in, hit, result = drive([4, 6], 5)
+    n_in, hit, result = drive([4, 6], 5, {'target_row': 'auto'})   # 11/10부터 기본은 2번 고정
     assert (n_in, hit, result) == (4, False, 'PARKED')
 
 
 def test_late_turn_recovers_by_realign():
     # 40cm 늦게 꺾어 앞이 막혀도 재정렬로 5번 칸에 들어간다 (예전 실패 사례)
-    n_in, hit, _ = drive([4, 6], 5, {'turn_lead_mm': -80.0})
+    n_in, hit, _ = drive([4, 6], 5, {'turn_lead_mm': -80.0, 'target_row': 'auto'})
     assert n_in == 4 and not hit
 
 
@@ -219,7 +231,7 @@ def test_narrow_fov_front_row_parks_by_memory():
 
 def test_narrow_fov_back_row_parks():
     log = []
-    n_in, hit, result = drive([4, 6], 5, fov_deg=NARROW, log=log)
+    n_in, hit, result = drive([4, 6], 5, {'target_row': 'auto'}, fov_deg=NARROW, log=log)
     assert (n_in, hit) == (4, False) and result.startswith('PARKED')
     assert log[-1]['row'] == 'back'
 
@@ -228,7 +240,8 @@ def test_camera_end_line_stops_in_right_row():
     """옆면 정지를 끄고(side_max_mm 50) 카메라만 주면 칸 끝 선으로 그 줄 칸 안에 선다. 앞줄=줄 사이 선, 뒷줄=테두리."""
     for parked, target in (([1, 3], 2), ([4, 6], 5)):
         log = []
-        n_in, hit, result = drive(parked, target, {'side_max_mm': 50.0}, fov_deg=NARROW, camera=True, log=log)
+        n_in, hit, result = drive(parked, target, {'side_max_mm': 50.0, 'target_row': 'auto'}, fov_deg=NARROW,
+                                  camera=True, log=log)
         assert (n_in, hit) == (4, False), (parked, n_in, result)
         assert log[-1]['stop_how'] == 'camera', (parked, log[-1]['stop_how'])
 
@@ -237,6 +250,51 @@ def test_cap_keeps_car_inside_cell_without_side_or_camera():
     """옆면도 카메라도 없으면 짝(깊이 보정)으로 칸 가운데를 조금 지나서 멈춤 -> 칸 밖으로 안 나감."""
     for parked, target in (([1, 3], 2), ([4, 6], 5)):
         log = []
-        n_in, hit, result = drive(parked, target, {'side_max_mm': 50.0}, fov_deg=NARROW, log=log)
+        n_in, hit, result = drive(parked, target, {'side_max_mm': 50.0, 'target_row': 'auto'}, fov_deg=NARROW, log=log)
         assert (n_in, hit) == (4, False), (parked, n_in, result)
         assert log[-1]['stop_how'] == 'cap', (parked, log[-1]['stop_how'])
+
+
+# ---------------------------------------------------------------- 11/10 대회 배치: 1·3·4·5·6에 정차 리모, 목표 2번
+FIVE = [1, 3, 4, 5, 6]
+
+
+def test_cell_line_ignores_diagonal_back_row():
+    """2번 칸에 들어가는 중 1·3번(옆, 조금 뒤)과 4·6번(대각선 앞)이 다 보여도 1·3번을 고른다."""
+    cl = [(-300.0, -400.0), (120.0, -420.0), (120.0, -60.0), (260.0, 310.0), (-250.0, 360.0)]
+    mx, my, ux, uy = pn.cell_line_from_neighbors(cl)
+    assert math.isclose(mx, -275.0) and math.isclose(my, -20.0)
+
+
+def test_five_limos_cell2():
+    for fov, cam in ((360.0, False), (NARROW, False), (NARROW, True)):
+        log = []
+        n_in, hit, result = drive(FIVE, 2, fov_deg=fov, camera=cam, log=log)
+        assert (n_in, hit) == (4, False) and result.startswith('PARKED'), (fov, cam, n_in, result)
+        assert log[-1]['row'] == 'front'
+
+
+def test_five_limos_cell2_when_limo1_missed():
+    """1번을 못 보면 4·6번이 짝이 된다. 앞뒤 위치는 같고 깊이는 한 줄 옮겨 써서 2번에 들어간다 (auto면 5번으로 감)."""
+    n_in, hit, result = drive(FIVE, 2, fov_deg=NARROW, camera=True, hide=(0,))
+    assert (n_in, hit) == (4, False) and result.startswith('PARKED'), (n_in, result)
+
+
+def test_five_limos_cell2_turn_timing_off():
+    for lead in (520.0, 120.0, -80.0):          # 20cm 일찍 / 20cm 늦게 / 40cm 늦게
+        n_in, hit, result = drive(FIVE, 2, {'turn_lead_mm': lead}, fov_deg=NARROW, camera=True)
+        assert (n_in, hit) == (4, False), (lead, n_in, result)
+
+
+def test_col5_centerline_found_and_followed():
+    """꺾은 뒤 정면 5번 리모로 2번 칸 세로 가운데선을 구한다 (윤서 아이디어 11/10). 라이다 위치가 5cm 틀려도 따라감."""
+    for lidar in (-47.0, 3.0):
+        out = {}
+        n_in, hit, result = drive(FIVE, 2, {'front_axle_from_lidar_mm': lidar}, fov_deg=NARROW, camera=True, out=out)
+        assert (n_in, hit) == (4, False), (lidar, n_in, result)
+        lg = out['logic']
+        assert lg.col5 is not None and lg.col5_n >= 3
+        col5_x = lg.col5[0] + out['start'][0]                 # 자기 위치 좌표 -> 가상 트랙 좌표
+        assert abs(col5_x - 1230.0) < 20.0, (lidar, col5_x)  # 2번 칸 가운데 x = 1230
+        x, y, th = out['pose']
+        assert abs(x + 105.0 * math.cos(th) - 1230.0) < 40.0     # 차체 중심 옆 위치
