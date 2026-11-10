@@ -245,7 +245,7 @@ class MissionNode(Node):
                                          if self.use_class_commands else None),
                       detections=dict(self.det), new_detection_frame=self.new_det,
                       lane=self.lane, obstacle=self.obstacle, parking=self.parking,
-                      start=self.start_flag, route_s=route_s, tilt_rate=self.tilt_peak)
+                      start=self.start_flag, route_s=route_s, tilt_rate=getattr(self, 'tilt_peak', None))
 
     # --- 틱 -----------------------------------------------------------------
     def _tick(self):

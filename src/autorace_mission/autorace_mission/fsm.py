@@ -381,10 +381,10 @@ class MissionFSM:
     def _s_M5_BUMP(self, inp):
         """서행 표지(또는 방지턱 표지)를 보면 bump_slow_mm 동안 서행."""
         if self.sub == '':
-            near = (self._past(inp, 'm5_slow_line', -self.p['route_slow_before_mm'])
-                    if inp.confirmed_classes is None else False)
-            if self._vote(inp, 'slow', 'bump') or near:
-                self._sub('slow', inp)
+            # 1순위 표지(명령), 2순위 도면 위치. 명령 경로(use_class_commands)에서도 표지를 놓치면 도면으로 서행
+            sign = self._vote(inp, 'slow', 'bump')
+            if sign or self._past(inp, 'm5_slow_line', -self.p['route_slow_before_mm']):
+                self._sub('slow', inp, 'sign' if sign else 'FALLBACK: slow line by route')
             else:
                 return Command('lane', self._lane(self.p['base_speed']))
         _, d = self._since(inp, sub=True)
@@ -606,17 +606,16 @@ class MissionFSM:
 
     def _s_M4_PARKING(self, inp):
         """주차는 parking 노드가 맡는다. 끝나면 /parking/state에 done=true."""
-        if inp.confirmed_classes is not None and self.sub == '':
-            if not self._vote(inp, 'parking'):
-                return Command('lane', self._lane(self.p['approach_speed']))
-            self._sub('parking', inp)
         if inp.parking.get('done', False):
             self._next(inp, 'parked')
             return Command('stop', self._lane(0.0))
         if not self.parking_armed:
             near = self._past(inp, 'm4_pre_line', -self.p['m4_arm_before_mm'])
-            if self.parking_sign or near is None or near:
+            # 표지(명령) 1순위, 도면상 앞 선 근처 2순위. 경로 지도가 없으면: 원시 검출 경로는 바로, 명령 경로는 표지만
+            if self.parking_sign or near or (near is None and inp.confirmed_classes is None):
                 self.parking_armed = True
                 self._sub('armed', inp, 'parking sign' if self.parking_sign
                           else ('FALLBACK: near pre line' if near else 'no route map'))
+        if not self.parking_armed:
+            return Command('lane', self._lane(self.p['slow_speed']))   # 아직 주차 노드에 안 넘김. 서행으로 접근
         return Command('parking', self._lane(self.p['slow_speed']))    # 서지 않고 서행으로 진입

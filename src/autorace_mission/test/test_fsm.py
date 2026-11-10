@@ -341,3 +341,24 @@ def test_parking_armed_fallback_near_pre_line():
     assert not fsm.parking_armed
     fsm.step(Inputs(t=0.05, dist_mm=10.0, route_s=4300.0))
     assert fsm.parking_armed
+
+
+def test_command_path_keeps_route_fallbacks():
+    """명령 경로(use_class_commands)에서도 표지를 놓치면 도면 위치로 서행·주차를 켠다 (11/10, #23 뒤)."""
+    fsm = MissionFSM({'start_state': 'M5_BUMP', 'route_points': {'m5_slow_line': 2000.0}})
+    fsm.step(Inputs(t=0.0, dist_mm=0.0, route_s=500.0, confirmed_classes={}))
+    assert fsm.sub == ''
+    fsm.step(Inputs(t=0.05, dist_mm=10.0, route_s=1500.0, confirmed_classes={}))
+    assert fsm.sub == 'slow'
+
+    fsm = MissionFSM({'start_state': 'M4_PARKING', 'route_points': {'m4_pre_line': 5000.0}})
+    cmd = fsm.step(Inputs(t=0.0, dist_mm=0.0, route_s=3000.0, confirmed_classes={}))
+    assert cmd.source == 'lane' and not fsm.parking_armed
+    cmd = fsm.step(Inputs(t=0.05, dist_mm=10.0, route_s=4300.0, confirmed_classes={}))
+    assert cmd.source == 'parking' and fsm.parking_armed
+
+
+def test_command_path_parking_command_arms_at_once():
+    fsm = MissionFSM({'start_state': 'M4_PARKING', 'route_points': {'m4_pre_line': 5000.0}})
+    cmd = fsm.step(Inputs(t=0.0, dist_mm=0.0, route_s=3000.0, confirmed_classes={'parking': 1.0}))
+    assert cmd.source == 'parking' and fsm.parking_sign
