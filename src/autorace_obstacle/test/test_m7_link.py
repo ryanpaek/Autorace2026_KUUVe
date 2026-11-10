@@ -191,10 +191,32 @@ def test_hold_when_avoid_node_ctrl_c():
 def test_hold_when_avoid_node_dies_silently():
     link = M7Link()
     t = start_running(link)                        # 마지막 active true = t - 0.05
-    link.update(t + 0.3, mission(14000.0), {})
-    assert link.state()['m7_hold'] is False
-    link.update(t + 0.5, mission(14000.0), {})
+    link.update(t + 0.8, mission(14000.0), {})
+    assert link.state()['m7_hold'] is False          # 0.8초: 잠깐 늦는 것은 멈춤으로 안 봄 (11/10 0.5 -> 1.0)
+    link.update(t + 1.0, mission(14000.0), {})
     assert link.state()['m7_hold'] is True and link.state()['m7_active'] is False
+
+
+def test_hold_resumes_when_avoid_node_comes_back():
+    """CPU가 바빠 active가 1초 넘게 늦게 온 것: 다시 오면 멈춤을 풀고 회피를 계속한다 (계속 서 있지 않음)."""
+    link = M7Link()
+    t = start_running(link)
+    link.update(t + 1.2, mission(14000.0), {})
+    assert link.state()['m7_hold'] is True and link.state()['m7_hold_kind'] == 'timeout'
+    link.on_avoid_active(True, t + 1.3)
+    link.update(t + 1.3, mission(14000.0), {})
+    st = link.state()
+    assert st['m7_hold'] is False and st['m7_active'] is True and st['m7_hold_resumed'] == 1
+
+
+def test_ctrl_c_hold_is_not_resumed_by_stray_active():
+    link = M7Link()
+    t = start_running(link)
+    link.on_avoid_active(False, t)
+    link.update(t + 0.5, mission(14000.0), {})
+    assert link.hold is True and link.hold_kind == 'release'
+    link.on_avoid_active(True, t + 0.6)
+    assert link.hold is True
 
 
 def test_no_hold_on_normal_finish():

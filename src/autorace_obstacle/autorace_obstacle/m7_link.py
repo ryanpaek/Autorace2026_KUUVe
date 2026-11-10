@@ -61,7 +61,8 @@ class M7LinkParams:
     # 켤 때까지 갈림길 표지를 못 읽었으면: 'auto'(회피 노드가 고름) | 'A' | 'B'
     fork_fallback: str = 'auto'
     # 정지 유지: 회피 노드는 실행 중 /avoid/active true를 20 Hz로 낸다
-    active_timeout_sec: float = 0.5     # 이보다 오래 안 오면 죽은 것으로 보고 정지
+    active_timeout_sec: float = 1.0     # 이보다 오래 안 오면 죽은 것으로 보고 정지 (11/10 0.5 -> 1.0: CPU가 바빠 잠깐 늦는 것까지 멈춤으로 봤음)
+    hold_resume: bool = True            # 소식 끊김으로 멈췄는데 active true가 다시 오면(노드가 잠깐 느렸던 것) 멈춤을 풀고 계속
     release_grace_sec: float = 0.3      # 정상 종료는 active false 직후 done이 온다 -> 이만큼 지나도 안 오면 '멈춤'으로 기록
     # 켜기 방식 (모듈 설명 6)
     enable_mode: str = 'line'           # 'line' | 'obstacle'
@@ -126,6 +127,8 @@ class M7Link:
         self.claimed = False         # 회피 노드가 제어를 잡았었나 (dry_run이면 끝까지 False)
         self.release_t = None        # 끝나기 전에 active false를 받은 시각
         self.hold = False
+        self.hold_kind = None        # 'timeout' | 'release'
+        self.hold_resumed = 0        # 소식이 다시 와서 풀린 횟수
         self.avoid_running = False
         self.avoid_target = None
         self.avoid_lane = None       # 회피 노드가 지금 있다고 보는 차로 (/avoid/state now_lane)
@@ -149,6 +152,11 @@ class M7Link:
         if active:
             self.active_t = t
             self.release_t = None
+            if self.hold and self.hold_kind == 'timeout' and self.p.hold_resume and self.phase == 'running':
+                self.hold = False
+                self.hold_kind = None
+                self.hold_resumed += 1
+                self.events.append('회피 노드 소식 다시 옴 -> 정지 풀고 계속 (잠깐 느렸던 것)')
             if self.phase in ('armed', 'running'):
                 self.claimed = True
             if self.phase == 'armed':
@@ -259,6 +267,7 @@ class M7Link:
             self.heading_forced = False
             self.fork_sent = None
             self.claimed = self.hold = False
+            self.hold_kind = None
             self.active_t = self.release_t = None
             self.sign_buf.clear()
             self.sign_seen = self.sign_near = False
@@ -350,14 +359,15 @@ class M7Link:
     def _check_hold(self, t: float) -> None:
         if self.hold or not self.claimed or self.phase != 'running':
             return
-        why = None
+        why = kind = None
         if self.release_t is not None and t - self.release_t >= self.p.release_grace_sec:
-            why = '회피 노드가 끝나기 전에 제어를 놓음 (Ctrl+C 등)'
+            why, kind = '회피 노드가 끝나기 전에 제어를 놓음 (Ctrl+C 등)', 'release'
         elif (self.release_t is None and self.active_t is not None
               and t - self.active_t >= self.p.active_timeout_sec):
-            why = f'회피 노드 소식이 {self.p.active_timeout_sec:.1f}초 끊김'
+            why, kind = f'회피 노드 소식이 {self.p.active_timeout_sec:.1f}초 끊김', 'timeout'
         if why:
             self.hold = True
+            self.hold_kind = kind
             self.events.append(f'{why} -> 정지 유지 (풀려면 /mission/set_state로 다른 상태)')
 
     def _watch_line(self, lane: dict, s, dist: float) -> None:
@@ -422,6 +432,8 @@ class M7Link:
                 'm7_active': self.avoid_active and self.phase == 'running' and not self.hold,
                 # 끝나기 전에 놓으면 바로 정지 (done이 곧 오면 FSM이 done을 먼저 보고 넘어간다)
                 'm7_hold': self.hold or (self.phase == 'running' and self.release_t is not None),
+                'm7_hold_kind': self.hold_kind,
+                'm7_hold_resumed': self.hold_resumed,
                 'm7_done': self.phase == 'done',
                 'm7_exit': self.exit_fork,
                 'm7_section_m': self.section_m,

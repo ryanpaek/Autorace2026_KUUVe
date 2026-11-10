@@ -20,6 +20,9 @@ def load_node():
         modules[name] = ModuleType(name)
     modules['rclpy.node'].Node = object
     modules['rclpy.qos'].qos_profile_sensor_data = None
+    modules['rclpy.qos'].QoSProfile = SimpleNamespace
+    modules['rclpy.qos'].DurabilityPolicy = SimpleNamespace(TRANSIENT_LOCAL=1)
+    modules['rclpy.qos'].ReliabilityPolicy = SimpleNamespace(RELIABLE=1)
     for module, names in (('geometry_msgs.msg', ['Twist']), ('nav_msgs.msg', ['Odometry']),
                           ('rcl_interfaces.msg', ['ParameterDescriptor']), ('sensor_msgs.msg', ['Imu']),
                           ('std_msgs.msg', ['Bool', 'Empty', 'Float32', 'String'])):
@@ -79,6 +82,21 @@ class CommandNodeTests(unittest.TestCase):
             'schema_version': 2, 'mode': 'M1_TRAFFIC', 'commands': []})))
         self.assertEqual(node.fsm.step(node._inputs()).source, 'lane')
         self.assertEqual(node.fsm.sub_t, started)
+
+
+class M7ExitLaneTests(unittest.TestCase):
+    def test_m2_gets_exit_lane_from_topic_when_obstacle_state_lacks_it(self):
+        module = load_node()
+        node = module.MissionNode.__new__(module.MissionNode)
+        node.fsm = MissionFSM({'start_state': 'M2_FORK'})
+        node.obstacle = {}
+        node.m7_exit_lane = {'lane': 3, 'fork': 'B'}
+        self.assertEqual(node._obstacle_input()['m7_exit'], 'B')
+        node.obstacle = {'m7_exit': 'A'}                 # /obstacle/state 값이 있으면 그대로
+        self.assertEqual(node._obstacle_input()['m7_exit'], 'A')
+        node.fsm = MissionFSM({'start_state': 'M5_BUMP'})
+        node.obstacle = {}
+        self.assertNotIn('m7_exit', node._obstacle_input())
 
 
 if __name__ == '__main__':

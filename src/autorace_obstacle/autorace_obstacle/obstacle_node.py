@@ -177,6 +177,7 @@ class ObstacleNode(Node):
         # 지금 몇 차선인지 늘 (회피 중: 회피 노드 / 그 밖: 차선 노드 선 종류). 알 때만, 바뀌거나 1초마다
         self.lane_pub = self.create_publisher(String, '/m7/lane', 10)
         self.lane_pub_last = (None, 0.0)
+        self.last_exit = None        # 마지막 /m7/exit_lane (M2 시작 때 다시 보냄)
         self.param_cli = self.create_client(
             SetParameters, g_name(g('m7_avoid_node').value) + '/set_parameters')
         self.create_timer(1.0 / float(g('control_hz').value), self._tick)
@@ -201,6 +202,13 @@ class ObstacleNode(Node):
             if st == 'M8_CONES' or self.mstate == 'M8_CONES':
                 self.fol.reset()                       # 들어갈 때·나올 때 깨끗이
                 self.get_logger().info(f'cones: reset ({self.mstate} -> {st})')
+            if st == 'M7_OBSTACLE':
+                self.last_exit = None
+            if st == 'M2_FORK' and self.last_exit is not None:
+                # M2가 시작하는 순간 한 번 더 쏜다 (latched라 늦게 켠 노드도 받지만, M2 시작 시점에 확실히 다시 알림)
+                rep = dict(self.last_exit, at='M2_FORK start')
+                self.exit_pub.publish(String(data=json.dumps(rep, ensure_ascii=False)))
+                self.get_logger().info(f'[M7->M2] {rep["text"]} -> /m7/exit_lane (M2 시작)')
         self.mission, self.mstate, self.msub = m, st, sub
         if (st == 'M8_CONES' and sub in ('cones', 'handover') and self.fol.corridor is None
                 and self.integ.ready):
@@ -365,6 +373,7 @@ class ObstacleNode(Node):
                 self.lane_pub_last = (key, now)
         rep = self.link.pop_report()
         if rep is not None:
+            self.last_exit = rep
             self.exit_pub.publish(String(data=json.dumps(rep, ensure_ascii=False)))
             self.get_logger().info(f'[M7] {rep["text"]} -> /m7/exit_lane')
         for e in self.link.events:

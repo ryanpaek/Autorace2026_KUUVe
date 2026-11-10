@@ -121,6 +121,8 @@ obstacle_node:
     m7_trigger_fallback_mm: 1000.0         # 앞 차로에 장애물이 끝까지 없으면 시작선 + 이만큼에서 켬
     # M7 끄기 (11/09): YOLO 갈림길 표지를 확인한 뒤 지나가면 끔. 예전 방식만: none
     m7_off_mode: sign                      # sign | none (none이어도 회피 노드 자체 종료·FSM 강제 종료는 그대로)
+    m7_active_timeout_sec: 1.0             # 회피 노드 /avoid/active가 이만큼 끊기면 정지 (0.5 -> 1.0: 바쁜 CPU에서 잠깐 늦는 것까지 멈췄음)
+    m7_hold_resume: true                   # 끊김으로 멈췄다가 active가 다시 오면 풀고 계속 (Ctrl+C로 놓은 것은 계속 정지)
     m7_off_sign_classes: [fork_a, fork_b]
     m7_off_sign_conf: 0.5
     m7_off_sign_window: 5
