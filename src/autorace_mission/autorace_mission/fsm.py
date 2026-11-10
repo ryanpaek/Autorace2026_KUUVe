@@ -29,16 +29,21 @@ EXTRA_STATES = ['LANE_ONLY']
 DEFAULT_PARAMS = {
     'start_state': 'WAIT_START',
     'base_speed': 0.30,          # m/s, 규정 권장 0.3~0.4
-    'slow_speed': 0.13,          # 서행. 규정 0.2 이하인데 심판 육안이라 확실히 느리게
+    'slow_speed': 0.20,          # 서행 (규정 최대 0.2). 11/09 팀 결정: 0.2
     'approach_speed': 0.18,      # 정지선·장애물 접근 속도
     'vote_window': 8,            # 다수결 창 (인식 프레임 수)
     'vote_need': 5,
     'det_conf': 0.5,
+    'odom_jump_mm': 600.0,       # 한 틱에 주행거리가 이만큼 넘게 튀면 odom 오류로 보고 그만큼은 무시 (11/09: 체크섬 오류로 7.5km가 찍혀 FINISHED)
     'state_max_mm': 10000.0,     # 한 상태에서 이만큼 달려도 안 끝나면 강제로 다음 상태 (멈춤 방지). M6이 약 9m라 10m
     # M5 방지턱
-    'bump_slow_mm': 1800.0,      # 도면 추정(방지턱 위치는 도면에 없음): 표지 인식(선 약1m 앞) ~ 마름모 끝+여유. TODO 실측
+    'bump_slow_mm': 1800.0,      # 방지턱을 IMU로 못 느꼈을 때 서행을 끝내는 최대 거리 (2순위). TODO 실측
+    # 방지턱 통과: IMU 앞뒤/좌우 기울기 속도(rad/s)가 튀면 앞바퀴가 방지턱에 올라간 것 -> bump_after_mm 더 가서 서행 끝
+    # (11/09 full_02/03 bag: 평지 주행 99% 0.08~0.16, 정지 때 0.2, 충돌 0.6. 방지턱은 bag에 없어 실측 필요)
+    'bump_imu_rate': 0.30,
+    'bump_after_mm': 300.0,      # 뒷바퀴까지 넘게 (축거 210 + 여유)
     # M6 지그재그
-    'zigzag_start_mm': 7200.0,   # 도면: M5 종료 지점(상단 차로) ~ 우측 지그재그 시작선. 길어서 오도메트리 오차 큼 -> 흰 선 검출로 바꿀 것
+    'zigzag_start_mm': 7200.0,   # 경로 지도도 카메라 선도 없을 때만: M5 종료 ~ 지그재그 시작선 (3순위)
     'zigzag_len_mm': 1800.0,     # 도면: 지그재그 약 1.7~1.9m. 바로 뒤 횡단보도 정지선까지 약 250mm라 여유를 크게 안 둠
     'zigzag_width_mm': 570.0,
     # 정지 미션 공통 (M3, M1)
@@ -67,18 +72,26 @@ DEFAULT_PARAMS = {
     'cones_len_mm': 4300.0,      # 도면: M8 진입(갈림길 끝) ~ 좌하단 코너 ~ 라바콘 구간(약2.2m) 끝 + 여유
     # M8 라바콘 (obstacle 노드의 ConeFollower). false면 위 cones_len_mm 동안 차선 주행으로 통과
     'cones_source_ready': False,
-    'cones_enter_before_mm': 300.0,  # 시작선 이만큼 앞(앞바퀴)에서 라바콘 모드로 (코너 끝 약 120mm 앞)
+    'cones_enter_before_mm': 0.0,    # 도면 위치 예비: 시작선 이만큼 앞(앞바퀴)에서 라바콘 모드 (1순위는 카메라로 선 통과)
     'cones_enter_cone_mm': 500.0,    # 차 앞 차로 안 콘이 앞바퀴에서 이 안이면 조금 일찍 들어간다
     'cones_approach_mm': 1550.0,     # 경로 지도 없을 때: M2 끝 -> 라바콘 모드 (도면 1854 - 300)
     'cones_zone_mm': 2700.0,         # 라바콘 모드 최대 거리 (구간 2100 + 진입 300 + 여유)
     'cones_end_after_mm': 150.0,     # 끝선(앞바퀴)을 이만큼 지나면 obstacle 노드 판단과 상관없이 복귀
     'cones_handover_mm': 400.0,      # 차선을 다시 잡길 기다리는 최대 거리 (끝선 뒤 바로 코너)
     'cones_handover_frames': 4,      # 차선이 연속 이만큼 틱 잡히면 차선 주행으로
+    # 라바콘이 더 안 보이면 끝: 앞 cones_gone_mm 안(구간 폭 안) 콘이 cones_gone_sec 동안 0개.
+    # 콘을 한 번이라도 봤고 라바콘 모드로 cones_min_mm 이상 간 뒤에만 (시작 직후 아직 못 본 것과 구분)
+    'cones_gone_mm': 800.0,
+    'cones_gone_sec': 0.5,
+    'cones_min_mm': 500.0,
     # M2 갈림길
     'fork_len_mm': 2300.0,       # 도면: 섬 오른쪽 끝부터 왼쪽 합류 테이퍼 끝까지 약 2.4m
     'fork_seek_timeout_sec': 12.0,  # 규정상 15초 안에 진입해야 함
     'fork_default': 'A',         # 끝까지 못 읽으면 찍을 방향. TODO 팀 정책
     # M1 신호등
+    # M4 주차: 주차 표지(parking)를 보면 주차 노드가 앞 선을 받기 시작한다 (서지 않고 서행으로 진입).
+    # 표지를 못 봐도 도면상 주차 앞 선 m4_arm_before_mm 앞부터는 받는다 (2순위). 경로 지도가 없으면 항상 받음
+    'm4_arm_before_mm': 800.0,
     'stop_on_green_arrival': True,  # 도착 때 녹색이어도 일단 서고 녹색 확인 후 출발 (안전 기본값)
     'green_go_delay_sec': 0.3,
     # 도면 경로 지도 (track_route.yaml). mission_node가 points를 넣어 준다.
@@ -126,6 +139,7 @@ class Inputs:
     start: bool = False
     confirmed_classes: Optional[dict] = None   # 발행부에서 투표를 통과한 지속 요청. None=기존 원시 검출 경로
     route_s: Optional[float] = None            # 도면 경로상 위치 (route.RouteTracker). 없으면 거리 기준
+    tilt_rate: Optional[float] = None          # 지난 틱 이후 IMU 앞뒤·좌우 회전 속도 최대값 (rad/s). 방지턱 감지
 
 
 @dataclass
@@ -221,6 +235,14 @@ class MissionFSM:
         self.stop: Optional[StopApproach] = None
         self.count = 0                               # 서브 상태 안에서 쓰는 연속 카운터
         self.log = []
+        self.parking_sign = False                    # 주차 표지를 봤나 (M1~M4 동안 투표, 상태가 바뀌어도 유지)
+        self.parking_armed = False                   # 주차 노드에 앞 선을 받으라고 알림 (/mission/state)
+        self.bump_at = None                          # 방지턱을 느낀 누적 거리
+        self.line = None                             # 지그재그·라바콘 시작선 통과 감시 (StopApproach)
+        self.cones_seen = False
+        self.cones_gone_t = None
+        self._last_dist = None                       # odom 점프 감시용
+        self._dist_adj = 0.0
         self._goto(self.p['start_state'], Inputs(t=0.0, dist_mm=0.0), 'init')
 
     # --- 공통 도구 ------------------------------------------------------------
@@ -234,6 +256,9 @@ class MissionFSM:
         for v in self.votes.values():
             v.reset()
         self.stop = None
+        self.line = None
+        self.bump_at = None
+        self.cones_seen, self.cones_gone_t = False, None
 
     def _next(self, inp: Inputs, why: str = '') -> None:
         if self.state not in SEQUENCE:
@@ -282,6 +307,26 @@ class MissionFSM:
                                  route_gate_mm=self.p['stop_route_gate_mm'])
         self.stop.route_line_s = self._rp(line) if line else None
 
+    def _line_crossed(self, inp: Inputs, name: str) -> Optional[bool]:
+        """흰 가로선을 앞바퀴가 지났나 (1순위 카메라, 2순위 도면 위치). 둘 다 모르면 None.
+
+        정지선 정지와 같은 방식: 카메라가 본 거리에서 그 뒤 달린 거리를 뺀다
+        (선은 앞바퀴 약 350mm 앞에서 화면 아래로 사라진다). 도면 위치는 처음 잡는 선을 고르는 데에도 쓴다."""
+        if self.line is None:
+            self.line = StopApproach(0.0, 0.0, self.p['stop_lost_ok_mm'], key='stoplines_mm',
+                                     freeze_mm=self.p['stop_freeze_mm'],
+                                     route_gate_mm=self.p['stop_route_gate_mm'])
+            self.line.route_line_s = self._rp(name)
+        rem = self.line.remaining(inp)
+        if rem is not None and self.line.seen_d is not None:
+            return rem <= 0.0
+        past = self._past(inp, name)
+        if past is not None:
+            return past
+        if self.line.seen_at is not None:       # 카메라로 봤는데 lost_ok를 넘게 지남 = 이미 지남
+            return True
+        return None
+
     def _rp(self, name: str) -> Optional[float]:
         return (self.p.get('route_points') or {}).get(name)
 
@@ -298,11 +343,25 @@ class MissionFSM:
         return cam or bool(r)
 
     # --- 메인 ---------------------------------------------------------------
+    def _guard_odom(self, inp: Inputs) -> None:
+        """주행거리가 한 틱에 비정상적으로 튀면 그만큼을 빼서 없던 일로 한다."""
+        raw = inp.dist_mm
+        if self._last_dist is not None and abs(raw - self._last_dist) > self.p['odom_jump_mm']:
+            self._dist_adj += raw - self._last_dist
+            self.log.append(f'odom jump ignored {raw - self._last_dist:.0f}mm')
+        self._last_dist = raw
+        inp.dist_mm = raw - self._dist_adj
+
     def step(self, inp: Inputs) -> Command:
+        self._guard_odom(inp)
+        if self.state in ('M1_TRAFFIC', 'M4_PARKING') and not self.parking_sign:
+            # 주차 표지는 신호등 구간에서부터 보일 수 있다. 신호등 판단에는 안 끼어들고 기억만 한다
+            self.parking_sign = self._vote(inp, 'parking')
         if self.state in SEQUENCE[1:-1]:
+            # 표지판·선·도면 위치가 1순위. 거리는 마지막 안전장치(2순위)로만 쓴다.
             _, d = self._since(inp)
             if d > self.p['state_max_mm']:
-                self._next(inp, f'state distance limit {d:.0f}mm')
+                self._next(inp, f'FALLBACK: state distance limit {d:.0f}mm (no sign/line seen)')
         cmd = getattr(self, '_s_' + self.state)(inp)
         cmd.note = cmd.note or f'{self.state}/{self.sub}'
         return cmd
@@ -322,33 +381,40 @@ class MissionFSM:
     def _s_M5_BUMP(self, inp):
         """서행 표지(또는 방지턱 표지)를 보면 bump_slow_mm 동안 서행."""
         if self.sub == '':
-            near = (self._past(inp, 'm5_slow_line', -self.p['route_slow_before_mm'])
-                    if inp.confirmed_classes is None else False)
-            if self._vote(inp, 'slow', 'bump') or near:
-                self._sub('slow', inp)
+            # 1순위 표지(명령), 2순위 도면 위치. 명령 경로(use_class_commands)에서도 표지를 놓치면 도면으로 서행
+            sign = self._vote(inp, 'slow', 'bump')
+            if sign or self._past(inp, 'm5_slow_line', -self.p['route_slow_before_mm']):
+                self._sub('slow', inp, 'sign' if sign else 'FALLBACK: slow line by route')
             else:
                 return Command('lane', self._lane(self.p['base_speed']))
         _, d = self._since(inp, sub=True)
+        if self.bump_at is None and (inp.tilt_rate or 0.0) >= self.p['bump_imu_rate']:
+            self.bump_at = inp.dist_mm
+            self.log.append(f'M5 bump felt (imu {inp.tilt_rate:.2f} rad/s at {d:.0f}mm)')
+        if self.bump_at is not None and inp.dist_mm - self.bump_at >= self.p['bump_after_mm']:
+            self._next(inp, f'bump passed (imu) {d:.0f}mm')
+            return Command('lane', self._lane(self.p['base_speed']))
         if d >= self.p['bump_slow_mm'] or self._past(inp, 'm6_zigzag_line', -1500.0):
-            self._next(inp, f'bump passed {d:.0f}mm')
+            self._next(inp, f'FALLBACK: bump not felt, slow ended at {d:.0f}mm')
             return Command('lane', self._lane(self.p['base_speed']))
         return Command('lane', self._lane(self.p['slow_speed']))
 
     def _s_M6_ZIGZAG(self, inp):
-        """지그재그: 도면 경로가 있으면 시작선·끝 위치로, 없으면 거리로 판단."""
+        """지그재그: 시작 흰 선을 앞바퀴가 지나면 서행 (1순위 카메라, 2순위 도면, 3순위 거리).
+        서행은 바로 뒤 횡단보도 정지 후 재출발할 때까지 유지한다 (M3도 정지 전까지 서행)."""
         if self.sub == '':
-            at = self._past(inp, 'm6_zigzag_line', -50.0)
+            at = self._line_crossed(inp, 'm6_zigzag_line')
             if at is None:
                 _, d = self._since(inp)
                 at = d >= self.p['zigzag_start_mm']
             if not at:
                 return Command('lane', self._lane(self.p['base_speed']))
-            self._sub('zigzag', inp)
+            self._sub('zigzag', inp, f'start line ({self.line.how or "route/distance"})')
         _, dz = self._since(inp, sub=True)
         end = self._past(inp, 'm6_zigzag_end')
         if (dz >= self.p['zigzag_len_mm']) if end is None else end:
             self._next(inp, f'zigzag done {dz:.0f}mm')
-            return Command('lane', self._lane(self.p['base_speed']))
+            return Command('lane', self._lane(self.p['slow_speed']))
         return Command('lane', self._lane(self.p['slow_speed'], 'zigzag',
                                           lane_width_mm=self.p['zigzag_width_mm']))
 
@@ -359,7 +425,7 @@ class MissionFSM:
             if self._vote(inp, 'pedestrian') or self._stop_near(inp, 'm3_stop_line'):
                 self._arm_stop(inp, 'm3_stop_line')
             else:
-                return Command('lane', self._lane(p['base_speed']))
+                return Command('lane', self._lane(p['slow_speed']))    # 지그재그 서행 그대로 (재출발부터 일반 속도)
         if self.sub == 'approach':
             if not self.stop.should_stop(inp):
                 return Command('lane', self._lane(p['approach_speed']))
@@ -457,7 +523,10 @@ class MissionFSM:
             return Command('lane', self._lane(p['slow_speed']))
 
         if self.sub == '':
-            near = self._past(inp, 'm8_start_line', -p['cones_enter_before_mm'])
+            # 1순위: 시작 흰 선을 앞바퀴가 지나는 순간 (서지 않음). 2순위: 도면 위치. 3순위: 거리
+            near = self._line_crossed(inp, 'm8_start_line')
+            if near and self.line.seen_d is None:
+                near = self._past(inp, 'm8_start_line', -p['cones_enter_before_mm'])
             if near is None:
                 _, d = self._since(inp)
                 near = d >= p['cones_approach_mm']
@@ -467,15 +536,27 @@ class MissionFSM:
             ahead = inp.obstacle.get('cone_ahead_mm')
             close = ahead is not None and ahead <= p['cones_enter_cone_mm']
             if near or (armed and close):
-                self._sub('cones', inp, 'start line' if near else f'cone ahead {ahead:.0f}mm')
+                how = f'start line ({self.line.how or "route/distance"})' if near else f'cone ahead {ahead:.0f}mm'
+                self._sub('cones', inp, how)
             else:
                 return Command('lane', self._lane(p['slow_speed']))
         if self.sub == 'cones':
             _, d = self._since(inp, sub=True)
+            # 1순위: 라바콘이 더 안 보임 (앞 cones_gone_mm 안 구간 폭 안 콘 0개가 cones_gone_sec 동안)
+            near_cone = inp.obstacle.get('cone_any_ahead_mm')
+            visible = near_cone is not None and near_cone <= p['cones_gone_mm']
+            gone = False
+            if visible:
+                self.cones_seen, self.cones_gone_t = True, None
+            elif self.cones_seen and d >= p['cones_min_mm']:
+                if self.cones_gone_t is None:
+                    self.cones_gone_t = inp.t
+                gone = inp.t - self.cones_gone_t >= p['cones_gone_sec']
             done = inp.obstacle.get('cones_done', False)
             end = self._past(inp, 'm8_end_line', p['cones_end_after_mm'])
-            if done or end or d >= p['cones_zone_mm']:
-                why = 'obstacle done' if done else ('end line' if end else f'distance {d:.0f}mm')
+            if gone or done or end or d >= p['cones_zone_mm']:
+                why = ('no cones ahead' if gone else 'obstacle done' if done
+                       else 'FALLBACK: end line' if end else f'FALLBACK: distance {d:.0f}mm')
                 self._sub('handover', inp, why)
             else:
                 return Command('obstacle', self._lane(p['slow_speed'], 'heading'))
@@ -525,11 +606,16 @@ class MissionFSM:
 
     def _s_M4_PARKING(self, inp):
         """주차는 parking 노드가 맡는다. 끝나면 /parking/state에 done=true."""
-        if inp.confirmed_classes is not None and self.sub == '':
-            if not self._vote(inp, 'parking'):
-                return Command('lane', self._lane(self.p['approach_speed']))
-            self._sub('parking', inp)
         if inp.parking.get('done', False):
             self._next(inp, 'parked')
             return Command('stop', self._lane(0.0))
-        return Command('parking', self._lane(self.p['approach_speed']))
+        if not self.parking_armed:
+            near = self._past(inp, 'm4_pre_line', -self.p['m4_arm_before_mm'])
+            # 표지(명령) 1순위, 도면상 앞 선 근처 2순위. 경로 지도가 없으면: 원시 검출 경로는 바로, 명령 경로는 표지만
+            if self.parking_sign or near or (near is None and inp.confirmed_classes is None):
+                self.parking_armed = True
+                self._sub('armed', inp, 'parking sign' if self.parking_sign
+                          else ('FALLBACK: near pre line' if near else 'no route map'))
+        if not self.parking_armed:
+            return Command('lane', self._lane(self.p['slow_speed']))   # 아직 주차 노드에 안 넘김. 서행으로 접근
+        return Command('parking', self._lane(self.p['slow_speed']))    # 서지 않고 서행으로 진입

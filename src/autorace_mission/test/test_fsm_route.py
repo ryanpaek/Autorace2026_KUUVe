@@ -93,7 +93,7 @@ def test_cones_by_route_positions():
         if fsm.state == 'M1_TRAFFIC':
             break
         s += 0.15 * 1000 * 0.05
-    assert subs[('M8_CONES', 'cones')] == pytest.approx(p['m8_start_line'] - 300, abs=10)
+    assert subs[('M8_CONES', 'cones')] == pytest.approx(p['m8_start_line'], abs=10)   # 시작선 통과 순간 (11/09)
     assert subs[('M8_CONES', 'handover')] == pytest.approx(p['m8_end_line'] + 150, abs=10)
     assert fsm.state == 'M1_TRAFFIC'
 

@@ -111,6 +111,7 @@ class MissionNode(Node):
         self.dist_mm = 0.0
         self._last_xy = None
         self.yaw = None
+        self.tilt_peak = 0.0
         self.det = {}
         self.new_det = False
         self.lane = {}
@@ -208,6 +209,8 @@ class MissionNode(Node):
 
     def _on_imu(self, msg):
         self.yaw = yaw_from_quaternion(msg.orientation)
+        av = msg.angular_velocity          # 앞뒤·좌우 기울기 속도 최대값 (방지턱 감지, 틱마다 0으로)
+        self.tilt_peak = max(self.tilt_peak, math.hypot(av.x, av.y))
 
     def _on_start(self, _msg):
         self.start_flag = True
@@ -242,7 +245,7 @@ class MissionNode(Node):
                                          if self.use_class_commands else None),
                       detections=dict(self.det), new_detection_frame=self.new_det,
                       lane=self.lane, obstacle=self.obstacle, parking=self.parking,
-                      start=self.start_flag, route_s=route_s)
+                      start=self.start_flag, route_s=route_s, tilt_rate=getattr(self, 'tilt_peak', None))
 
     # --- 틱 -----------------------------------------------------------------
     def _tick(self):
@@ -253,6 +256,7 @@ class MissionNode(Node):
         inp = self._inputs()
         self.new_det = False
         self.start_flag = False
+        self.tilt_peak = 0.0
         cmd = self.fsm.step(inp)
 
         now = time.monotonic()
@@ -298,6 +302,7 @@ class MissionNode(Node):
         state = {'state': self.fsm.state, 'sub': self.fsm.sub, 'source': source,
                  'fork_choice': self.fsm.fork_choice, 'dist_mm': round(self.dist_mm),
                  'estop': self.estop, 'note': cmd.note,
+                 'parking_sign': self.fsm.parking_sign, 'parking_armed': self.fsm.parking_armed,
                  'route': self.tracker.state() if self.route_active else None}
         self.state_pub.publish(String(data=json.dumps(state)))
         if (self.fsm.state, self.fsm.sub) != self._last_state:

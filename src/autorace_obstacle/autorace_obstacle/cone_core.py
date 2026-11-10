@@ -754,6 +754,19 @@ class ConeFollower:
             return None
         return float(v[m, 0].min() - self.p.front_axle_mm - self.p.cone_base_radius_mm)
 
+    def nearest_ahead_mm(self, pose: Pose2D, half_width: Optional[float] = None) -> Optional[float]:
+        """앞바퀴 앞, 차 중심 ± half_width(기본 구간 반폭) 안 확정 콘 중 가장 가까운 것까지 거리.
+        양쪽 통로라 차 앞을 막지 않는 콘도 센다 (M8 끝 판단: '라바콘이 더 안 보임')."""
+        ok = self.tracker.ok_tracks()
+        if not ok:
+            return None
+        hw = self.p.zone_half_width_mm if half_width is None else half_width
+        v = to_vehicle(pose, [[t.x, t.y] for t in ok])
+        m = (v[:, 0] > self.p.front_axle_mm) & (np.abs(v[:, 1]) < hw)
+        if not m.any():
+            return None
+        return float(v[m, 0].min() - self.p.front_axle_mm)
+
     def state_dict(self) -> dict:
         tr = self.tracker.tracks
         d = {'tracks': len(tr), 'confirmed': sum(t.confirmed for t in tr),

@@ -38,10 +38,12 @@ mission_node:
     tick_hz: 20.0
     max_speed: 0.45
     base_speed: 0.30
-    slow_speed: 0.13
+    slow_speed: 0.20                       # 서행 (규정 최대 0.2, 11/09 팀 결정)
     approach_speed: 0.18
     det_conf: 0.5
-    bump_slow_mm: 1800.0                   # 도면 추정, 방지턱 실제 위치로 TODO 실측
+    bump_slow_mm: 1800.0                   # 방지턱을 IMU로 못 느꼈을 때 서행 최대 거리 (2순위). TODO 실측
+    bump_imu_rate: 0.30                    # IMU 기울기 속도(rad/s)가 이 이상이면 방지턱. TODO 실측 (손으로 넘겨 보며 확인)
+    bump_after_mm: 300.0                   # 방지턱 느낀 뒤 이만큼 더 가서 서행 끝 (뒷바퀴까지)
     zigzag_start_mm: 7200.0                # 도면 기준 (긴 거리, 선 검출로 교체 권장)
     zigzag_width_mm: 570.0
     zigzag_len_mm: 1800.0
@@ -57,12 +59,16 @@ mission_node:
     cones_len_mm: 4300.0                   # cones_source_ready=false일 때만 씀 (차선 주행 통과 거리)
     # M8 라바콘: obstacle 노드가 콘 사이 경로를 따라감. false로 바꾸면 예전처럼 차선 주행으로 통과
     cones_source_ready: true
-    cones_enter_before_mm: 300.0           # 시작선 이만큼 앞(앞바퀴)에서 라바콘 모드
+    cones_enter_before_mm: 0.0             # 도면 예비: 시작선 이만큼 앞에서 라바콘 모드 (1순위는 카메라로 선 통과)
     cones_enter_cone_mm: 500.0             # 차로 안 콘이 이 안이면 조금 일찍
     cones_end_after_mm: 150.0              # 끝선 이만큼 지나면 무조건 복귀
     cones_zone_mm: 2700.0
     cones_handover_mm: 400.0
     cones_handover_frames: 4
+    cones_gone_mm: 800.0                   # 앞 이 거리 안(구간 폭 안) 콘이
+    cones_gone_sec: 0.5                    # 이 시간 동안 0개면 라바콘 끝
+    cones_min_mm: 500.0                    # 라바콘 모드로 이만큼 간 뒤부터 끝 판단
+    m4_arm_before_mm: 800.0                # 주차 표지 못 봤을 때: 도면상 주차 앞 선 이만큼 앞부터 주차 노드가 선을 받음
     fork_len_mm: 2300.0                    # 도면 기준, 모의맵 실측으로 확인
     fork_default: A
     stop_on_green_arrival: true

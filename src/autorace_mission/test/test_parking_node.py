@@ -255,6 +255,18 @@ def test_cap_keeps_car_inside_cell_without_side_or_camera():
         assert log[-1]['stop_how'] == 'cap', (parked, log[-1]['stop_how'])
 
 
+def test_wait_line_ignores_line_until_armed():
+    """미션 노드가 주차 표지/앞 선 근처를 알리기 전엔 흰 선을 봐도 주차를 시작하지 않는다."""
+    logic = pn.ParkingV2(dict(pn.DEFAULTS))
+    base = {'yaw': 0.0, 'lane_v': 0.2, 'lane_w': 0.0, 'stoplines_mm': [300.0], 'end_lines_mm': [],
+            'clusters': [], 'blocked': False}
+    for i in range(40):
+        _, _, info = logic.step({**base, 't': i * 0.05, 'dist_mm': i * 20.0, 'armed': False})
+    assert info['phase'] == 'WAIT_LINE'
+    _, _, info = logic.step({**base, 't': 2.0, 'dist_mm': 800.0, 'armed': True})
+    assert info['phase'] == 'FOLLOW'
+
+
 # ---------------------------------------------------------------- 11/10 대회 배치: 1·3·4·5·6에 정차 리모, 목표 2번
 FIVE = [1, 3, 4, 5, 6]
 
