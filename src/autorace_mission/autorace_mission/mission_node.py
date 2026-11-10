@@ -112,6 +112,8 @@ class MissionNode(Node):
         self._last_xy = None
         self.yaw = None
         self.tilt_peak = 0.0
+        self.odom_step_max_mm = 200.0
+        self.odom_jumps = 0
         self.det = {}
         self.new_det = False
         self.lane = {}
@@ -204,7 +206,15 @@ class MissionNode(Node):
     def _on_odom(self, msg):
         p = msg.pose.pose.position
         if self._last_xy is not None:
-            self.dist_mm += 1000.0 * math.hypot(p.x - self._last_xy[0], p.y - self._last_xy[1])
+            step = 1000.0 * math.hypot(p.x - self._last_xy[0], p.y - self._last_xy[1])
+            # 한 메시지에 이만큼 넘게 튀면 odom 오류(11/09 체크섬 오류 때 7.5km)로 보고 버린다.
+            # FSM뿐 아니라 도면 위치(RouteTracker)도 이 거리를 쓰므로 여기서 거른다 (11/10 통주행 시뮬레이션에서 발견)
+            if step <= self.odom_step_max_mm:
+                self.dist_mm += step
+            else:
+                self.odom_jumps += 1
+                self.get_logger().warning(f'odom jump ignored: {step:.0f}mm in one message '
+                                          f'({self.odom_jumps} so far)', throttle_duration_sec=2.0)
         self._last_xy = (p.x, p.y)
 
     def _on_imu(self, msg):
