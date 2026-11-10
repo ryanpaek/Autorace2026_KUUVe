@@ -28,7 +28,8 @@
   - 라이다가 첫 리모(1/4번)를 놓치면 짝이 안 생겨 예비 방식이 약 1m 늦게 꺾는다 (시뮬레이션 0점).
 
 흐름도
-① WAIT_LINE: 차선 노드 명령을 넘기며 흰 선 기다림 → 보이면 주차 모드
+① WAIT_LINE: 차선 노드 명령을 넘기며 기다림 (armed = 주차 표지 봤거나 도면상 근처)
+│   └─ armed이고 (흰 선 보임 또는 1·3번 짝 연속 3번) → 주차 모드
 │
 ├─② FOLLOW: 차선 따라가기, 왼쪽 차선과 8cm (target_offset_mm 50)
 │   ├─③ 라이다: 오른쪽 리모 두 대 짝 찾기 (사이 약 104cm) → 중점 = 목표 칸 가운데
@@ -265,6 +266,8 @@ class ParkingV2:
         self.col5 = None           # 5번 리모 앞면 가운데 (자기 위치 좌표, 평균) -> 2번 칸 세로 가운데선
         self.col5_n = 0
         self.pair_n = 0            # 짝을 본 횟수 (평균 낼 때 씀)
+        self.trig_n = 0            # WAIT_LINE에서 짝을 연속으로 본 횟수
+        self.trigger = None        # 주차 모드 시작 이유: 'line' | 'pair'
         self.pair_side_mm = None   # 짝 중점까지 옆 거리 (앞줄 약 0.5m, 뒷줄 약 1.1m) -> row
         self.row = None            # 'front' | 'back' (정차 리모가 있는 줄 = 들어갈 줄)
         self.side_seen = False
@@ -531,7 +534,17 @@ class ParkingV2:
         if self.phase == 'WAIT_LINE':       # ① 흰 선 기다림 (차선 노드 명령 넘김)
             lines = [d for d in inp['stoplines_mm'] if d >= p['line_min_mm']]
             # armed: 미션 노드가 주차 표지를 봤거나 도면상 주차 앞 선 근처 (/mission/state parking_armed)
-            if moved >= p['ignore_mm'] and lines and inp.get('armed', True):
+            # 11/10: 표지를 흰 선 지난 뒤에 확정하면 선을 놓친다 -> 오른쪽 두 리모 짝(1·3번)을 연속으로 보면 그것도 시작 신호.
+            # 짝은 같은 줄 두 대가 약 104cm 떨어져야 생겨서, 커브 등에 한 대만 서 있는 리모로는 안 켜진다.
+            armed = inp.get('armed', True)
+            seen = (p['pair_trigger'] and armed and find_pair(
+                inp.get('clusters_pair') or inp['clusters'], p['side_far_mm'], p['pair_dist_mm'],
+                p['pair_tol_mm']) is not None)
+            self.trig_n = self.trig_n + 1 if seen else 0
+            by_line = moved >= p['ignore_mm'] and lines and armed
+            by_pair = self.trig_n >= p['pair_trigger_frames']
+            if by_line or by_pair:
+                self.trigger = 'line' if by_line else 'pair'
                 self.lane_cfg = {'target_offset_mm': p['target_offset_mm']}
                 self._enter('FOLLOW', inp)
             else:
@@ -763,7 +776,7 @@ class ParkingV2:
         """/parking/state에 실을 내용."""
         return {'phase': self.phase, 'done': self.phase == 'DONE', 'result': self.result,
                 'backs': self.backs, 'realigns': self.realigns, 'last_err': self.err,
-                'row': self.row, 'stop_how': self.stop_how,
+                'row': self.row, 'stop_how': self.stop_how, 'trigger': self.trigger,
                 'end_mm': None if self.end_d is None else round(self.end_d)}
 
 
@@ -796,6 +809,8 @@ DEFAULTS = {
     'pair_dist_mm': 1040.0,    # 두 정차 리모 사이 (칸 2개: 500 + 20 + 500 + 20, 도면)
     'pair_tol_mm': 150.0,      # 짝 인정 오차. 칸 1개(520)나 3개 간격과 헷갈리지 않게
     'pair_min_frames': 3,      # 짝을 이만큼 본 뒤에 믿는다 (한 번 튄 값 무시)
+    'pair_trigger': True,      # 흰 선을 못 봐도 오른쪽 두 리모 짝을 보면 주차 모드 시작 (armed일 때만)
+    'pair_trigger_frames': 3,  # 짝을 연속 이만큼 봐야 시작 (한 번 튄 값 무시)
     'turn_lead_mm': 320.0,     # 칸 가운데가 앞바퀴보다 이만큼 앞일 때 꺾기 시작 (회전반경 530 - 축거 210)
     'stop_min_turn_deg': 60.0, # 이만큼 돈 뒤에만 양옆 옆면으로 '칸 가운데 도착'을 판단 (도는 도중 오판 방지)
     # ---- 줄(앞줄 1~3 / 뒷줄 4~6)과 칸 끝에서 멈추기 (11/09 park_02 반영)
