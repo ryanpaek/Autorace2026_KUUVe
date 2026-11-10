@@ -100,6 +100,7 @@ parking_node:
     body_center_from_rear_mm: 105.0        # 뒷바퀴 축 -> 차체 중심 (오버행 앞뒤 같다고 가정)
     laser_yaw: 0.0                         # 라이다 정면 각도 보정 (rad)
     target_offset_mm: 50.0                 # 흰 선 뒤 차로 중심에서 왼쪽으로 (왼쪽 차선과 약 8cm, 차로 안쪽 폭 480 가정)
+    cell_depth_from_path_mm: 610.0         # 2번 칸 가운데가 차 경로보다 깊은 거리 = 차로 안쪽 폭/2 + target_offset_mm + 320
     # ---- 두 리모 중점 / 꺾기 (도면·calib 근거, 바꿀 일 적음)
     pair_dist_mm: 1040.0                   # 정차 리모 두 대 사이 = 칸 2개 (500 + 20 + 500 + 20)
     turn_lead_mm: 320.0                    # 칸 가운데가 앞바퀴보다 이만큼 앞일 때 꺾기 (회전반경 530 - 축거 210)

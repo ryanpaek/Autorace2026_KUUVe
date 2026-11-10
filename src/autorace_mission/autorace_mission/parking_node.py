@@ -5,7 +5,7 @@
      (mission_node는 신호등을 지나자마자 M4_PARKING이 되므로 fsm.py _s_M1_TRAFFIC)
   2) 흰 선을 보면 차로 중심에서 왼쪽으로 target_offset_mm(왼쪽 차선과 약 8cm) 비켜 차선을 따라간다.
   3) 라이다로 오른쪽 정차 리모 두 대(1·3 또는 4·6)를 같이 찾는다. 두 대 사이가 칸 2개(약 1040mm)이고 옆 거리도
-     비슷해야 "짝"으로 인정한다. 짝의 중점 = 목표 칸(2 또는 5) 가운데.
+     비슷해야 "짝"으로 인정한다. 짝의 중점 = 목표 칸(2번) 가운데의 앞뒤 위치.
   4) 중점이 앞바퀴보다 turn_lead_mm(320) 앞에 오면 1초 정지 -> 오른쪽 최대 조향 -> 87도 돌면 바퀴를 편다.
      (뒷바퀴축이 칸 가운데에서 회전반경 530mm 앞일 때 꺾으면 90도 돈 뒤 칸 가운데: 530 - 축거 210 = 320)
   5) 꺾은 뒤 양옆 리모의 옆면으로 칸 가운데 선을 다시 구하고, 차체 중심이 칸 가운데에 오면 멈춘다.
@@ -15,6 +15,8 @@
      꺾은 뒤 앞이 막혀 갇혀도(바퀴 편 뒤 막힘) 짝으로 기억한 선으로 재정렬한다.
   7) 끝나면 /parking/state에 done=true -> fsm.py _s_M4_PARKING이 다음으로 넘어간다.
   * 짝을 못 찾으면 예비로 "첫 리모가 앞바퀴 옆 + extra_mm"에서 꺾는다.
+  * 2026-11-10 확정: 목표는 항상 2번 칸, 나머지 1·3·4·5·6에 정차 리모. 그래서 짝 선의 깊이는
+    도면(cell_depth_from_path_mm)으로 정한다. 1번을 놓쳐 4·6번이 짝이 돼도 앞뒤 위치는 같아서 맞게 꺾는다.
 
 가정
   - 차로 안쪽 폭 480mm(선 중심 간 500 - 선 20), 칸 500 x 600, 흰 선 -> 주차 구역 440mm (2026Track 도면)
@@ -139,18 +141,28 @@ def neighbors_abeam(clusters, tol_mm=30.0, side_min_mm=80.0, side_max_mm=700.0, 
     return r, l
 
 
-def cell_line_from_neighbors(clusters, side_max_mm=700.0):
+def cell_line_from_neighbors(clusters, side_max_mm=700.0, ahead_max_mm=150.0, row_tol_mm=250.0):
     """양옆 리모 중심(앞바퀴 기준 좌표)으로 칸 가운데 선을 구한다.
 
     반환: (중점 x, 중점 y, 방향 단위벡터 ux, uy) — 차 기준 좌표, 방향은 차 앞쪽과 같은 쪽.
     양옆 중 하나라도 없으면 None. 리모가 둘 다 같은 쪽 얼굴만 보여서 생기는 치우침은 서로 상쇄된다.
+    앞바퀴보다 ahead_max_mm 넘게 앞에 있는 리모는 쓰지 않는다 (2번 칸에 들어갈 때 대각선 앞의 4·6번을
+    1·3번으로 잘못 고르면 칸 가운데를 뒷줄로 잡아 5번 리모까지 들어감 — 11/10 다섯 대 시뮬레이션).
+    좌우 두 대는 같은 줄(앞뒤 차이 row_tol_mm 안)이어야 하고, 그중 옆으로 가장 가까운 짝을 고른다.
     """
-    rights = [(x, y) for x, y in clusters if -side_max_mm <= y <= -80.0 and x > -400.0]
-    lefts = [(x, y) for x, y in clusters if 80.0 <= y <= side_max_mm and x > -400.0]
-    if not rights or not lefts:
+    rights = [(x, y) for x, y in clusters if -side_max_mm <= y <= -80.0 and -400.0 < x <= ahead_max_mm]
+    lefts = [(x, y) for x, y in clusters if 80.0 <= y <= side_max_mm and -400.0 < x <= ahead_max_mm]
+    best = None
+    for r in rights:
+        for l in lefts:
+            if abs(r[0] - l[0]) > row_tol_mm:
+                continue
+            key = abs(r[1]) + abs(l[1])
+            if best is None or key < best[0]:
+                best = (key, r, l)
+    if best is None:
         return None
-    r = min(rights, key=lambda c: math.hypot(*c))
-    l = min(lefts, key=lambda c: math.hypot(*c))
+    _, r, l = best
     mx, my = (r[0] + l[0]) / 2.0, (r[1] + l[1]) / 2.0
     vx, vy = l[0] - r[0], l[1] - r[1]          # 오른쪽 리모 -> 왼쪽 리모
     n = math.hypot(vx, vy)
@@ -330,6 +342,11 @@ class ParkingV2:
                 mx, my, vx, vy = pair
                 rel = (mx, my, vy, -vx)                # 들어가는 방향 = 짝 방향에서 오른쪽 90도
                 line = self._line_to_world(rel, inp)
+                if p['cell_depth_from_path_mm'] > 0:   # 깊이는 도면으로 (짝의 앞뒤 위치·방향만 씀)
+                    cx, cy, ux, uy = line
+                    d_car = (self.px - cx) * ux + (self.py - cy) * uy
+                    sh = d_car + p['cell_depth_from_path_mm']
+                    line = (cx + sh * ux, cy + sh * uy, ux, uy)
                 if self.pair_line is None:
                     self.pair_line = line
                 else:                                  # 여러 번 본 값의 평균 (흔들림 줄이기)
@@ -388,6 +405,11 @@ class ParkingV2:
                 # (차선에서 본 짝은 리모의 차선 쪽 끝면만 보여 깊이가 8~17cm 얕게 나온다 -> 깊이는 옆면으로)
                 self.line = self._line_to_world(side, inp)
                 r = l = self._body_s(inp) >= -p['enter_brake_mm']
+            elif self.pair_line is not None and p['cell_depth_from_path_mm'] > 0:
+                # 양옆 옆면이 안 보이면(리모를 놓침) 짝 선(깊이는 도면)으로 칸 가운데 도착을 판단
+                self.line = self.pair_line
+                r = l = (self._turned_deg(inp) >= p['stop_min_turn_deg']
+                         and self._body_s(inp) >= -p['enter_brake_mm'])
             elif self.pair_line is not None:
                 r = l = False
             else:                                     # 모르면: 예전처럼 양옆 리모가 앞바퀴 옆
@@ -503,6 +525,8 @@ DEFAULTS = {
     'pair_tol_mm': 150.0,      # 짝 인정 오차. 칸 1개(520)나 3개 간격과 헷갈리지 않게
     'pair_min_frames': 3,      # 짝을 이만큼 본 뒤에 믿는다 (한 번 튄 값 무시)
     'turn_lead_mm': 320.0,     # 칸 가운데가 앞바퀴보다 이만큼 앞일 때 꺾기 시작 (회전반경 530 - 축거 210)
+    'cell_depth_from_path_mm': 610.0,  # 목표 칸 가운데가 차선 추종 경로보다 이만큼 깊다 (2번 칸 고정, 11/10)
+                               # = 차로 안쪽 반폭 240 + 왼쪽 오프셋 50 + 선 20 + 칸 반깊이 300. 0 = 끔(짝 깊이 사용)
     'stop_min_turn_deg': 60.0, # 이만큼 돈 뒤에만 양옆 옆면으로 '칸 가운데 도착'을 판단 (도는 도중 오판 방지)
     # ---- 재정렬 (PULLOUT -> ENTER)
     'max_realign': 2,          # 0 = 재정렬 끔 (= 원래 버전 2)

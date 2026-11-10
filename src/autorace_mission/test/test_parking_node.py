@@ -1,5 +1,7 @@
 """parking_node 시험: 계산 함수 + 가상 트랙 한 바퀴 (ROS 없이).
 
+대회 배치 (2026-11-10 확정): 목표 2번 칸, 정차 리모는 1·3·4·5·6번.
+
 가상 트랙 좌표 (mm): x = 진행 방향, 0 = 주차 앞 흰 선의 뒤쪽 가장자리. y = 왼쪽 +, 0 = 주차 구역 위 테두리.
 칸: 500 x 600, 선 20, 흰 선 -> 주차 구역 440 (2026Track 도면). 정차 리모는 칸 가운데라고 가정.
 """
@@ -70,8 +72,14 @@ def hits(x, y, th, boxes):
     return False
 
 
-def drive(parked, target, overrides=None, y0=240.0):
-    """주차 논리(ParkingV2)를 가상 트랙에서 끝까지 돌린다 -> (칸 안 모서리 수, 충돌, 결과)."""
+FIVE = [1, 3, 4, 5, 6]
+
+
+def drive(parked, target, overrides=None, y0=240.0, hide=()):
+    """주차 논리(ParkingV2)를 가상 트랙에서 끝까지 돌린다 -> (칸 안 모서리 수, 충돌, 결과).
+
+    hide: 라이다가 못 보는 리모의 parked 안 순서 (충돌 검사에는 그대로 들어감)
+    """
     p = dict(pn.DEFAULTS)
     p.update(overrides or {})
     logic = pn.ParkingV2(p)
@@ -80,7 +88,8 @@ def drive(parked, target, overrides=None, y0=240.0):
     info = {'done': False, 'result': ''}
     for _ in range(int(60 / dt)):
         fx, fy = x + WB * math.cos(th), y + WB * math.sin(th)
-        rng, amin, ainc = raycast(fx + LIDAR_AHEAD * math.cos(th), fy + LIDAR_AHEAD * math.sin(th), th, boxes)
+        seen = [b for i, b in enumerate(boxes) if i not in hide]
+        rng, amin, ainc = raycast(fx + LIDAR_AHEAD * math.cos(th), fy + LIDAR_AHEAD * math.sin(th), th, seen)
         cl = pn.scan_clusters(rng, amin, ainc, 0.05, 8.0, p['front_axle_from_lidar_mm'], 0.0,
                               max_dist_mm=max(1500.0, p['side_far_mm'] + 200.0))
         bl = pn.front_blocked(rng, amin, ainc, 0.05, 8.0, p['front_axle_from_lidar_mm'], 0.0,
@@ -164,22 +173,30 @@ def test_kappa_full_right_saturates_bridge():
 
 
 # ---------------------------------------------------------------- 가상 트랙 한 바퀴
-def test_park_front_row_cell2():
-    n_in, hit, result = drive([1, 3], 2)
+def test_cell_line_ignores_diagonal_back_row():
+    # 2번 칸에 들어가는 중: 1·3번(옆, 조금 뒤)과 4·6번(대각선 앞)이 다 보여도 1·3번을 골라야 한다
+    cl = [(-300.0, -400.0), (120.0, -420.0), (120.0, -60.0), (260.0, 310.0), (-250.0, 360.0)]
+    mx, my, ux, uy = pn.cell_line_from_neighbors(cl)
+    assert math.isclose(mx, -275.0) and math.isclose(my, -20.0)
+
+
+def test_park_cell2_five_limos():
+    n_in, hit, result = drive(FIVE, 2)
     assert (n_in, hit, result) == (4, False, 'PARKED')
 
 
-def test_park_back_row_cell5():
-    n_in, hit, result = drive([4, 6], 5)
+def test_park_cell2_when_limo1_missed():
+    # 1번을 못 보면 4·6번이 짝이 된다. 앞뒤 위치는 같고 깊이는 도면으로 정해서 2번에 들어감
+    n_in, hit, result = drive(FIVE, 2, hide=(0,))
     assert (n_in, hit, result) == (4, False, 'PARKED')
 
 
 def test_late_turn_recovers_by_realign():
-    # 40cm 늦게 꺾어 앞이 막혀도 재정렬로 5번 칸에 들어간다 (예전 실패 사례)
-    n_in, hit, _ = drive([4, 6], 5, {'turn_lead_mm': -80.0})
+    # 40cm 늦게 꺾어 앞이 막혀도 재정렬로 2번 칸에 들어간다
+    n_in, hit, _ = drive(FIVE, 2, {'turn_lead_mm': -80.0})
     assert n_in == 4 and not hit
 
 
 def test_disabled_realign_still_parks_nominal():
-    n_in, hit, result = drive([1, 3], 2, {'max_realign': 0})
+    n_in, hit, result = drive(FIVE, 2, {'max_realign': 0})
     assert (n_in, hit, result) == (4, False, 'PARKED')
