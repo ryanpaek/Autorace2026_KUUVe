@@ -348,7 +348,7 @@ def test_command_path_keeps_route_fallbacks():
     fsm = MissionFSM({'start_state': 'M5_BUMP', 'route_points': {'m5_slow_line': 2000.0}})
     fsm.step(Inputs(t=0.0, dist_mm=0.0, route_s=500.0, confirmed_classes={}))
     assert fsm.sub == ''
-    fsm.step(Inputs(t=0.05, dist_mm=10.0, route_s=1500.0, confirmed_classes={}))
+    fsm.step(Inputs(t=0.05, dist_mm=10.0, route_s=1750.0, confirmed_classes={}))
     assert fsm.sub == 'slow'
 
     fsm = MissionFSM({'start_state': 'M4_PARKING', 'route_points': {'m4_pre_line': 5000.0}})
