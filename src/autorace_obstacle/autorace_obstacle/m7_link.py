@@ -570,6 +570,9 @@ class M7Link:
                 'm7_section_m': self.section_m,
                 'm7_how': self.how,
                 'm7_pos_mm': None if self.pos is None else round(self.pos),
+                # 앞바퀴 -> 섬 앞 끝 (mm, +면 아직 앞). FSM이 도면 위치를 못 쓸 때 M2 끝 거리를 맞추는 데 씀
+                'm7_to_tip_mm': (None if self.pos is None
+                                 else round(self.p.island_s_mm - self.p.start_s_mm - self.pos)),
                 'm7_front_mm': None if self.front_mm is None else round(self.front_mm),
                 'm7_sign': ('near' if self.sign_near else 'exit' if self.sign_exit
                             else (f'lost{self.sign_lost}' if self.sign_seen else None)),

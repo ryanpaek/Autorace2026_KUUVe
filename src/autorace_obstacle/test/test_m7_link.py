@@ -628,3 +628,11 @@ def test_corner_not_detected_falls_back_to_map():
         s += 20.0
     en = [x for x, a in acts_all if a[0] == 'enable']
     assert en and en[0] >= 350.0
+
+
+def test_state_reports_distance_to_island_tip():
+    """FSM M2가 도면 위치 없이 끝 거리를 맞추도록 섬 앞 끝까지 남은 거리를 알려 줌."""
+    link = M7Link(M7LinkParams())
+    assert link.state()['m7_to_tip_mm'] is None
+    link.pos = 3384.0
+    assert link.state()['m7_to_tip_mm'] == 1000
