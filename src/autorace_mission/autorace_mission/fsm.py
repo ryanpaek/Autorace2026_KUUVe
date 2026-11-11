@@ -69,8 +69,10 @@ DEFAULT_PARAMS = {
     'm7_external_avoid': False,
     'm7_force_after_island_mm': 500.0,
     'fork_from_m7_exit': True,   # 갈림길 표지를 못 읽었으면 회피가 끝난 차로(A/B)를 그대로 쓴다 (섬을 건너지 않게)
-    'fork_follow_m7_exit': False,  # 표지(A/B)와 회피가 끝난 차로가 다를 때 차로를 따를지. 기본 false = 표지를 따른다:
-                                   # 규정상 반대 갈림길 진입은 M2 실패(10점)이고, 섬은 바닥 선이라 가로지르면 차로 이탈(1점)
+    'fork_follow_m7_exit': True,   # 표지(A/B)와 회피가 끝난 차로가 다를 때 차로를 따를지. 11/11 기본 true = 차로를 따른다:
+                                   # M2는 회피가 섬 앞 끝 +0.3 m를 지나 끝난 뒤 시작 -> 이미 그 길에 들어가 있고, M2에는 섬을 건너는
+                                   # 조향이 없다. 표지 쪽 한쪽 선 모드(left/right_only)를 주면 반대 길 바깥선은 BEV(±0.8 m) 밖이라
+                                   # 섬 테두리를 따르거나 선을 놓친다 -> 결과는 같고 선만 잃는다. false = 예전(표지 쪽 모드)
     # 3차선: 차로 500mm, 바깥 실선은 노랑·안쪽 점선은 흰색(모의 맵 10/30 확인) -> 두 색 다 차선으로
     'three_lane_width_mm': 520.0,       # 도면: 선 사이 500 + 점선 20 = 선 가운데끼리 520 (회피 lane_width 0.52와 같게)
     'three_lane_color': 'both',         # 도면: M3 종료 ~ 우하단 코너(약1.6m) + 3차선 약4.5m(섬 오른쪽 끝까지)
@@ -97,6 +99,7 @@ DEFAULT_PARAMS = {
     'cones_min_mm': 500.0,
     # M2 갈림길
     'fork_len_mm': 2300.0,       # 도면: 섬 오른쪽 끝부터 왼쪽 합류 테이퍼 끝까지 약 2.4m
+    'fork_adj_max_mm': 1500.0,   # 도면 위치가 없을 때 M2 끝 거리를 'M2 시작 ~ 섬 앞 끝'만큼 보정하는 최대값 (/obstacle/state m7_to_tip_mm)
     'fork_seek_timeout_sec': 12.0,  # 규정상 15초 안에 진입해야 함
     'fork_default': 'A',         # 끝까지 못 읽으면 찍을 방향. TODO 팀 정책
     # M1 신호등
@@ -239,6 +242,7 @@ class MissionFSM:
             self.p.update(params)
         self.votes: Dict[str, Vote] = {}
         self.fork_choice: Optional[str] = None      # 'A' | 'B'
+        self.fork_adj_mm = 0.0                       # M2 끝 거리 보정 (섬 앞 끝까지 남은 거리)
         self.state = ''
         self.sub = ''
         self.enter_t = self.enter_dist = 0.0
@@ -532,11 +536,12 @@ class MissionFSM:
                 and self.fork_choice != exit_lane):
             # 회피가 섬 전에 표지 쪽 차로로 못 옮김 (거리 부족·장애물)
             if self.p['fork_follow_m7_exit']:
-                self.log.append(f'M2 fork conflict: sign {self.fork_choice}, car in {exit_lane} lane -> follow lane {exit_lane}')
+                self.log.append(f'M2 fork conflict: sign {self.fork_choice}, car in {exit_lane} lane -> follow lane {exit_lane} '
+                                f'(이미 섬 옆: 표지 쪽으로 건너갈 수 없음)')
                 self.fork_choice = exit_lane
             else:
                 self.log.append(f'M2 fork conflict: sign {self.fork_choice}, car in {exit_lane} lane -> follow sign '
-                                f'{self.fork_choice} (섬을 가로지름: 차로 이탈 감점 < 반대 진입 실패)')
+                                f'{self.fork_choice} (fork_follow_m7_exit false: 표지 쪽 한쪽 선 모드)')
         if self.fork_choice is None:
             t, _ = self._since(inp)
             if t <= self.p['fork_seek_timeout_sec']:
@@ -544,10 +549,16 @@ class MissionFSM:
             self.fork_choice = self.p['fork_default']
         if self.sub == '':
             self._sub('branch', inp)
+            # 도면 위치가 없을 때(길 잃음) 끝 거리 보정: fork_len_mm은 섬 앞 끝부터 잰 길이인데 M2는
+            #   표지로 일찍 끄면 섬 앞(최대 1.5 m 전), 회피가 끝나면 섬 앞 끝 +0.3~0.5 m에서 시작한다.
+            #   일찍 시작하면 섬 옆에서 normal 모드로 돌아가 버림 -> M7이 마지막으로 잰 섬까지 거리만큼 늘림
+            tip = inp.obstacle.get('m7_to_tip_mm')
+            self.fork_adj_mm = (max(-self.p['fork_adj_max_mm'], min(self.p['fork_adj_max_mm'], float(tip)))
+                                if isinstance(tip, (int, float)) else 0.0)
         mode = 'left_only' if self.fork_choice == 'A' else 'right_only'
         _, db = self._since(inp, sub=True)
         end = self._past(inp, 'm2_merge_end')
-        if (db >= self.p['fork_len_mm']) if end is None else end:
+        if (db >= self.p['fork_len_mm'] + self.fork_adj_mm) if end is None else end:
             self._next(inp, f'fork {self.fork_choice} done')
             return Command('lane', self._lane(self.p['base_speed']))
         return Command('lane', self._lane(self.p['approach_speed'], mode))

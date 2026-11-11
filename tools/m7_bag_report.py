@@ -208,7 +208,14 @@ def main():
         fc = ms[-1].get('fork_choice') if ms else None
         print(f'갈림길 결정: {fc},  M7 끝 차로(m7_exit_lane): {ms[-1].get("m7_exit_lane") if ms else None}')
         if ex and fc and ex[-1][2] and ex[-1][2] != fc:
-            warn.append(f'M2: 표지 {fc}인데 M7은 {ex[-1][2]} 차로에서 끝남 (섬을 가로지름)')
+            warn.append(f'M2: 결정 {fc}인데 M7은 {ex[-1][2]} 차로에서 끝남 (fork_follow_m7_exit false?)')
+        seen = []                                   # M7~M2 동안 fork_choice가 바뀌었나 (표지 vs 끝난 차로)
+        for t, m in d['/mission/state']:
+            if t <= t1 and isinstance(m, dict) and m.get('fork_choice') and m.get('fork_choice') not in seen:
+                seen.append(m.get('fork_choice'))
+        if len(seen) > 1:
+            warn.append(f'M2: 표지 {seen[0]}였지만 회피가 섬 전에 못 옮겨 {seen[-1]} 차로로 감 '
+                        f'(표지 확정이 늦었나: /avoid/state exit_info rem_m 확인)')
 
     if a.all:
         print('\n(--all) 전체 상태 전환은 위 첫 표 참고')

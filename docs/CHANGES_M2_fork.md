@@ -48,3 +48,26 @@ A = 1차선(+1, 왼쪽), B = 3차선(-1, 오른쪽).
   가로지르면 차로 이탈 감점(1회 1점). `true`로 하면 차로를 따름.
 - 코스 시뮬레이션 시나리오 `fork_lane_conflict` 추가. 7개 시나리오 모두 완주.
 - 확인: mission·fork·obstacle·avoid 시험 195 passed, course_sim 7/7.
+
+## 점검 (11/11)
+
+표지 인식·발행이 된다는 가정에서 "결정 → 차선 옮김 → 차선 주행"을 다시 확인했다.
+
+| 단계 | 어디서 | 기다림 |
+|---|---|---|
+| 결정 | M7 중 표지 10프레임 중 7번 → FSM `fork_choice` | 없음 (확정까지 약 1.4 s) |
+| 옮김 | obstacle_node → `/fork_direction` → 회피 노드 `exit_plan`이 섬 앞 끝 전에 출구 차로로 | 회피 시작 0.6 s, 차로 변경 뒤 0.8 s |
+| 차선 주행 | M2 들어간 주기에 `left_only`/`right_only` (A·B 바깥 노란 실선) | 없음 |
+
+갈림길 시뮬레이션(`fork_sim.py`, 15배치 × A/B): 표지를 섬 1.5 m 이상 전에 알면 30/30, 1.0 m 전이면 19/30(2차로 이동 0/11, 지금 차로 유지). 충돌 0.
+
+**바꾼 것**
+- `fork_follow_m7_exit` 기본 **true**: 표지와 회피가 끝난 차로가 다르면 차로를 따른다. M2는 회피가 섬 앞 끝 +0.3 m를 지나 끝난 뒤
+  시작해서 이미 그 길에 들어가 있고, M2에는 섬을 건너는 조향이 없다. 표지 쪽 한쪽 선 모드를 주면 반대 길 바깥선은 BEV(±0.8 m) 밖이라
+  섬 테두리를 따르거나 선을 놓친다 -> 결과(진입한 길)는 같고 선만 잃는다.
+- 도면 위치가 없을 때(길 잃음) M2 끝 거리 보정: `fork_len_mm`(2300)은 섬 앞 끝부터의 길이인데, 표지로 일찍 끄면 M2가 섬 앞(최대 1.5 m)에서
+  시작해 섬 옆에서 normal 모드로 돌아갔다. `/obstacle/state`에 `m7_to_tip_mm`(앞바퀴 -> 섬 앞 끝)을 넣고 FSM이 그만큼 끝 거리를 늘리거나 줄인다
+  (최대 ±1.5 m, `fork_adj_max_mm`). 도면 위치가 있으면 예전처럼 `m2_merge_end`.
+- `tools/m7_bag_report.py`: M7~M2 동안 `fork_choice`가 바뀌면(표지 vs 끝난 차로) 경고.
+
+확인: mission 247, obstacle 84, perception 49, fork 4, avoid 37 passed. course_sim 7/7 완주(`fork_lane_conflict`는 이제 끝난 차로 A).
