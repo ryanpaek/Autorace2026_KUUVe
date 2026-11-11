@@ -82,6 +82,14 @@ class MissionNode(Node):
         self.declare_parameter('route_ordered_gate_mm', 1200.0)
         # 시작하자마자 경로 위치를 이 값(mm)으로 맞춘다 (lane_test에서 START 체커 출발 = 0.0). 음수면 안 함
         self.declare_parameter('route_start_s', -1.0)
+        # 11/10 위치 회복
+        # 후진(odom twist.linear.x < 0) 거리는 경로 위치 s에서 뺀다. FSM 누적 거리(dist_mm)는 예전처럼 그대로 둔다.
+        # TODO 실측: LIMO 후진 때 /odom twist.linear.x가 음수로 나오는지 (안 나오면 예전과 똑같이 동작)
+        self.declare_parameter('route_signed_dist', True)
+        # 마지막으로 맞춘 선 뒤로 도면 선을 이만큼 연속 못 보면 '길 잃음' -> FSM에 경로 위치를 안 줌. 0이면 끔
+        self.declare_parameter('route_lost_misses', 2)
+        # 카메라로 확인한 미션 선으로 s를 다시 맞출 때, 지금 s와 이보다 크게 다르면 오검출로 보고 안 맞춤
+        self.declare_parameter('route_anchor_max_mm', 3000.0)
 
         params = {k: self.get_parameter(k).value for k in DEFAULT_PARAMS
                   if not isinstance(DEFAULT_PARAMS[k], dict)}
@@ -98,7 +106,8 @@ class MissionNode(Node):
                                             gain=self.get_parameter('route_gain').value,
                                             odom_scale=self.get_parameter('odom_scale').value,
                                             ordered_gate_mm=float(self.get_parameter(
-                                                'route_ordered_gate_mm').value))
+                                                'route_ordered_gate_mm').value),
+                                            lost_misses=int(self.get_parameter('route_lost_misses').value))
                 params['route_points'] = self.route.points
                 self.mappose = MapPose(self.route)
                 self.get_logger().info(f'route map: {path} ({self.route.length / 1000:.1f} m, '
@@ -109,6 +118,8 @@ class MissionNode(Node):
         self.get_logger().info(f'mission start state: {self.fsm.state}')
 
         self.dist_mm = 0.0
+        self.route_dist_mm = 0.0      # 경로 위치용 거리: 후진이면 뺌 (route_signed_dist)
+        self.route_s_map = None       # 길을 잃어도 화면·곡률 미리보기용으로는 계속 내는 s
         self._last_xy = None
         self.yaw = None
         self.tilt_peak = 0.0
@@ -193,9 +204,25 @@ class MissionNode(Node):
     def _route_reset(self, s: float, why: str):
         if self.tracker is None:
             return
-        self.tracker.reset(s, self.dist_mm)
+        self.tracker.reset(s, self.route_dist_mm)
         self.route_active = True
         self.get_logger().info(f'route s = {s:.0f} mm ({why})')
+
+    def _apply_anchor(self):
+        """FSM이 카메라로 확인한 미션 선(정지선·시작선)을 지나거나 그 앞에 서면 s를 그 선 기준으로 다시 맞춘다."""
+        a = self.fsm.pop_anchor()
+        if a is None or self.tracker is None or not self.route_active:
+            return
+        name, rem = a
+        s0 = self.route.points.get(name)
+        if s0 is None:
+            return
+        s_new = s0 - rem                  # 앞바퀴 위치 = 선 - 남은 거리 (지났으면 rem < 0)
+        jump = s_new - self.tracker.s
+        if abs(jump) > float(self.get_parameter('route_anchor_max_mm').value):
+            self.get_logger().warning(f'anchor {name} ignored: {jump:+.0f}mm off (route_anchor_max_mm)')
+            return
+        self._route_reset(s_new, f'anchor {name} (camera, {jump:+.0f}mm)')
 
     def _on_set_s(self, msg):
         self._route_reset(float(msg.data), 'manual')
@@ -231,6 +258,9 @@ class MissionNode(Node):
             # FSM뿐 아니라 도면 위치(RouteTracker)도 이 거리를 쓰므로 여기서 거른다 (11/10 통주행 시뮬레이션에서 발견)
             if step <= self.odom_step_max_mm:
                 self.dist_mm += step
+                back = (self.get_parameter('route_signed_dist').value
+                        and msg.twist.twist.linear.x < -0.005)
+                self.route_dist_mm += -step if back else step
             else:
                 self.odom_jumps += 1
                 self.get_logger().warning(f'odom jump ignored: {step:.0f}mm in one message '
@@ -267,8 +297,13 @@ class MissionNode(Node):
         if self.route_active:
             lines = self.lane.get('stoplines_mm') if self.new_lane else None
             xw = self.lane.get('crosswalk_lines_mm') if self.new_lane else None
-            route_s = self.tracker.update(self.dist_mm, lines, xw)
+            route_s = self.tracker.update(self.route_dist_mm, lines, xw)
             self.new_lane = False
+            self.route_s_map = route_s
+            if self.tracker.lost:
+                # 길 잃음: 틀린 위치로 미션·모드를 바꾸지 않게 FSM에는 '경로 정보 없음'으로 준다
+                # (FSM은 표지·카메라 선·구간 거리로 판단. 카메라 미션 선을 보면 pop_anchor로 다시 맞춤)
+                route_s = None
         self.command_inbox.set_mode(self.fsm.state)
         return Inputs(t=time.monotonic(), dist_mm=self.dist_mm, yaw=self.yaw,
                       confirmed_classes=(dict(self.command_inbox.classes)
@@ -288,6 +323,7 @@ class MissionNode(Node):
         self.start_flag = False
         self.tilt_peak = 0.0
         cmd = self.fsm.step(inp)
+        self._apply_anchor()
 
         now = time.monotonic()
         if cmd.lane != self._last_lane_cfg or now - self._last_cfg_pub > 1.0:
@@ -315,19 +351,21 @@ class MissionNode(Node):
                 out.linear.x = max(-vmax, min(vmax, tw.linear.x))
                 out.angular.z = max(-wmax, min(wmax, tw.angular.z))
         self.cmd_pub.publish(out)
-        if self.route_active and inp.route_s is not None:
+        rs = self.route_s_map if self.route_active else None
+        if rs is not None:
             step = 100.0
-            ks = [round(self.route.curvature(inp.route_s + i * step), 4) for i in range(14)]
-            msg = {'s': round(inp.route_s), 'step_mm': step, 'k': ks}
+            ks = [round(self.route.curvature(rs + i * step), 4) for i in range(14)]
+            msg = {'s': round(rs), 'step_mm': step, 'k': ks,
+                   'lost': bool(self.tracker.lost)}
             mp = self.mappose
             if mp is not None:
-                mp.predict(self.dist_mm, inp.route_s, self.yaw)
-                mp.update_lane(inp.route_s, self.yaw, self.lane, self.dist_mm)
+                mp.predict(self.dist_mm, rs, self.yaw)
+                mp.update_lane(rs, self.yaw, self.lane, self.dist_mm)
                 msg['pose_ok'] = mp.valid(self.dist_mm) and self.yaw is not None
                 if msg['pose_ok']:
                     msg['d_mm'] = round(mp.d)
                     msg['psi'] = round(self.yaw + mp.yaw_off, 4)      # 도면 좌표계 차 방향 (디버그 화면용)
-                    msg['pts'] = mp.points_ahead(inp.route_s, self.yaw)
+                    msg['pts'] = mp.points_ahead(rs, self.yaw)
             self.preview_pub.publish(String(data=json.dumps(msg)))
 
         state = {'state': self.fsm.state, 'sub': self.fsm.sub, 'source': source,

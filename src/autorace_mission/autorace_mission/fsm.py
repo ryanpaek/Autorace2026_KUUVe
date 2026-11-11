@@ -235,6 +235,7 @@ class MissionFSM:
         self.enter_t = self.enter_dist = 0.0
         self.sub_t = self.sub_dist = 0.0
         self.stop: Optional[StopApproach] = None
+        self.stop_line_name: Optional[str] = None    # 지금 정지 접근 중인 도면 선 이름 (위치 다시 잡기용)
         self.count = 0                               # 서브 상태 안에서 쓰는 연속 카운터
         self.log = []
         self.parking_sign = False                    # 주차 표지를 봤나 (M1~M4 동안 투표, 상태가 바뀌어도 유지)
@@ -245,6 +246,10 @@ class MissionFSM:
         self.cones_gone_t = None
         self._last_dist = None                       # odom 점프 감시용
         self._dist_adj = 0.0
+        # 위치 다시 잡기 (11/10): 카메라로 확인한 미션 선을 앞바퀴가 지나거나 그 앞에 서면
+        # (도면 선 이름, 남은 거리 mm)를 남긴다. mission_node가 pop_anchor()로 받아 경로 위치 s를 그 선 기준으로 다시 맞춘다
+        self.anchor = None
+        self._anchored = set()
         self._goto(self.p['start_state'], Inputs(t=0.0, dist_mm=0.0), 'init')
 
     # --- 공통 도구 ------------------------------------------------------------
@@ -261,6 +266,19 @@ class MissionFSM:
         self.line = None
         self.bump_at = None
         self.cones_seen, self.cones_gone_t = False, None
+        self._anchored = set()
+
+    def _anchor(self, name: Optional[str], approach: Optional['StopApproach'], rem: Optional[float]) -> None:
+        """카메라로 본 선일 때만, 상태마다 선 하나당 한 번 위치 다시 잡기를 요청."""
+        if (name and approach is not None and approach.how == 'camera' and rem is not None
+                and name not in self._anchored and self._rp(name) is not None):
+            self.anchor = (name, float(rem))
+            self._anchored.add(name)
+            self.log.append(f'{self.state} anchor {name} (camera, rem {rem:.0f}mm)')
+
+    def pop_anchor(self):
+        a, self.anchor = self.anchor, None
+        return a
 
     def _next(self, inp: Inputs, why: str = '') -> None:
         if self.state not in SEQUENCE:
@@ -308,6 +326,7 @@ class MissionFSM:
                                  freeze_mm=self.p['stop_freeze_mm'],
                                  route_gate_mm=self.p['stop_route_gate_mm'])
         self.stop.route_line_s = self._rp(line) if line else None
+        self.stop_line_name = line
 
     def _line_crossed(self, inp: Inputs, name: str) -> Optional[bool]:
         """흰 가로선을 앞바퀴가 지났나 (1순위 카메라, 2순위 도면 위치). 둘 다 모르면 None.
@@ -321,6 +340,8 @@ class MissionFSM:
             self.line.route_line_s = self._rp(name)
         rem = self.line.remaining(inp)
         if rem is not None and self.line.seen_d is not None:
+            if rem <= 0.0:
+                self._anchor(name, self.line, rem)
             return rem <= 0.0
         past = self._past(inp, name)
         if past is not None:
@@ -431,6 +452,7 @@ class MissionFSM:
         if self.sub == 'approach':
             if not self.stop.should_stop(inp):
                 return Command('lane', self._lane(p['approach_speed']))
+            self._anchor(self.stop_line_name, self.stop, self.stop.remaining(inp))
             self._sub('stopped', inp)
         if self.sub == 'stopped':
             t, _ = self._since(inp, sub=True)
@@ -602,6 +624,7 @@ class MissionFSM:
             if green and not red and not p['stop_on_green_arrival']:
                 self._sub('go', inp)
             elif self.stop.should_stop(inp):
+                self._anchor(self.stop_line_name, self.stop, self.stop.remaining(inp))
                 self._sub('stopped', inp)
             else:
                 return Command('lane', self._lane(p['approach_speed']))
