@@ -115,3 +115,75 @@ def test_reverse_back_and_forth_returns_to_same_s(route):
         tr.update(along)
     assert tr.s == pytest.approx(2000.0, abs=1.0)
     assert mp.d == pytest.approx(0.0, abs=1.0)
+
+
+# --- 차로 맞추기 (3차선·갈림길, 차로 벗어남) -------------------------------------
+
+TRACK = os.path.join(os.path.dirname(__file__), '..', '..', 'autorace_bringup', 'config', 'track_route.yaml')
+
+
+@pytest.fixture(scope='module')
+def track():
+    return RouteMap.from_yaml(TRACK)
+
+
+def _lane(offset, lane_id=None):
+    return {'status': 'BOTH', 'model': 'poly', 'heading_rad': 0.0, 'offset_mm': offset, 'lane_id': lane_id}
+
+
+def _s(track, x):
+    return track.s_of((x, 940))
+
+
+def test_lane_centers_follow_drawing(track):
+    assert track.lane_centers(_s(track, 9000)) == [0.0]                  # 3차선 전
+    assert track.lane_centers(_s(track, 6000)) == [520.0, 0.0, -520.0]   # 3차선
+    assert track.lane_centers(_s(track, 3500)) == [520.0, -520.0]        # 섬 옆: A(왼쪽)·B(오른쪽)만
+    assert track.lane_centers(_s(track, 1500)) == [0.0]                  # 합류 뒤
+
+
+def test_b_lane_beside_island_is_not_pulled_to_center(track):
+    """갈림길 B 차로를 달릴 때 차선 offset(그 차로 기준 ~0)으로 d가 0(섬 위)으로 튀지 않는다."""
+    s = _s(track, 3500)
+    mp = MapPose(track)
+    h = track.heading(s)
+    mp.align(s, h, 0.0)
+    mp.d = -500.0                                    # 오도메트리로 B 쪽으로 옮겨 옴
+    assert mp.update_lane(s, h, _lane(-20.0), 100.0)
+    assert mp.d == pytest.approx(-500.0)             # B 차로 중심 -520 + 차로 안 20
+    assert mp.lane_center == -520.0
+
+
+def test_lane_id_picks_lane_in_three_lane(track):
+    s = _s(track, 6000)
+    mp = MapPose(track)
+    h = track.heading(s)
+    mp.align(s, h, 0.0)
+    mp.d = 400.0
+    assert mp.update_lane(s, h, _lane(0.0, lane_id=1), 0.0)
+    assert mp.d == pytest.approx(520.0)              # +1 = 왼쪽 차로 (A 쪽)
+
+
+def test_off_lane_jump_rejected_then_accepted_if_persistent(track):
+    """차로를 벗어나 엉뚱한 선 두 개를 잡아 offset 0이 와도 바로 가운데로 끌려가지 않는다."""
+    s = track.points['m5_slow_line'] + 1000.0        # 상단 직선 1차로
+    mp = MapPose(track)
+    h = track.heading(s)
+    mp.align(s, h, 0.0)
+    mp.d = 450.0                                     # 오도메트리: 차로 밖 왼쪽
+    for i in range(mp.jump_frames - 1):
+        assert not mp.update_lane(s, h, _lane(0.0), 0.0)
+        assert mp.d == 450.0
+    assert mp.update_lane(s, h, _lane(0.0), 0.0)     # 계속 같은 값이면 오도메트리가 틀린 것으로 보고 받음
+    assert mp.d == pytest.approx(0.0)
+
+
+def test_points_ahead_follow_current_fork_lane(track):
+    """B 차로에 있으면 차선 노드에 주는 도면 경로 점도 B 차로 중심 (예전엔 섬 위 가운데 선)."""
+    s = _s(track, 3500)
+    mp = MapPose(track)
+    h = track.heading(s)
+    mp.align(s, h, 0.0)
+    mp.d, mp.lane_center = -520.0, -520.0
+    pts = mp.points_ahead(s, h, n=3)
+    assert all(abs(x) < 1.0 for x, _ in pts)         # 차 바로 앞 = 지금 차로 중심 (좌우 0)

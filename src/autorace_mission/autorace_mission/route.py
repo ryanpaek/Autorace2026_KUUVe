@@ -112,6 +112,19 @@ class RouteMap:
                                          for k, v in data.get('points', {}).items()}
         for lm in self.landmarks:
             self.points[lm['name']] = lm['s']
+        # 3차선·갈림길 (11/11). 없으면 어디서나 차로 하나
+        self.three = None
+        tl = data.get('three_lane')
+        if tl:
+            isl = [tuple(map(float, q)) for q in tl['island']]
+            ss = [self.s_of(q) for q in isl]
+            self.three = {
+                'spacing': float(tl.get('spacing_mm', 520.0)),
+                'in': tuple(sorted(self.s_of(q) for q in tl['taper_in'])),
+                'out': tuple(sorted(self.s_of(q) for q in tl['taper_out'])),
+                'island': (min(ss), max(ss)),
+                'island_xy': isl,
+            }
 
     @classmethod
     def from_yaml(cls, path: str) -> 'RouteMap':
@@ -141,6 +154,39 @@ class RouteMap:
             if g.s0 < s_to and g.s0 + g.length > s_from:
                 k = max(k, abs(g.curvature))
         return k
+
+    def widen(self, s: float) -> float:
+        """3차선 벌어짐 정도: 1차로 0 ~ 3차로 1 (taper에서 선형)."""
+        t = self.three
+        if t is None:
+            return 0.0
+        (a0, a1), (b0, b1) = t['in'], t['out']
+        if s <= a0 or s >= b1:
+            return 0.0
+        if s < a1:
+            return (s - a0) / (a1 - a0)
+        if s > b0:
+            return (b1 - s) / (b1 - b0)
+        return 1.0
+
+    def in_taper(self, s: float) -> bool:
+        w = self.widen(s)
+        return 0.0 < w < 1.0
+
+    def on_island(self, s: float) -> bool:
+        t = self.three
+        return t is not None and t['island'][0] <= s <= t['island'][1]
+
+    def lane_centers(self, s: float) -> List[float]:
+        """이 위치에서 차가 있을 수 있는 차로 중심의 좌우 위치 d (경로 중심선 기준, 왼쪽 +).
+        보통 [0], 3차선 [+520, 0, -520], 섬 옆 [+520(A), -520(B)], taper에서는 간격이 줄어든다."""
+        w = self.widen(s)
+        if w <= 0.0:
+            return [0.0]
+        sp = self.three['spacing'] * w
+        if self.on_island(s):
+            return [sp, -sp]
+        return [sp, 0.0, -sp]
 
     def s_of(self, xy) -> float:
         """도면 좌표를 경로에 투영한 s (가장 가까운 구간)."""
@@ -344,8 +390,18 @@ class MapPose:
     """
 
     def __init__(self, route: RouteMap, front_axle_mm: float = 200.0,
-                 valid_mm: float = 3000.0, alpha: float = 0.2):
+                 valid_mm: float = 3000.0, alpha: float = 0.2,
+                 jump_gate_mm: float = 200.0, jump_frames: int = 10):
         self.route = route
+        # 11/11: 차선 노드 offset은 '카메라가 보는 차로'의 중심 기준이다. 차가 옆 차로에 있거나
+        # 차로를 벗어나 엉뚱한 선 두 개를 잡으면 d가 가운데(0)로 튀었다 -> 
+        #   (1) 도면상 차로 중심 후보(3차선·갈림길 A/B) 중 지금 추정에 가장 가까운 차로로 맞추고
+        #   (2) 그래도 추정과 jump_gate_mm 넘게 다르면 jump_frames 프레임 연속일 때만 받아들인다
+        self.jump_gate_mm = jump_gate_mm
+        self.jump_frames = jump_frames
+        self._disagree = 0
+        self.lane_fix = ''        # 마지막 차선 보정 결과 (디버그)
+        self.lane_center = 0.0    # 지금 차가 있다고 본 차로 중심 d
         self.front_axle_mm = front_axle_mm      # 뒷바퀴 축(차선 노드 기준점) -> 앞바퀴 (s 기준)
         self.valid_mm = valid_mm                # 마지막 좌우 보정 뒤 이 거리까지만 믿는다
         self.alpha = alpha
@@ -408,15 +464,37 @@ class MapPose:
             return False
         if abs(self.route.curvature(s)) > 1e-6 or abs(self.route.curvature(s + 600.0)) > 1e-6:
             return False
+        if self.route.in_taper(s) or self.route.in_taper(s + 600.0):
+            return False                        # 차로가 벌어지거나 모이는 곳: 선 방향이 경로와 다름
         hd = float(lane['heading_rad'])
         if abs(hd) > 0.3:
             return False
+        local = -float(lane['offset_mm'])       # offset = 차 기준 차로 중심 (왼쪽 +) -> 그 차로 안 차의 위치
+        centers = self.route.lane_centers(s)
+        lid = lane.get('lane_id')
+        if len(centers) == 3 and lid in (1, 0, -1):
+            c = centers[(1, 0, -1).index(lid)]   # 선 종류로 본 차로 번호 (+1 왼쪽 = A쪽)
+            how = f'lane_id {lid}'
+        else:
+            c = min(centers, key=lambda cc: abs(cc + local - self.d))
+            how = 'nearest lane' if len(centers) > 1 else 'lane'
+        new_d = c + local
+        if self.yaw_off is not None and self._d_fix_dist is not None \
+                and abs(new_d - self.d) > self.jump_gate_mm:
+            self._disagree += 1
+            if self._disagree < self.jump_frames:
+                self.lane_fix = f'rejected: {new_d - self.d:+.0f}mm jump ({self._disagree}/{self.jump_frames})'
+                return False
+            how += ', accepted after repeats'
+        self._disagree = 0
         off = _wrap(self.route.heading(s) - (imu_yaw + hd))
         if self.yaw_off is None:
             self.yaw_off = off
         else:
             self.yaw_off = _wrap(self.yaw_off + self.alpha * _wrap(off - self.yaw_off))
-        self.d = -float(lane['offset_mm'])      # offset = 차 기준 차로 중심 (왼쪽 +) -> 차의 위치는 반대
+        self.d = new_d
+        self.lane_center = c
+        self.lane_fix = f'ok ({how}, lane d {c:+.0f})'
         self._d_fix_dist = dist_mm
         return True
 
@@ -434,7 +512,13 @@ class MapPose:
         c, sn = math.cos(psi), math.sin(psi)
         out = []
         for i in range(n):
-            qx, qy = self.route.xy(s + i * step_mm)
+            si = s + i * step_mm
+            qx, qy = self.route.xy(si)
+            # 지금 차가 있는 차로의 중심을 따라간다 (3차선·갈림길에서 경로 중심선 = 가운데 차로가 아님, 11/11)
+            ci = min(self.route.lane_centers(si), key=lambda cc: abs(cc - self.lane_center))
+            if ci:
+                hi = self.route.heading(si)
+                qx, qy = qx - ci * math.sin(hi), qy + ci * math.cos(hi)
             dx, dy = qx - fx, qy - fy
             fwd = dx * c + dy * sn
             right = dx * sn - dy * c

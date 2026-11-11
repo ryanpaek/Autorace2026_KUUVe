@@ -91,7 +91,7 @@ def generate_launch_description():
                                       LaunchConfiguration('use_class_commands'), value_type=bool)}],
              output='screen'),
         Node(package='autorace_mission', executable='debug_view', name='debug_view',
-             parameters=[params, {'route_file': route}], output='screen',
+             parameters=[params, {'route_file': route, 'bev_config': bev}], output='screen',
              condition=IfCondition(LaunchConfiguration('debug_view'))),
         Node(package='autorace_mission', executable='parking_node', name='parking_node',
              parameters=[params, {'enabled': ParameterValue(LaunchConfiguration('parking'), value_type=bool)}],

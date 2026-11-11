@@ -410,13 +410,21 @@ class MissionNode(Node):
                 if e is not None:
                     msg['dpsi'] = round(e, 4)
                 msg['pose_ok'] = mp.valid(self.dist_mm) and self.yaw is not None
-                if msg['pose_ok']:
+                if mp.yaw_off is not None and self.yaw is not None:
+                    # 11/11: 차선으로 최근에 못 맞췄어도(pose_ok=false) 오도메트리로 적분한 d·방향은 계속 낸다.
+                    # 예전엔 pose_ok일 때만 내서 차로를 벗어나면 디버그 화면이 차를 가운데에 그렸다
                     msg['d_mm'] = round(mp.d)
                     msg['psi'] = round(self.yaw + mp.yaw_off, 4)      # 도면 좌표계 차 방향 (디버그 화면용)
+                    msg['lane_fix'] = mp.lane_fix
+                    msg['lane_c'] = round(mp.lane_center)
+                if msg['pose_ok']:
                     msg['pts'] = mp.points_ahead(rs, self.yaw)
             self.preview_pub.publish(String(data=json.dumps(msg)))
 
         state = {'state': self.fsm.state, 'sub': self.fsm.sub, 'source': source,
+                 # 디버그 화면 '판단 설명'용 (11/11): 자율주행이 낼 명령(수동 모드에서도 계산), 차선 설정, 정지선 남은 거리
+                 'auto_cmd': [round(out.linear.x, 3), round(out.angular.z, 3)],
+                 'lane_cfg': cmd.lane, 'stop': self._stop_info(),
                  'manual': self.manual, 'dir': self.move_dir, 'reverse_mm': round(self.reverse_mm),
                  'fork_choice': self.fsm.fork_choice, 'dist_mm': round(self.dist_mm),
                  'estop': self.estop, 'note': cmd.note,
@@ -433,6 +441,20 @@ class MissionNode(Node):
                 self.get_logger().info(f'[M2] 시작 차로: {ex.get("lane", "?")}차선 (fork {ex.get("fork")}, '
                                        f'/m7/exit_lane) / 표지 {self.fsm.fork_choice}')
             self._last_state = (self.fsm.state, self.fsm.sub)
+
+
+    def _stop_info(self):
+        """정지선 접근 중이면 남은 거리(앞바퀴 기준)와 근거. FSM 상태를 바꾸지 않게 저장된 값으로만 계산한다."""
+        st = getattr(self.fsm, 'stop', None)
+        if st is None or self.fsm.sub not in ('approach', 'stopped'):
+            return None
+        rem, how = None, None
+        if st.seen_d is not None and st.seen_at is not None:
+            rem, how = st.seen_d - (self.dist_mm - st.seen_at), st.how
+        elif st.route_line_s is not None and self.route_active and not self.tracker.lost:
+            rem, how = st.route_line_s - self.tracker.s, 'route'
+        return {'line': self.fsm.stop_line_name, 'rem_mm': None if rem is None else round(rem),
+                'how': how, 'stop_at_mm': round(st.target_mm + st.brake_mm)}
 
 
 def main(args=None):
