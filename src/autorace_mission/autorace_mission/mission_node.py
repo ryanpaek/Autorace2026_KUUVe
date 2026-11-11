@@ -41,7 +41,7 @@ from sensor_msgs.msg import Imu
 from std_msgs.msg import Bool, Empty, Float32, String
 
 from autorace_mission.command_inbox import CommandInbox
-from autorace_mission.fsm import DEFAULT_PARAMS, Inputs, MissionFSM
+from autorace_mission.fsm import DEFAULT_PARAMS, SEQUENCE, Inputs, MissionFSM
 from autorace_mission.route import MapPose, RouteMap, RouteTracker, motion_sign
 
 # /mission/set_state로 점프할 때 차를 놓는 곳 (도면 경로 지점 + 오프셋 mm)
@@ -210,6 +210,9 @@ class MissionNode(Node):
     def _obstacle_input(self) -> dict:
         """M2에서 /obstacle/state에 m7_exit가 없으면(obstacle_node 재시작 등) /m7/exit_lane 값으로 채운다."""
         ob = self.obstacle
+        if getattr(self, 'practice_m2', False) and self.fsm.state == 'M2_FORK':
+            # 연습으로 M2에 바로 들어옴: 지난 주행의 M7 종료 차로(obstacle_node가 계속 내는 m7_exit)는 쓰지 않는다
+            return {k: v for k, v in (ob or {}).items() if k != 'm7_exit'}
         ex = getattr(self, 'm7_exit_lane', None) or {}
         if self.fsm.state == 'M2_FORK' and ob.get('m7_exit') not in ('A', 'B') and ex.get('fork') in ('A', 'B'):
             ob = dict(ob, m7_exit=ex['fork'])
@@ -326,8 +329,15 @@ class MissionNode(Node):
         self.get_logger().warning(f'E-STOP {"ON" if self.estop else "off"}')
 
     def _on_set_state(self, msg):
+        target = msg.data.strip()
+        if target in SEQUENCE and SEQUENCE.index(target) <= SEQUENCE.index('M2_FORK'):
+            # 11/11: 갈림길 이전 미션부터 다시 하면 지난 주행의 갈림길 선택·M7 종료 차로를 버린다
+            # (예전엔 M2를 연습해도 지난번 A/B를 바로 써서 표지 인식을 시험할 수 없었음)
+            self.fsm.fork_choice = None
+            self.m7_exit_lane = None
+        self.practice_m2 = target == 'M2_FORK'
         try:
-            self.fsm._goto(msg.data.strip(), self._inputs(), 'manual')
+            self.fsm._goto(target, self._inputs(), 'manual')
             self.get_logger().info(f'state set to {self.fsm.state}')
             if self.route is not None and self.fsm.state in STATE_START_POINT:
                 name, off = STATE_START_POINT[self.fsm.state]
@@ -434,6 +444,8 @@ class MissionNode(Node):
         self.state_pub.publish(String(data=json.dumps(state)))
         if (self.fsm.state, self.fsm.sub) != self._last_state:
             self.get_logger().info(f'[{self.fsm.state}/{self.fsm.sub}] {self.fsm.log[-1]}')
+            if self.fsm.state != 'M2_FORK':
+                self.practice_m2 = False
             if self.fsm.state == 'M7_OBSTACLE' and (self._last_state or (None,))[0] != 'M7_OBSTACLE':
                 self.m7_exit_lane = None             # 지난 주행의 latched 값은 버림
             if self.fsm.state == 'M2_FORK' and (self._last_state or (None,))[0] != 'M2_FORK':
