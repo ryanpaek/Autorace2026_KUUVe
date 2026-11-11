@@ -578,3 +578,53 @@ def test_lane_is_2_from_m7_entry_before_camera_knows():
     for _ in range(5):
         link.update(0.1, mission(12600.0), {'lane_id': 1})
     assert link.lane_now()['lane'] == 1 and link.lane_now()['src'] == 'camera'
+
+
+# --- 11/11: 코너 지킴 (통주행: M7 진입 -> 우하단 코너 90° -> 시작선) ---------------------------------
+def _corner_drive(link, map_err=0.0):
+    """앞바퀴 기준 시작선 -1623 mm에서 진입, -1293 ~ -288 코너(90° 우회전). (켠 위치, 켤 때 방향) 반환."""
+    s, yaw0 = -1623.0, math.pi / 2
+    while s < 1500.0:
+        turn = min(max(s + 1293.0, 0.0) / 1005.0, 1.0) * (math.pi / 2)
+        link.on_yaw(yaw0 - turn)
+        link.on_front(700.0)                          # 코너 내내 앞에 무언가(벽·장애물)가 보임
+        acts = link.update(s / 1000.0, mission(13589.0 + s + map_err, dist=s + 1623.0),
+                           {'status': 'BOTH', 'heading_rad': 0.0})
+        if any(a[0] == 'enable' for a in acts):
+            return s, math.degrees(yaw0 - turn)
+        s += 20.0
+    return None, None
+
+
+def test_corner_guard_blocks_enable_inside_corner_even_if_map_ahead():
+    old = obstacle_link(corner_turn_deg=0.0)
+    s_old, _ = _corner_drive(old, map_err=300.0)
+    assert s_old is not None and s_old < -288.0 - 200.0            # 예전: 도면이 0.3 m 앞서면 코너 안에서 켬
+    new = obstacle_link()
+    s_new, head = _corner_drive(new, map_err=300.0)
+    assert s_new is not None and s_new >= -288.0 - 1005.0 * (10.0 / 90.0) - 20.0   # 80° 돈 뒤 (남은 10° 안)
+    assert new.state()['m7_corner'] == 'done'
+    assert abs(new.start_heading_deg - head) < 1.0                  # 직선 대비 남은 각을 회피 노드에 넘김
+    assert 0.0 <= new.start_heading_deg <= 11.0
+
+
+def test_corner_guard_off_for_practice_start_line():
+    """연습: set_state M7 = 시작선 -300 에서 진입 -> 코너 지킴 안 함 (예전처럼)."""
+    link = obstacle_link()
+    link.on_yaw(0.0)
+    link.update(0.0, mission(13589.0 - 300.0, dist=0.0), {})
+    assert link.corner_need is False and link.start_heading_deg is None
+
+
+def test_corner_not_detected_falls_back_to_map():
+    """IMU가 안 변하면(이상) 도면상 시작선 +350 mm 에서 예전 규칙으로."""
+    link = obstacle_link()
+    s = -1623.0
+    acts_all = []
+    while s < 1000.0:
+        link.on_yaw(math.pi / 2)
+        link.on_front(700.0)
+        acts_all += [(s, a) for a in link.update(s / 1000.0, mission(13589.0 + s, dist=s + 1623.0), {})]
+        s += 20.0
+    en = [x for x, a in acts_all if a[0] == 'enable']
+    assert en and en[0] >= 350.0

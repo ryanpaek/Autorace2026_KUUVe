@@ -362,3 +362,37 @@ def test_command_path_parking_command_arms_at_once():
     fsm = MissionFSM({'start_state': 'M4_PARKING', 'route_points': {'m4_pre_line': 5000.0}})
     cmd = fsm.step(Inputs(t=0.0, dist_mm=0.0, route_s=3000.0, confirmed_classes={'parking': 1.0}))
     assert cmd.source == 'parking' and fsm.parking_sign
+
+
+# --- 11/11: 라바콘 코너 지킴 (M2 끝 -> 좌하단 코너 90° -> 시작선) --------------------------------
+def _m8_from_m2(turn_deg):
+    import math
+    fsm = MissionFSM({'start_state': 'M2_FORK', 'cones_source_ready': True, 'm8_corner_turn_deg': turn_deg})
+    sim = Sim(fsm)
+    fsm._goto('M8_CONES', Inputs(t=0.0, dist_mm=0.0, yaw=math.pi), 'fork B done')   # 서쪽으로 가다 코너
+    entered = None
+    for _ in range(600):
+        d = sim.dist
+        # 609 mm 직선 -> R640 90° 우회전(1005 mm) -> 북쪽 직선
+        turn = min(max(d - 609.0, 0.0) / 1005.0, 1.0) * (math.pi / 2)
+        sim.tick(yaw=math.pi - turn, obstacle={'cone_ahead_mm': 400.0})   # 코너에서도 앞에 콘이 보임
+        if fsm.sub == 'cones':
+            entered = d
+            break
+    return fsm, entered
+
+
+def test_cones_not_entered_inside_corner():
+    """예전: 코너 안(콘이 앞에 보임 + 진입 후 거리)에서 라바콘 모드 -> 콘 쪽으로 곧장(지름길)."""
+    _, old = _m8_from_m2(0.0)
+    assert old is not None and old < 609.0 + 1005.0                 # 코너 안에서 들어감 (재현)
+    fsm, new = _m8_from_m2(75.0)
+    assert new is not None and new >= 609.0 + 1005.0 * (75.0 / 90.0)   # 코너를 거의 다 돈 뒤
+    assert any('M8 corner done' in m for m in fsm.log)
+
+
+def test_cones_corner_guard_off_for_practice_start():
+    """연습으로 바로 M8 (set_state) 이면 코너 지킴 안 함."""
+    fsm = MissionFSM({'start_state': 'M2_FORK', 'cones_source_ready': True})
+    fsm._goto('M8_CONES', Inputs(t=0.0, dist_mm=0.0, yaw=0.0), 'manual')
+    assert not fsm.m8_corner.active

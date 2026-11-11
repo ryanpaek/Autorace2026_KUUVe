@@ -70,6 +70,17 @@ class M7LinkParams:
     trigger_half_width_mm: float = 200.0  # 앞 차로로 보는 좌우 폭(차 중심 ±). 옆 차로 LIMO(중심 ±520, 가장자리 ±410)는 안 들어옴
     trigger_gate_mm: float = -250.0     # obstacle: 시작선 기준 이 위치부터 감시 결과로 켬 (코너 끝 = 시작선 -288 mm)
     trigger_gate_early_mm: float = 300.0  # 카메라로 직선이 확인되면 문턱보다 이만큼 일찍부터 (도면 위치 늦음 대비, 0 = 안 씀)
+    # 11/11 코너 지킴: 통주행에서는 M7에 들어온 뒤 우하단 코너(90°)를 돈다. 도면 위치가 앞서면 코너 안에서 회피를 켜
+    #   회피 노드가 그 방향으로 직진 -> 바깥(노란 실선·벽)으로 나가고 정차 LIMO 위치도 틀어짐.
+    #   진입 위치가 corner_need_before_mm 보다 앞이면, IMU로 코너를 다 돈 뒤에만 켠다 (도면 문턱 대신)
+    #   코너 끝에서는 차가 아직 덜 펴져 있다(시뮬레이션: 시작선 -0.23 m에서 14°). 다 펴질 때까지 기다리면 늦으므로
+    #   80° 돌면 켜고, 대신 '코너 진입 방향 ± 90°'를 직선 방향으로 보고 지금 틀어진 각을 회피 노드에 넘긴다 (start_heading_deg)
+    corner_turn_deg: float = 80.0       # 0 = 안 씀
+    corner_straight_deg: float = 180.0  # (M7은 다 펴질 때까지 안 기다림)
+    corner_window_mm: float = 150.0
+    corner_angle_deg: float = 90.0      # 코너 각 (도면 우하단 코너)
+    corner_need_before_mm: float = -700.0   # M7 진입 위치(시작선 기준)가 이보다 앞이면 코너 지킴 (연습 set_state = -300 -> 안 씀)
+    corner_fail_mm: float = 350.0       # 도면상 시작선 + 이만큼인데도 코너를 못 알아채면(IMU 이상) 예전 규칙으로
     trigger_fallback_mm: float = 1000.0  # obstacle: 앞 차로에 장애물이 끝까지 없으면 시작선 + 이만큼에서 켬
     # 끄기 방식 (모듈 설명 7)
     off_mode: str = 'none'              # 'none' | 'sign'
@@ -116,6 +127,47 @@ def lane_to_fork(lane) -> Optional[str]:
     return 'A' if k > 0 else 'B' if k < 0 else None
 
 
+def _wrap(a: float) -> float:
+    return math.atan2(math.sin(a), math.cos(a))
+
+
+class CornerWatch:
+    """코너를 다 돌았나 (IMU 방향만, 도면 위치 안 씀).
+
+    시작 방향에서 turn_deg 넘게 돌았고, 최근 window_mm 동안 방향 변화가 straight_deg 안이면 '다 돎' (한 번 되면 유지).
+    R640 코너는 150 mm 동안 약 13° 돈다 -> 코너 안에서는 '다 돎'이 안 된다."""
+
+    def __init__(self, turn_deg: float = 75.0, straight_deg: float = 4.0, window_mm: float = 150.0):
+        self.turn, self.straight, self.window = math.radians(turn_deg), math.radians(straight_deg), window_mm
+        self.yaw0 = None
+        self.hist = deque()
+        self.turned = 0.0
+        self.done = False
+
+    def start(self, yaw: Optional[float], dist: float) -> None:
+        self.yaw0 = yaw
+        self.hist.clear()
+        self.turned, self.done = 0.0, False
+        if yaw is not None:
+            self.hist.append((dist, yaw))
+
+    @property
+    def active(self) -> bool:
+        return self.yaw0 is not None
+
+    def update(self, yaw: Optional[float], dist: float) -> bool:
+        if not self.active or yaw is None:
+            return self.done
+        self.hist.append((dist, yaw))
+        while len(self.hist) > 2 and dist - self.hist[1][0] >= self.window:
+            self.hist.popleft()
+        self.turned = abs(_wrap(yaw - self.yaw0))
+        recent = abs(_wrap(yaw - self.hist[0][1])) if dist - self.hist[0][0] >= self.window else None
+        if not self.done and self.turned >= self.turn and recent is not None and recent <= self.straight:
+            self.done = True
+        return self.done
+
+
 class M7Link:
     def __init__(self, params: Optional[M7LinkParams] = None):
         self.p = params or M7LinkParams()
@@ -155,7 +207,14 @@ class M7Link:
         self.cam_lane = None         # 차선 노드 lane_id 를 7번 중 5번 같으면 확정 (+1/0/-1)
         self.last_lane = None        # (차로, 출처) 마지막으로 안 값 — 잠깐 못 봐도 유지
         self.trigger = None          # 켠 이유: 'line' | 'obstacle' | 'fallback'
+        self.yaw = None              # 최근 IMU 방향 (obstacle_node가 on_yaw로 넣음)
+        self.corner = CornerWatch(self.p.corner_turn_deg, self.p.corner_straight_deg, self.p.corner_window_mm)
+        self.corner_need = None      # None: 아직 모름(진입 직후), True: 코너 지킴, False: 안 씀
+        self.start_heading_deg = None  # 켤 때 차가 3차선 직선에서 틀어진 각 (obstacle_node가 회피 노드에 넘김)
         self.events: List[str] = []
+
+    def on_yaw(self, yaw: Optional[float]) -> None:
+        self.yaw = yaw
 
     # --- 회피 노드 쪽 입력 ----------------------------------------------------
     def on_avoid_active(self, active: bool, t: Optional[float] = None) -> None:
@@ -285,6 +344,8 @@ class M7Link:
                 self.last_lane = (0, 'start')   # 3차선 구간은 가운데로 들어감 -> 카메라가 확정하기 전에도 2차선 (지난 판 값은 버림)
             self.phase = 'idle'
             self.entry_dist = dist
+            self.corner.start(self.yaw if self.p.corner_turn_deg > 0 else None, dist)
+            self.corner_need = None
             self.line = None
             self.enable_t = self.section_m = self.how = None
             self.heading_forced = False
@@ -315,6 +376,12 @@ class M7Link:
         self._watch_line(lane, s, dist)
         pos = self._front_from_start(s, dist)   # 앞바퀴 - 시작선 (mm, +면 지남)
         self.pos = pos
+        if self.corner_need is None:
+            self.corner_need = bool(self.corner.active and (pos is None or pos < self.p.corner_need_before_mm))
+            if self.corner_need:
+                self.events.append(f'코너 지킴: M7 진입 위치 {pos if pos is None else round(pos)} mm -> IMU로 코너를 다 돈 뒤에 켬')
+        if self.corner_need and not self.corner.done and self.corner.update(self.yaw, dist):
+            self.events.append(f'코너 다 돎 (IMU {math.degrees(self.corner.turned):.0f}°, 시작선 {pos if pos is None else round(pos)} mm)')
 
         if self.phase == 'running' and self.p.off_mode == 'sign':
             why = self._sign_off(pos, dist)
@@ -331,7 +398,14 @@ class M7Link:
         if self.phase == 'idle' and self.p.enable_mode == 'obstacle':
             if pos is None:
                 return out
-            if pos < self.p.trigger_gate_mm:
+            if self.corner_need and not self.corner.done:
+                if pos < self.p.corner_fail_mm:
+                    return out                  # 아직 코너 안 (도면 위치와 상관없이)
+                self.corner_need = False        # IMU로 코너를 못 알아챔 -> 예전 규칙
+                self.events.append(f'코너를 IMU로 못 알아챔 (돈 각 {math.degrees(self.corner.turned):.0f}°) -> 도면 문턱으로')
+            if self.corner_need:
+                pass                            # 코너를 다 돎 = 직선: 도면 문턱 대신 이것으로 받음
+            elif pos < self.p.trigger_gate_mm:
                 # 도면 위치가 늦게 잡혀(11/11 시뮬레이션: -0.3 m면 43 cm 늦게 켬) 이미 직선인데 기다리는 것 방지:
                 #   카메라 양쪽 선이 곧게 보이면(코너를 벗어남) 문턱 - trigger_gate_early_mm 부터 받는다
                 straight = (lane.get('status') == 'BOTH' and lane.get('heading_rad') is not None
@@ -365,8 +439,17 @@ class M7Link:
         return out
 
     # --- 내부 -------------------------------------------------------------------
+    def _straight_heading_deg(self) -> Optional[float]:
+        """코너를 IMU로 돈 경우: 지금 차 방향 - 3차선 직선 방향(진입 방향 ± 코너 각). 모르면 None."""
+        if not (self.corner_need and self.corner.active and self.yaw is not None):
+            return None
+        turn = _wrap(self.yaw - self.corner.yaw0)
+        axis = self.corner.yaw0 + math.copysign(math.radians(self.p.corner_angle_deg), turn)
+        return math.degrees(_wrap(self.yaw - axis))
+
     def _arm(self, t: float, pos: float, why: str) -> List[Tuple]:
         out: List[Tuple] = []
+        self.start_heading_deg = self._straight_heading_deg()
         if self.fork_sent is None and self.p.fork_fallback in ('A', 'B'):
             out.append(('fork', self.p.fork_fallback))
             self.fork_sent = self.p.fork_fallback
@@ -374,7 +457,9 @@ class M7Link:
         self.phase = 'armed'
         self.enable_t = t
         out.append(('enable', self.section_m))
-        self.events.append(f'회피 켬 ({why}): {self.trigger}, 위치 기준 {self.how}, 시작선 {pos:+.0f} mm, section {self.section_m:.2f} m')
+        hd = '' if self.start_heading_deg is None else f', 직선 대비 {self.start_heading_deg:+.0f}°'
+        self.events.append(f'회피 켬 ({why}): {self.trigger}, 위치 기준 {self.how}, 시작선 {pos:+.0f} mm, '
+                           f'section {self.section_m:.2f} m{hd}')
         return out
 
     def _sign_off(self, pos: Optional[float], dist: float = 0.0) -> Optional[str]:
@@ -490,6 +575,8 @@ class M7Link:
                             else (f'lost{self.sign_lost}' if self.sign_seen else None)),
                 'm7_off_by': self.off_by,
                 'm7_trigger': self.trigger,
+                'm7_corner': (None if not self.corner_need and not self.corner.done
+                              else ('done' if self.corner.done else f'wait{math.degrees(self.corner.turned):.0f}')),
                 'm7_lane': (self.lane_now() or {}).get('lane'),
                 'm7_lane_src': (self.lane_now() or {}).get('src'),
                 'm7_line_d_mm': None if self.line is None else round(self.line[0]),

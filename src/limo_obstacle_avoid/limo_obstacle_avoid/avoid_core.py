@@ -48,6 +48,8 @@ class AvoidParams:
     lane_width: float = 0.52          # 이웃 차로 중심 간격 (도면: 선 사이 500 + 점선 20 mm)
     num_side_lanes: int = 1           # 가운데 기준 양옆 차선 수 → 3차선
     start_lane: int = 0               # enable 순간 로봇이 있는 차선
+    start_heading_deg: float = 0.0    # enable 순간 차가 3차선 직선 방향에서 틀어진 각 (왼쪽 +). 팀 스택: obstacle_node가
+                                      #   IMU로 '코너 진입 방향 - 90°'를 직선으로 보고 켤 때마다 넣음 (코너 끝에서 아직 덜 펴져도 기준이 맞음)
     section_length: float = 4.3       # enable 지점 ~ 3차선 끝(가운데 섬 시작)까지 거리 [실측!]
     island_length: float = 1.0        # 가운데 섬(육각형) 길이 → 가상 장애물로 넣음
     use_island: bool = True           # 섬을 가상 장애물로 넣을지
@@ -154,10 +156,10 @@ class LocalPose:
         self.x = self.y = self.psi = 0.0
         self.dist = 0.0
 
-    def reset(self, ox, oy, yaw, y0=0.0):
+    def reset(self, ox, oy, yaw, y0=0.0, psi0=0.0):
         self._ox, self._oy = ox, oy      # 직전 odom 위치
-        self.yaw0 = yaw                  # 기준 방향 (enable 순간)
-        self.x, self.y, self.psi = 0.0, y0, 0.0
+        self.yaw0 = yaw - psi0           # 기준 방향 = 3차선 직선 방향 (psi0: 켤 때 차가 직선에서 틀어진 각)
+        self.x, self.y, self.psi = 0.0, y0, psi0
         self.dist = 0.0
         self.ready = True
 
@@ -275,7 +277,10 @@ class AvoidPlanner:
     def start(self, ox, oy, yaw, t=0.0):
         self.reset()
         self.t_start = t
-        self.pose.reset(ox, oy, yaw, y0=self.p.start_lane * self.p.lane_width)
+        psi0 = math.radians(self.p.start_heading_deg)
+        if abs(psi0) > math.radians(35.0):
+            psi0 = 0.0                                   # 말이 안 되는 값은 버림
+        self.pose.reset(ox, oy, yaw, y0=self.p.start_lane * self.p.lane_width, psi0=psi0)
         self.state = 'RUN'
         self.last_switch = t - self.p.hold_time
 

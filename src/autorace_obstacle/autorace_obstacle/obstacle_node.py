@@ -242,8 +242,11 @@ class ObstacleNode(Node):
             self.enable_pub.publish(Bool(data=True))
             return
         req = SetParameters.Request()
+        hd = self.link.start_heading_deg      # 코너 끝에서 아직 덜 펴진 각 (모르면 0 = 지금 방향을 직선으로)
         req.parameters = [ParamMsg(name='section_length', value=ParameterValue(
-            type=ParameterType.PARAMETER_DOUBLE, double_value=float(section_m)))]
+            type=ParameterType.PARAMETER_DOUBLE, double_value=float(section_m))),
+            ParamMsg(name='start_heading_deg', value=ParameterValue(
+                type=ParameterType.PARAMETER_DOUBLE, double_value=float(hd or 0.0)))]
         self.param_cli.call_async(req).add_done_callback(
             lambda _f: self.enable_pub.publish(Bool(data=True)))
 
@@ -357,6 +360,7 @@ class ObstacleNode(Node):
     def _tick(self):
         now = time.monotonic()
         # --- M7 연결 (켜기/끄기/갈림길 방향). 회피 주행 명령은 avoid_node가 직접 낸다
+        self.link.on_yaw(self.integ.yaw_imu)          # 코너를 다 돌았나 (IMU)
         for act in self.link.update(now, self.mission, self.lane):
             if act[0] == 'enable':
                 self._enable(act[1])
