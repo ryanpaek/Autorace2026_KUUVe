@@ -189,3 +189,17 @@ FSM 조건을 바꾸면 explain.py도 같이 고쳐야 설명이 맞다.
 (차로를 벗어나거나 옆 차로에 있을 때 차가 가운데로 끌려가던 문제).
 
 **주차 완료 소리**: 화면의 `🔔 소리` 버튼을 한 번 누르면(브라우저는 클릭 전엔 소리를 못 냄) M4 주차 → FINISHED 때 노트북에서 '띠링' 두 음이 난다 (직접 합성한 소리).
+
+## 11. 주차 완료 '띠링' (차 스피커, 11/11)
+`chime_node`가 M4 주차 → FINISHED 순간 LIMO 차체 스피커로 두 음 '띠링'을 낸다 (직접 합성한 소리, launch에 기본 포함, 끄기 `chime:=false`).
+```bash
+ros2 topic pub --once /chime/play std_msgs/msg/Empty        # 시험: 바로 울림
+```
+소리가 안 나면 리모에서:
+```bash
+aplay -l                                    # 스피커 카드 번호 확인
+speaker-test -t sine -f 1000 -l 1           # 기본 장치로 소리 나는지
+alsamixer                                   # 음소거(MM)·볼륨 확인
+ros2 param set /chime_node device plughw:1,0    # 기본 장치가 아니면 지정 (aplay로 재생)
+```
+`volume`(0~1, 기본 0.6)은 시작할 때만 읽는다. 디버그 화면의 🔔 버튼(노트북 소리)과는 따로 동작한다.
