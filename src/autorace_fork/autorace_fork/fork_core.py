@@ -27,7 +27,7 @@ def lane_name(lane) -> str:
 
 def parse_detections(data, cls_a='fork_a', cls_b='fork_b', conf=0.5, min_box_h=0.0) -> Set[str]:
     """detector_node 의 /perception/detections JSON → 이번 프레임에 본 방향 집합 {'A','B'}
-    형식: {"detections":[{"cls":"fork_a","conf":0.8,"bbox":[x1,y1,x2,y2]}, ...]}
+    형식: {"detections":[{"cls":"fork_a","conf":0.8,"bbox":[x,y,w,h]}, ...]}  (detector_node·yolo_onnx와 같은 [x, y, 폭, 높이] px)
     min_box_h: 표지 상자 높이(픽셀)가 이보다 작으면 무시 (멀리 있는 표지 오검출 방지, 0이면 안 씀)"""
     if isinstance(data, str):
         try:
@@ -44,7 +44,7 @@ def parse_detections(data, cls_a='fork_a', cls_b='fork_b', conf=0.5, min_box_h=0
             continue
         if min_box_h > 0:
             b = d.get('bbox') or []
-            if len(b) == 4 and (b[3] - b[1]) < min_box_h:
+            if len(b) == 4 and b[3] < min_box_h:       # 11/11: 예전 [x1,y1,x2,y2]로 보고 b[3]-b[1] -> 높이가 작게 나옴
                 continue
         if c == cls_a:
             seen.add('A')

@@ -43,3 +43,11 @@ def test_plan_lane_shift_counts():
     assert '거리 부족' in plan('A', {'now_lane': -1, 'target': -1, 'exit_plan': 'too_late'})['text']
     # 회피 노드 상태 없음 / 결정 전
     assert plan('A', {})['need_lanes'] is None and plan(None, {'now_lane': 0})['text'] == '표지 판단 전'
+
+
+def test_min_box_h_uses_xywh_like_detector():
+    """detector_node bbox = [x, y, w, h]. 화면 아래쪽(y 큼)에 있어도 높이 h로 거른다."""
+    from autorace_fork.fork_core import parse_detections
+    det = json.dumps({'detections': [{'cls': 'fork_a', 'conf': 0.9, 'bbox': [100, 300, 40, 50]}]})
+    assert parse_detections(det, min_box_h=40.0) == {'A'}
+    assert parse_detections(det, min_box_h=60.0) == set()
