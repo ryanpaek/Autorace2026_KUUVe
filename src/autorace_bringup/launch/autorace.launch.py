@@ -76,6 +76,8 @@ def generate_launch_description():
         # 주차 켜기 (parking_node enabled). 통주행은 full.launch.py가 true로 준다
         DeclareLaunchArgument('parking', default_value='false'),
         DeclareLaunchArgument('fork_params', default_value=_fork_params()),
+        # 위치 확인용 수동 주행: mission_node가 /cmd_vel을 내지 않는다 (teleop으로 조종, 11/11)
+        DeclareLaunchArgument('manual', default_value='false'),
         Node(package='autorace_mission', executable='ackermann_bridge', name='ackermann_bridge',
              output='screen', condition=IfCondition(use_bridge)),
         Node(package='autorace_lane', executable='lane_node', name='lane_node',
@@ -83,6 +85,8 @@ def generate_launch_description():
         Node(package='autorace_mission', executable='mission_node', name='mission_node',
              parameters=[params, {'start_state': start_state, 'route_file': route,
                                   'm7_external_avoid': ParameterValue(m7_avoid, value_type=bool),
+                                  'manual_drive': ParameterValue(
+                                      LaunchConfiguration('manual'), value_type=bool),
                                   'use_class_commands': ParameterValue(
                                       LaunchConfiguration('use_class_commands'), value_type=bool)}],
              output='screen'),
