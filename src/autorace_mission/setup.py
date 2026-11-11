@@ -23,6 +23,7 @@ setup(
             'parking_node = autorace_mission.parking_node:main',
             'ackermann_bridge = autorace_mission.ackermann_bridge:main',
             'debug_view = autorace_mission.debug_view:main',
+            'chime_node = autorace_mission.chime_node:main',
         ],
     },
 )
