@@ -10,7 +10,9 @@ mkdir -p ~/bags
 topics=(/scan /odom /wheel/odom /imu /limo_status /cmd_vel /limo/ack_cmd /lane/cmd_vel /lane/status /lane/config
         /lane/debug/compressed /mission/state /route/preview /perception/detections /obstacle/state
         # M7 3차선 회피 (limo_obstacle_avoid) + M8 라바콘 디버그 그림
-        /obstacle/cmd_vel /obstacle/debug/compressed /avoid/state /avoid/active /avoid/done /avoid/enable /fork_direction)
+        /obstacle/cmd_vel /obstacle/debug/compressed /avoid/state /avoid/active /avoid/done /avoid/enable /fork_direction
+        # M7 차로 (늘) / M7 끝 차로 -> M2
+        /m7/lane /m7/exit_lane)
 if [ "${RAW:-1}" = "1" ]; then
   topics+=(/camera/color/image_raw)
 else
