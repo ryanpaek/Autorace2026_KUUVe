@@ -70,6 +70,8 @@ class ClassCommandRouter:
         self._stop = None
         self.mode = ''
         self.min_heights = dict.fromkeys(V3_CLASSES, 0.0)
+        # 미션별 투표 기준 (11/10): 0이면 vote_need를 쓴다. 갈림길·신호등은 엄하게, 서행·주차는 느슨하게 둘 수 있다
+        self.mode_need = dict.fromkeys(MODE_CLASSES, 0)
         self._session = uuid.uuid4().hex
         self._request_counter = 0
         self._requests = {}
@@ -86,27 +88,37 @@ class ClassCommandRouter:
             self._stop = None
             self._requests.clear()
 
+    def need_for(self, mode):
+        """이 미션에서 최근 vote_window 프레임 중 몇 번 봐야 인정하나."""
+        n = self.mode_need.get(mode, 0)
+        return n if n > 0 else self.vote_need
+
     @property
     def last_stamp(self):
         return self._last_stamp
 
     def configure(self, conf_threshold, yellow_action, vote_window=None, vote_need=None,
-                  min_heights=None):
+                  min_heights=None, mode_need=None):
         window = self.vote_window if vote_window is None else vote_window
         need = self.vote_need if vote_need is None else vote_need
         heights = self.min_heights if min_heights is None else min_heights
+        per_mode = self.mode_need if mode_need is None else mode_need
         validate_options(conf_threshold, yellow_action, window, need)
+        if (set(per_mode) != set(MODE_CLASSES)
+                or any(type(v) is not int or not 0 <= v <= window for v in per_mode.values())):
+            raise ValueError('per-mission vote_need must be integers in [0, vote_window] (0 = vote_need)')
         if (set(heights) != set(V3_CLASSES)
                 or any(not _finite_number(v) or v < 0 for v in heights.values())):
             raise ValueError('minimum bbox heights must be finite nonnegative pixels')
         if (conf_threshold != self.conf_threshold or window != self.vote_window
-                or need != self.vote_need or heights != self.min_heights):
+                or need != self.vote_need or heights != self.min_heights or per_mode != self.mode_need):
             # 예전 임계값에서 모은 표를 새 임계값으로 인정하지 않는다. 적색 정지는 유지.
             self._history = deque(maxlen=window)
             self._evidence.clear()
         self.conf_threshold, self.yellow_action = conf_threshold, yellow_action
         self.vote_window, self.vote_need = window, need
         self.min_heights = dict(heights)
+        self.mode_need = dict(per_mode)
 
     def route(self, frame, *, slow_ground=False):
         """검출 → 요청. 중복/역행 첫 프레임은 버리고, 역행 시 투표를 새로 시작한다."""
@@ -150,8 +162,9 @@ class ClassCommandRouter:
         self._history.append(set(best))
         self._evidence.update(best)
         counts = {cls: sum(cls in sample for sample in self._history) for cls in V3_CLASSES}
+        need = self.need_for(self.mode)
         confirmed = {cls for cls in V3_CLASSES
-                     if len(self._history) == self.vote_window and counts[cls] >= self.vote_need}
+                     if len(self._history) == self.vote_window and counts[cls] >= need}
         stop_class = 'red' if 'red' in confirmed else (
             'yellow' if 'yellow' in confirmed and self.yellow_action == 'pause' else None)
         if stop_class is not None:
@@ -212,7 +225,7 @@ class ClassCommandRouter:
         return {'schema_version': 2, 'stamp': stamp, 'mode': self.mode,
                 'observed_classes': [cls for cls in V3_CLASSES if cls in best],
                 'confirmed_classes': [cls for cls in V3_CLASSES if cls in confirmed],
-                'vote': {'window': self.vote_window, 'need': self.vote_need,
+                'vote': {'window': self.vote_window, 'need': need,
                          'frames': len(self._history), 'counts': counts},
                 'traffic_stop_active': self.traffic_stop_active,
                 'commands': commands,
