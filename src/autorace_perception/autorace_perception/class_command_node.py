@@ -9,7 +9,7 @@ from rcl_interfaces.msg import ParameterDescriptor, SetParametersResult
 from rclpy.node import Node
 from std_msgs.msg import String
 
-from autorace_perception.class_commands import ClassCommandRouter, V3_CLASSES
+from autorace_perception.class_commands import MODE_CLASSES, ClassCommandRouter, V3_CLASSES
 
 
 class ClassCommandNode(Node):
@@ -27,13 +27,16 @@ class ClassCommandNode(Node):
             self.declare_parameter(name, value)
         for cls in V3_CLASSES:
             self.declare_parameter(f'min_bbox_height_px.{cls}', 0.0)
+        for mode in MODE_CLASSES:                      # 미션별 투표 기준. 0 = vote_need
+            self.declare_parameter(f'mode_vote_need.{mode}', 0)
         self.router = ClassCommandRouter()
         self.router.configure(
             self.get_parameter('conf_threshold').value,
             self.get_parameter('yellow_action').value,
             self.get_parameter('vote_window').value,
             self.get_parameter('vote_need').value,
-            {cls: self.get_parameter(f'min_bbox_height_px.{cls}').value for cls in V3_CLASSES})
+            {cls: self.get_parameter(f'min_bbox_height_px.{cls}').value for cls in V3_CLASSES},
+            {mode: self.get_parameter(f'mode_vote_need.{mode}').value for mode in MODE_CLASSES})
         self.context_timeout = self.get_parameter('context_timeout_sec').value
         if (isinstance(self.context_timeout, bool)
                 or not isinstance(self.context_timeout, (int, float))
@@ -90,13 +93,16 @@ class ClassCommandNode(Node):
                       yellow_action=self.router.yellow_action,
                       vote_window=self.router.vote_window, vote_need=self.router.vote_need)
         heights = dict(self.router.min_heights)
+        per_mode = dict(self.router.mode_need)
         for parameter in parameters:
             if parameter.name in values:
                 values[parameter.name] = parameter.value
             elif parameter.name.startswith('min_bbox_height_px.'):
                 heights[parameter.name.split('.', 1)[1]] = parameter.value
+            elif parameter.name.startswith('mode_vote_need.'):
+                per_mode[parameter.name.split('.', 1)[1]] = parameter.value
         try:
-            self.router.configure(**values, min_heights=heights)
+            self.router.configure(**values, min_heights=heights, mode_need=per_mode)
         except (ValueError, TypeError) as exc:
             return SetParametersResult(successful=False, reason=str(exc))
         return SetParametersResult(successful=True)
