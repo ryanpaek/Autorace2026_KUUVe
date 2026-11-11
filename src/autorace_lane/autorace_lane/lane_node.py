@@ -229,7 +229,8 @@ class LaneNode(Node):
         rp = self.route_preview
         fresh = (rp is not None and time.monotonic() - rp[0]
                  <= self.get_parameter('route_preview_timeout_sec').value)
-        self.follower.route_k = rp[1].get('k') if fresh else None
+        # 미션 노드가 '길 잃음'이라고 하면 도면 곡률을 조향에 섞지 않는다 (틀린 위치에서 꺾지 않게, 11/11)
+        self.follower.route_k = rp[1].get('k') if fresh and not rp[1].get('lost') else None
         self.follower.route_pts = (rp[1].get('pts') if fresh and rp[1].get('pose_ok') else None)
         if fresh:
             self.follower.route_step_mm = float(rp[1].get('step_mm', 100.0))

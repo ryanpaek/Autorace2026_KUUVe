@@ -10,6 +10,7 @@
   /mission/start (std_msgs/Empty)       출발
   /mission/estop (std_msgs/Bool)        true면 즉시 정지 (false로 해제)
   /mission/set_state (std_msgs/String)  연습용: 원하는 상태로 점프 (경로 위치 s도 그 미션 시작점으로)
+  /mission/skip (std_msgs/String)       주행 중 건너뛰기: 상태만 바꾸고 경로 위치 s는 그대로 (디버그 화면 버튼, 11/11)
   /route/set_s (std_msgs/Float32)       연습용: 경로 위치 s(mm)를 직접 지정
   /cmd_vel (Twist)                      후진 판단 보조용 (자기가 낸 명령 / 수동 조종 명령)
 
@@ -181,6 +182,7 @@ class MissionNode(Node):
         self.create_subscription(Empty, '/mission/start', self._on_start, 10)
         self.create_subscription(Bool, '/mission/estop', self._on_estop, 10)
         self.create_subscription(String, '/mission/set_state', self._on_set_state, 10)
+        self.create_subscription(String, '/mission/skip', self._on_skip, 10)
         self.create_subscription(Float32, '/route/set_s', self._on_set_s, 10)
         self.create_subscription(Twist, '/cmd_vel', self._on_cmd_vel, 10)
 
@@ -343,6 +345,16 @@ class MissionNode(Node):
                 name, off = STATE_START_POINT[self.fsm.state]
                 base = self.route.points.get(name, 0.0) if name else 0.0
                 self._route_reset(base + off, f'{self.fsm.state} start point', align=True)
+        except ValueError as e:
+            self.get_logger().error(str(e))
+
+    def _on_skip(self, msg):
+        """지금 자리에서 다른 미션으로 (경로 위치·갈림길 선택은 그대로)."""
+        target = msg.data.strip()
+        try:
+            self.fsm._goto(target, self._inputs(), 'skip')
+            self.practice_m2 = False
+            self.get_logger().info(f'state skipped to {self.fsm.state} (route s kept)')
         except ValueError as e:
             self.get_logger().error(str(e))
 
