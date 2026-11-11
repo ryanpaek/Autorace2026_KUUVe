@@ -122,5 +122,42 @@ scp가 안 되면: 리모에서 `hostname -I`로 IP 확인 → 노트북에서 `
 ```bash
 python3 tools/course_sim.py          # 출발~주차 상태 전환 6가지 상황
 python3 tools/parking_sim_plot.py out.png   # 주차만: 6가지 상황 궤적 그림
-python3 -m pytest -q src             # 전체 시험
+python3 -m pytest -q src             # 전체 시험 (위치 추정: test_route_motion.py)
 ```
+
+## 9. 위치 확인 수동 주행 (자율주행 끄고 도면 위 위치만 보기, 11/11)
+맵 기반 모드 전환을 계속 쓰려면 "도면 위 내 위치"가 맞아야 한다. 차를 직접 몰면서 디버그 화면으로 확인한다.
+`manual:=true`면 mission_node가 `/cmd_vel`을 **내지 않는다**. 위치 추정·FSM·차선·YOLO는 그대로 돌아서 미션이 어디서 바뀌는지도 같이 보인다.
+
+```bash
+ros2 launch autorace_bringup full.launch.py manual:=true
+# 차를 출발 체커에 차로 방향으로 반듯이 놓고 (방향을 이때 맞춤 = 도면 경로 방향)
+ros2 topic pub --once /mission/start std_msgs/msg/Empty        # s = 0. 차는 안 움직임
+# 다른 터미널: 키보드 조종 (없으면 sudo apt install ros-humble-teleop-twist-keyboard)
+ros2 run teleop_twist_keyboard teleop_twist_keyboard
+```
+- teleop 속도는 mission_node 상한(0.45)을 거치지 않는다. 기본 0.5 m/s라 시작하자마자 `z`를 여러 번(한 번에 10%) 눌러 **0.2 m/s 근처**로 낮춘다
+- 애커만이라 멈춘 채 `j`/`l`은 조향이 안 먹는다. `i` 전진, `,` 후진, 꺾을 때는 `u`/`o`(전진), `m`/`.`(후진), `k` 정지
+- 중간 구간부터: 그 미션 시작 위치에 차를 놓고 `/mission/set_state` (3번 표) 또는 `ros2 topic pub --once /route/set_s std_msgs/msg/Float32 "{data: 12000.0}"`
+
+**디버그 화면** (`http://<리모IP>:8080`)
+- 초록 선 = 전진 중 추정 궤적, 빨강 선 = 후진. 실제로 달린 길(차로 가운데)과 겹치는지 본다
+- 점 + 숫자 = 흰 선으로 위치를 고친 곳과 그때 오차(mm). 초록 < 100, 노랑 < 250, 빨강 그 이상
+- 오른쪽 '진행': 후진이면 무엇으로 알았는지 (`odom_v` 속도 부호 / `odom_xy` 위치 변화 / `cmd` 조종 명령)
+- '좌우 d / 방향 차': 경로 중심선 기준 좌우 위치와 차 방향 - 경로 방향
+- '길 잃음: 예'면 FSM이 도면 위치를 안 쓰는 상태
+- '궤적 지우기' 버튼으로 초기화
+
+**확인 순서 (각각 bag 녹화, 3번 녹화 명령에 `/route/preview` 추가)**
+1. 직선 3 m 전진: 줄자 거리와 s 증가가 같은지 → 다르면 `odom_scale` 조정
+2. 후진 50 cm: s가 약 500 줄고 '진행'이 후진으로 바뀌는지. 근거가 `cmd`로만 나오면 LIMO odom이 후진을 안 알려 주는 것
+3. 지그재그를 일부러 크게 흔들며 통과: 지그재그 끝 정지선 보정 오차가 작은지 (예전엔 최대 80 cm)
+4. 주차처럼 앞뒤로 꺾기: 같은 자리로 돌아오면 s도 돌아오는지
+5. 출발~주차 한 바퀴: 보정 점 오차가 커지는 구간 기록
+
+**이번에 바뀐 위치 추정** (`params.yaml`, 문제 있으면 false로 예전 방식)
+| 값 | 뜻 |
+|---|---|
+| `route_signed_dist` | 후진 거리는 s에서 뺀다. 후진 판단을 odom 속도 부호 하나에서 → 속도 부호 / odom 위치 변화 방향 / 최근 `/cmd_vel` 중 하나라도로 넓힘 |
+| `route_project_heading` | 차가 경로와 비스듬히 간 거리는 cos(방향 차)만 s에, sin 성분은 좌우 d에 (조향 반영). 방향 차가 70° 넘으면 예전처럼 거리 그대로 |
+| `route_align_on_reset` | 출발선·연습 시작점·`/route/set_s` 때 차가 경로 방향으로 놓였다고 보고 방향을 맞춤 (직선에서 두 선을 보기 전에도 투영 가능) |

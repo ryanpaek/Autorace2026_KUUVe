@@ -77,7 +77,9 @@ mission_node:
     route_gate_mm: 250.0                   # 흰 선을 도면 선으로 인정하는 오차 (달린 거리만큼 넓어짐)
     route_gain: 0.6
     odom_scale: 1.0                        # TODO 실측: 직선 3m 주행 -> 실제 거리 / /odom 거리
-    route_signed_dist: true                # 후진 거리는 경로 위치에서 뺌. TODO 실측: 후진 때 odom twist.linear.x < 0 인지
+    route_signed_dist: true                # 후진 거리는 경로 위치에서 뺌. 후진 판단: odom 속도 부호 / odom 위치 변화 방향 / 최근 /cmd_vel 중 하나라도 (11/11)
+    route_project_heading: true            # 차가 경로와 비스듬히 간 거리는 cos(방향 차)만 s에 (지그재그 과대 측정 줄임), 나머지는 좌우 d로 (11/11)
+    route_align_on_reset: true             # 출발선·연습 시작점·/route/set_s에서 차가 경로 방향으로 반듯이 놓였다고 보고 방향 맞춤
     route_lost_misses: 2                   # 도면 선을 연속 2개 못 보고 지나치면 길 잃음 -> FSM은 표지·카메라·거리로만 (0 = 끔)
     route_anchor_max_mm: 3000.0            # 카메라로 확인한 미션 선으로 위치 다시 맞출 때 최대 허용 차이
 

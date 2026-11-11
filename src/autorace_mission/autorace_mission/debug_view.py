@@ -6,6 +6,8 @@
   - 미션 상태/단계/이유(note), 예비 경로(FALLBACK) 기록, 속도 명령, 차선 상태, YOLO 확인 명령,
     주차·M7 회피·갈림길·라바콘 상태, 차선 노드 디버그 영상(/lane/debug/compressed)
 차 위치는 mission_node의 /route/preview (s, d_mm, psi). 차선을 오래 놓치면 pose_ok=false -> 경로 방향으로 그림.
+위치 확인 (11/11): 추정 위치 궤적(초록 전진·빨강 후진)과 흰 선 보정 지점(오차 mm)을 도면 위에 남긴다.
+  manual_drive:=true로 띄우고 teleop으로 몰면서 궤적이 실제 달린 길과 맞는지 본다. '궤적 지우기'로 초기화.
 제어에는 아무것도 보내지 않는다 (구독만).
 """
 import json
@@ -107,6 +109,9 @@ class DebugView(Node):
         self.jpeg = None
         self.events = []
         self._last_state = None
+        self.trail = []          # [x, y, dir] 추정 위치 궤적 (mm, 도면)
+        self.fixes = []          # 흰 선 보정 지점 {x, y, name, err}
+        self._last_fixes = None
         self.route = None
         path = self.get_parameter('route_file').value
         if path and os.path.exists(path):
@@ -139,6 +144,14 @@ class DebugView(Node):
                     self._send(json.dumps(node.track).encode(), 'application/json')
                 elif self.path.startswith('/state'):
                     self._send(json.dumps(node.snapshot()).encode(), 'application/json')
+                elif self.path.startswith('/trail'):
+                    with node.lock:
+                        body = json.dumps({'trail': node.trail, 'fixes': node.fixes})
+                    self._send(body.encode(), 'application/json')
+                elif self.path.startswith('/reset_trail'):
+                    with node.lock:
+                        node.trail, node.fixes = [], []
+                    self._send(b'{}', 'application/json')
                 elif self.path.startswith('/lane.jpg') and node.jpeg:
                     self._send(node.jpeg, 'image/jpeg')
                 else:
@@ -157,7 +170,25 @@ class DebugView(Node):
         with self.lock:
             self.data[key] = d
             self.stamp[key] = time.time()
+            if key == 'preview' and isinstance(d, dict):
+                pose = self._pose(d)
+                if pose is not None:
+                    last = self.trail[-1] if self.trail else None
+                    if last is None or math.hypot(pose['x'] - last[0], pose['y'] - last[1]) > 30.0:
+                        self.trail.append([round(pose['x']), round(pose['y']), int(d.get('dir', 1))])
+                        self.trail = self.trail[-4000:]
             if key == 'mission' and isinstance(d, dict):
+                rt = d.get('route') or {}
+                nf = rt.get('fixes')
+                if nf is not None and self._last_fixes is not None and nf > self._last_fixes:
+                    pose = self._pose(self.data.get('preview'))
+                    lf = rt.get('last_fix') or {}
+                    if pose is not None and (not self.fixes or self.fixes[-1]['name'] != lf.get('name')):
+                        self.fixes.append({'x': round(pose['x']), 'y': round(pose['y']),
+                                           'name': lf.get('name'), 'err': lf.get('err_mm')})
+                        self.fixes = self.fixes[-200:]
+                if nf is not None:
+                    self._last_fixes = nf
                 st = (d.get('state'), d.get('sub'))
                 if st != self._last_state:
                     s = (d.get('route') or {}).get('s_mm')
@@ -193,20 +224,23 @@ class DebugView(Node):
         with self.lock:
             self.jpeg = bytes(m.data)
 
+    def _pose(self, pv):
+        if self.route is None or not isinstance(pv, dict) or pv.get('s') is None:
+            return None
+        s = float(pv['s'])
+        x, y = self.route.xy(s)
+        h = self.route.heading(s)
+        d = float(pv.get('d_mm', 0.0)) if pv.get('pose_ok') else 0.0
+        psi = float(pv['psi']) if pv.get('pose_ok') and pv.get('psi') is not None else h
+        return {'x': x - d * math.sin(h), 'y': y + d * math.cos(h), 'psi': psi, 's': s,
+                'ok': bool(pv.get('pose_ok')), 'd': round(d), 'dpsi': pv.get('dpsi'),
+                'dir': pv.get('dir', 1), 'rev_src': pv.get('rev_src', '')}
+
     def snapshot(self):
         with self.lock:
             now = time.time()
             age = {k: round(now - v, 1) for k, v in self.stamp.items()}
-            pose = None
-            pv = self.data.get('preview')
-            if self.route is not None and isinstance(pv, dict) and pv.get('s') is not None:
-                s = float(pv['s'])
-                x, y = self.route.xy(s)
-                h = self.route.heading(s)
-                d = float(pv.get('d_mm', 0.0)) if pv.get('pose_ok') else 0.0
-                psi = float(pv['psi']) if pv.get('pose_ok') and pv.get('psi') is not None else h
-                pose = {'x': x - d * math.sin(h), 'y': y + d * math.cos(h), 'psi': psi, 's': s,
-                        'ok': bool(pv.get('pose_ok'))}
+            pose = self._pose(self.data.get('preview'))
             return {'data': self.data, 'age': age, 'scan': self.scan, 'cmd': self.cmd, 'pose': pose,
                     'events': self.events, 'has_img': self.jpeg is not None}
 
@@ -223,7 +257,7 @@ h3{margin:10px 0 4px;font-size:13px;color:var(--acc)}.big{font-size:20px;font-we
 #tools{position:absolute;top:8px;left:8px;display:flex;gap:6px}button{background:#2a2f36;color:var(--fg);border:1px solid #3c4043;border-radius:4px;padding:4px 8px;cursor:pointer}
 img{width:100%;border-radius:4px;margin-top:4px}.stale{color:var(--bad)}
 </style></head><body><div id="map"><canvas id="c"></canvas><div id="tools">
-<button id="follow">차 따라가기: 켬</button><button id="fit">전체 보기</button><span id="hint" style="color:var(--mute);align-self:center">휠: 확대 · 끌기: 이동</span></div></div>
+<button id="follow">차 따라가기: 켬</button><button id="fit">전체 보기</button><button id="clr">궤적 지우기</button><span id="hint" style="color:var(--mute);align-self:center">휠: 확대 · 끌기: 이동</span></div></div>
 <div id="side"><div class="big" id="st">연결 중…</div><div id="note" style="color:var(--mute)"></div>
 <h3>차</h3><div class="kv" id="car"></div>
 <h3>인식</h3><div class="kv" id="perc"></div>
@@ -231,13 +265,15 @@ img{width:100%;border-radius:4px;margin-top:4px}.stale{color:var(--bad)}
 <h3>차선 영상</h3><img id="lane" style="display:none"><div id="noimg" style="color:var(--mute)">(차선 디버그 영상 없음)</div>
 <h3>상태 기록</h3><div id="ev"></div></div>
 <script>
-const cv=document.getElementById('c'),cx=cv.getContext('2d');let T=null,S=null,view={x:5000,y:3000,k:0.08},follow=true,drag=null;
+const cv=document.getElementById('c'),cx=cv.getContext('2d');let T=null,S=null,TR={trail:[],fixes:[]},view={x:5000,y:3000,k:0.08},follow=true,drag=null;
 function rs(){cv.width=cv.clientWidth*devicePixelRatio;cv.height=cv.clientHeight*devicePixelRatio}addEventListener('resize',rs);rs();
 const W2S=(x,y)=>[cv.width/2+(x-view.x)*view.k*devicePixelRatio,cv.height/2-(y-view.y)*view.k*devicePixelRatio];
 function fit(){view={x:5000,y:3000,k:Math.min(cv.clientWidth/10800,cv.clientHeight/6800)}}
 cv.onwheel=e=>{e.preventDefault();view.k*=e.deltaY<0?1.15:1/1.15};
 cv.onmousedown=e=>{drag=[e.clientX,e.clientY];follow=false;upd()};onmouseup=()=>drag=null;
 onmousemove=e=>{if(!drag)return;view.x-=(e.clientX-drag[0])/view.k;view.y+=(e.clientY-drag[1])/view.k;drag=[e.clientX,e.clientY]};
+document.getElementById('clr').onclick=()=>fetch('/reset_trail').then(()=>TR={trail:[],fixes:[]});
+async function pollTrail(){try{TR=await (await fetch('/trail')).json()}catch(e){}setTimeout(pollTrail,1000)}
 document.getElementById('follow').onclick=()=>{follow=!follow;upd()};document.getElementById('fit').onclick=()=>{follow=false;fit();upd()};
 function upd(){document.getElementById('follow').textContent='차 따라가기: '+(follow?'켬':'끔')}
 function poly(p,close){cx.beginPath();p.forEach((q,i)=>{const[a,b]=W2S(q[0],q[1]);i?cx.lineTo(a,b):cx.moveTo(a,b)});if(close)cx.closePath()}
@@ -248,6 +284,10 @@ function draw(){cx.clearRect(0,0,cv.width,cv.height);const L=devicePixelRatio;
   T.cells.forEach(c=>{cx.strokeStyle='#80868b';cx.lineWidth=1*L;poly(c.poly,true);cx.stroke();const m=c.poly.reduce((a,p)=>[a[0]+p[0]/4,a[1]+p[1]/4],[0,0]);const[a,b]=W2S(m[0],m[1]);cx.fillStyle='#80868b';cx.fillText(c.n,a,b)});
   cx.font=(11*L)+'px sans-serif';T.lines.forEach(l=>{cx.strokeStyle='#ffffff';cx.lineWidth=3*L;poly([l.a,l.b]);cx.stroke();const[a,b]=W2S(l.a[0],l.a[1]);cx.fillStyle='#bdc1c6';cx.fillText(l.name,a+4,b-4)});
   T.points.forEach(p=>{const[a,b]=W2S(p.xy[0],p.xy[1]);cx.fillStyle='#8ab4f8';cx.beginPath();cx.arc(a,b,3*L,0,7);cx.fill();cx.fillText(p.name,a+4,b+12)})}
+ cx.lineWidth=2*L;for(let i=1;i<TR.trail.length;i++){const a=TR.trail[i-1],b=TR.trail[i];if(Math.hypot(b[0]-a[0],b[1]-a[1])>400)continue;
+  cx.strokeStyle=b[2]<0?'rgba(234,67,53,.9)':'rgba(52,168,83,.8)';poly([a,b]);cx.stroke()}
+ TR.fixes.forEach(f=>{const[a,b]=W2S(f.x,f.y);const e=Math.abs(f.err||0);cx.fillStyle=e<100?'#34a853':e<250?'#fbbc04':'#ea4335';
+  cx.beginPath();cx.arc(a,b,4*L,0,7);cx.fill();cx.fillStyle='#e8eaed';cx.fillText((f.err>0?'+':'')+f.err,a+6,b+4)});
  const P=S&&S.pose;if(P){if(follow){view.x=P.x;view.y=P.y;if(view.k<0.2)view.k=0.25}
   const c=Math.cos(P.psi),s=Math.sin(P.psi);const fx=P.x,fy=P.y;   // 앞바퀴
   if(S.scan){cx.fillStyle='#f28b82';S.scan.forEach(q=>{const[a,b]=W2S(fx+q[0]*c-q[1]*s,fy+q[0]*s+q[1]*c);cx.fillRect(a-1.5*L,b-1.5*L,3*L,3*L)})}
@@ -258,11 +298,14 @@ function draw(){cx.clearRect(0,0,cv.width,cv.height);const L=devicePixelRatio;
 const kv=(id,o)=>document.getElementById(id).innerHTML=Object.entries(o).map(([k,v])=>`<div>${k}</div><div>${v??'-'}</div>`).join('');
 const j=v=>v==null?'-':(typeof v=='object'?JSON.stringify(v):v);
 async function poll(){try{const r=await fetch('/state');S=await r.json();const d=S.data,m=d.mission||{},rt=m.route||{},ln=d.lane||{},a=S.age;
- document.getElementById('st').textContent=(m.state||'-')+(m.sub?' / '+m.sub:'')+(m.estop?'  [ESTOP]':'');
+ document.getElementById('st').textContent=(m.manual?'[수동] ':'')+(m.state||'-')+(m.sub?' / '+m.sub:'')+(m.estop?'  [ESTOP]':'');
  document.getElementById('note').textContent=(m.source?'제어: '+m.source+' · ':'')+(m.note||'');
  const old=k=>a[k]==null?'<span class=stale>없음</span>':(a[k]>1.5?`<span class=stale>${a[k]}초 전</span>`:'');
  kv('car',{'도면 위치 s':rt.s_mm!=null?rt.s_mm+' mm '+old('mission'):'-','다음 선':rt.next?`${rt.next} (${rt.next_in_mm} mm)`:'-','마지막 맞춤':j(rt.last_fix),
-  '자세':S.pose?(S.pose.ok?'차선 기준':'<span class=fb>경로 방향(추정)</span>'):'-','주행 거리':m.dist_mm,'명령 v / w':S.cmd?S.cmd.join(' / '):'-',
+  '자세':S.pose?(S.pose.ok?'차선 기준':'<span class=fb>경로 방향(추정)</span>'):'-',
+  '진행':S.pose?(S.pose.dir<0?`<span class=stale>후진</span> (${S.pose.rev_src})`:'전진')+(m.reverse_mm?` · 후진 누적 ${m.reverse_mm} mm`:''):'-',
+  '좌우 d / 방향 차':S.pose?`${S.pose.d} mm / ${S.pose.dpsi==null?'-':(S.pose.dpsi*57.3).toFixed(1)+'°'}`:'-',
+  '길 잃음':rt.lost?'<span class=stale>예 (FSM에 위치 안 줌)</span>':'아니오','주행 거리':m.dist_mm,'명령 v / w':S.cmd?S.cmd.join(' / '):'-',
   '차선':`${ln.status||'-'} ${old('lane')}`,'선 종류':(ln.line_left?(ln.line_left.color[0]+(ln.line_left.dashed?'점':'실')):'-')+' | '+(ln.line_right?(ln.line_right.color[0]+(ln.line_right.dashed?'점':'실')):'-')+(ln.lane_id!=null?` → 카메라 차로 ${({1:'1차선',0:'2차선','-1':'3차선'})[ln.lane_id]}`:''),'차선 오프셋':ln.offset_mm,'흰 선(mm)':j(ln.stoplines_mm),'라이다':S.scan?S.scan.length+'점 '+old('scan'):'<span class=stale>없음</span>'});
  const cm=d.commands||{};kv('perc',{'YOLO 확인':j(cm.confirmed_classes)+' '+old('commands'),'명령':(cm.commands||[]).map(c=>c.command+(c.route?'('+c.route+')':'')).join(', ')||'-',
   '이번 프레임':j(cm.observed_classes),'갈림길':m.fork_choice||'-','주차 표지':m.parking_sign?'봄':'-','주차 무장':m.parking_armed?'예':'-'});
@@ -270,7 +313,7 @@ async function poll(){try{const r=await fetch('/state');S=await r.json();const d
   'M7':j({active:ob.m7_active,done:ob.m7_done,trigger:ob.m7_trigger,exit:ob.m7_exit}),'라바콘':j({ahead:ob.cone_any_ahead_mm,done:ob.cones_done}),'회피 노드':(typeof d.avoid=='string'?d.avoid:'-')+' '+old('avoid'),'갈림길 노드':j(fk.decision||fk.direction||fk)});
  document.getElementById('ev').innerHTML=S.events.slice().reverse().map(e=>`<div class="ev ${/FALLBACK/.test(e.note)?'fb':''}">${e.t} <b>${e.state}</b> s=${e.s??'-'}<br>${e.note||''}</div>`).join('');
  if(S.has_img){const im=document.getElementById('lane');im.style.display='block';document.getElementById('noimg').style.display='none';im.src='/lane.jpg?'+Date.now()}}catch(e){document.getElementById('st').textContent='연결 끊김'}setTimeout(poll,150)}
-fetch('/track').then(r=>r.json()).then(t=>{T=t;fit()});upd();poll();draw();
+fetch('/track').then(r=>r.json()).then(t=>{T=t;fit()});upd();poll();pollTrail();draw();
 </script></body></html>"""
 
 

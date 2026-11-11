@@ -313,6 +313,26 @@ class RouteTracker:
         }
 
 
+def motion_sign(dx_m: float, dy_m: float, odom_yaw: Optional[float], twist_x: float,
+                cmd_v: Optional[float]) -> Tuple[int, str]:
+    """이번 오도메트리 걸음이 전진(+1)인지 후진(-1)인지와 그 근거 (11/11).
+
+    근거 셋 중 하나라도 후진이면 후진:
+      'odom_v'  : /odom twist.linear.x < 0
+      'odom_xy' : /odom 위치 변화가 /odom 방향과 반대 (드라이버가 속도 부호를 안 줘도 위치가 뒤로 가면 잡힘)
+      'cmd'     : 최근 /cmd_vel 속도 < 0 (드라이버가 후진에도 위치를 앞으로 쌓는 경우 대비)
+    11/10까지는 twist.linear.x만 봤는데 LIMO가 후진 때 음수를 주는지 실측 전이었다.
+    """
+    if twist_x < -0.005:
+        return -1, 'odom_v'
+    if odom_yaw is not None and math.hypot(dx_m, dy_m) > 1e-4:
+        if dx_m * math.cos(odom_yaw) + dy_m * math.sin(odom_yaw) < 0.0:
+            return -1, 'odom_xy'
+    if cmd_v is not None and cmd_v < -0.02:
+        return -1, 'cmd'
+    return 1, ''
+
+
 class MapPose:
     """도면 위 차 자세: 경로 위치 s(RouteTracker) + 좌우 위치 d + 방향 (11/06).
 
@@ -333,6 +353,44 @@ class MapPose:
         self.d = 0.0
         self._d_fix_dist: Optional[float] = None
         self._dist = None
+
+    def align(self, s: float, imu_yaw: Optional[float], dist_mm: float) -> bool:
+        """차를 경로 방향으로 차로 가운데에 놓았다고 보고 방향·좌우를 맞춘다 (11/11).
+
+        출발선·연습 시작점처럼 사람이 차를 반듯이 놓는 곳에서만 부른다.
+        직선에서 두 선을 다 보기 전에도 방향이 있어야 advance()가 경로 방향 투영을 할 수 있다.
+        """
+        if imu_yaw is None:
+            return False
+        self.yaw_off = _wrap(self.route.heading(s) - imu_yaw)
+        self.d = 0.0
+        self._d_fix_dist = dist_mm
+        return True
+
+    def heading_error(self, s: float, imu_yaw: Optional[float]) -> Optional[float]:
+        """차 방향 - 경로 방향 (rad, 왼쪽 +). 방향을 아직 모르면 None."""
+        if self.yaw_off is None or imu_yaw is None:
+            return None
+        return _wrap(imu_yaw + self.yaw_off - self.route.heading(s))
+
+    def advance(self, step_mm: float, s: float, imu_yaw: Optional[float],
+                max_turn_rad: float = 1.2) -> float:
+        """오도메트리 한 걸음(후진이면 음수)을 경로 방향 성분 ds와 좌우 성분으로 나눈다 (11/11).
+
+        - 차가 경로와 비스듬하면(지그재그·차로 변경·주차 꺾기) 바퀴가 굴러간 거리 전부가 경로 진행이 아니다:
+          ds = step * cos(방향 차) / (1 - 곡률 * d),  d += step * sin(방향 차)
+          (예전엔 step 전부를 s에 더해 지그재그에서 odom이 도면보다 최대 18% 길어졌다, 11/02)
+        - 후진이면 step < 0이라 s도 d도 뒤로 간다.
+        - 방향을 모르거나(정렬 전) 방향 차가 max_turn_rad보다 크면(IMU·정렬이 틀렸을 가능성) step 그대로.
+        반환: s에 더할 거리 (mm)
+        """
+        e = self.heading_error(s, imu_yaw)
+        if e is None or abs(e) > max_turn_rad:
+            return step_mm
+        k = self.route.curvature(s) / 1000.0                # 1/mm, 왼쪽 +
+        denom = max(0.5, 1.0 - k * self.d)                  # 곡선 안쪽(d가 중심 쪽)이면 같은 거리에 s가 더 감
+        self.d += step_mm * math.sin(e)
+        return step_mm * math.cos(e) / denom
 
     def predict(self, dist_mm: float, s: float, imu_yaw: Optional[float]) -> None:
         if self._dist is not None and self.yaw_off is not None and imu_yaw is not None:
