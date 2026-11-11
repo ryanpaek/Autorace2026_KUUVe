@@ -101,6 +101,7 @@ python3 -m unittest discover -s src/autorace_perception/test -p 'test_class_comm
 ```
 
 인식·발행만 실행하는 `perception_commands.launch.py`와 적색 유지·녹색 해제·황색 설정 사용법은 [명령 발행 문서](docs/yolo_commands.md)에 있다.
+YOLO v4 ONNX(`models/autorace_yolo_v4.onnx`)는 LIMO 비교 시험용 후보이며 기본 모델은 v3다. 선택 방법과 확인할 점은 [docs/yolo_v4.md](docs/yolo_v4.md)에 있다.
 명령 발행은 기본적으로 최근 10프레임 중 7프레임 검출을 확인한다. 리뷰 기록은 Git 저장소 밖 작업 폴더에 별도로 보관한다.
 
 ```bash
