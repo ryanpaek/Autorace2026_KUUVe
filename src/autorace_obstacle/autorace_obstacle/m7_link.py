@@ -69,6 +69,7 @@ class M7LinkParams:
     trigger_front_mm: float = 1000.0    # obstacle: 라이다 -> 앞 차로 장애물이 이 안이면 켬. 시뮬레이션: 0.7 m는 7조건 중 3만 성공(멈춤·이탈), 0.9 m 이상 멈춤 없음
     trigger_half_width_mm: float = 200.0  # 앞 차로로 보는 좌우 폭(차 중심 ±). 옆 차로 LIMO(중심 ±520, 가장자리 ±410)는 안 들어옴
     trigger_gate_mm: float = -250.0     # obstacle: 시작선 기준 이 위치부터 감시 결과로 켬 (코너 끝 = 시작선 -288 mm)
+    trigger_gate_early_mm: float = 300.0  # 카메라로 직선이 확인되면 문턱보다 이만큼 일찍부터 (도면 위치 늦음 대비, 0 = 안 씀)
     trigger_fallback_mm: float = 1000.0  # obstacle: 앞 차로에 장애물이 끝까지 없으면 시작선 + 이만큼에서 켬
     # 끄기 방식 (모듈 설명 7)
     off_mode: str = 'none'              # 'none' | 'sign'
@@ -78,6 +79,13 @@ class M7LinkParams:
     off_sign_need: int = 3              # 이만큼 보이면 '표지 확인'
     off_sign_lost_frames: int = 5       # 확인한 뒤 이만큼 연속 안 보이면 '지나감'
     off_sign_near_h_px: float = 0.0     # 표지 상자 높이가 이 이상이면 바로 '도착' (0 = 안 씀)
+    # 11/11: 프레임 수로 '지나감'을 세면 YOLO 속도·차 속도에 따라 끄는 위치가 30 cm 넘게 흔들림(m7_off_sim.py).
+    #   표지는 옆 차로에서 보면 화면 옆으로 나가며 사라진다 -> 마지막 상자가 가장자리였으면 다음 프레임에 바로 '지나감'.
+    #   그 지점부터 off_sign_after_mm 만큼 더 가서 끈다 (odom 1 m 안이라 오차 작음. 실차에서 원하는 곳에 맞춤)
+    off_sign_edge_px: float = 10.0      # 상자가 화면 좌우 끝 이만큼 안에 닿으면 '가장자리' (검출기가 화면 밖은 잘라냄. 0 = 안 씀)
+    off_sign_edge_frames: int = 2       # 가장자리에서 본 뒤 이만큼 연속 안 보이면 '화면 밖으로 나감' (한 번 놓친 것과 구분)
+    off_sign_img_w: float = 640.0       # 카메라 가로 화소
+    off_sign_after_mm: float = 400.0    # 지나감을 안 뒤 이만큼 더 가서 끔 (화각 70°·표지가 섬 앞 끝이면 섬 앞 끝 약 25 cm 전. 실차로 맞춤)
     off_gate_mm: float = 1500.0         # 섬 앞 끝까지 이 안일 때만 표지로 끔 (멀리서 가려져 사라지는 오판 방지)
 
 
@@ -137,6 +145,9 @@ class M7Link:
         self.sign_seen = False       # 표지를 확실히 봤나
         self.sign_lost = 0           # 확인한 뒤 연속으로 안 보인 프레임
         self.sign_near = False
+        self.sign_edge = False       # 마지막으로 본 표지 상자가 화면 가장자리였나
+        self.sign_exit = False       # 가장자리로 나가며 사라짐 (= 지나감)
+        self.sign_pass_dist = None   # '지나감'을 안 순간의 달린 거리 (mm)
         self.off_by = None           # 'sign' | 'avoid_done'
         self.report = None           # M7이 끝날 때 한 번 내보낼 차로 (exit_report), obstacle_node가 pop
         # 지금 몇 차선인지 (늘): 회피 중이면 회피 노드 차로(카메라 선 종류로 이미 맞춘 값), 아니면 차선 노드 lane_id 투표
@@ -191,8 +202,16 @@ class M7Link:
         if not self.sign_seen and sum(self.sign_buf) >= self.p.off_sign_need:
             self.sign_seen = True
             self.events.append('갈림길 표지 확인 (끄기 준비)')
+        if seen and self.p.off_sign_edge_px > 0:
+            e, w = self.p.off_sign_edge_px, self.p.off_sign_img_w
+            self.sign_edge = any(len(d.get('bbox') or []) == 4
+                                 and (d['bbox'][0] <= e or d['bbox'][0] + d['bbox'][2] >= w - e) for d in hits)
         if self.sign_seen:
             self.sign_lost = 0 if seen else self.sign_lost + 1
+            if (not seen and self.sign_edge and not self.sign_exit
+                    and self.sign_lost >= max(1, int(self.p.off_sign_edge_frames))):
+                self.sign_exit = True
+                self.events.append('갈림길 표지가 화면 옆으로 나감 (지나감)')
         if self.p.off_sign_near_h_px > 0 and any(
                 len(d.get('bbox') or []) == 4 and d['bbox'][3] >= self.p.off_sign_near_h_px for d in hits):
             self.sign_near = True
@@ -224,16 +243,18 @@ class M7Link:
         self.cam_lane = best
 
     def lane_now(self) -> Optional[dict]:
-        """{'lane': 1|2|3, 'avoid_lane': +1|0|-1, 'side', 'src': 'avoid'|'camera'|'last'} 또는 None."""
+        """{'lane': 1|2|3, 'avoid_lane': +1|0|-1, 'side', 'src': 'avoid'|'camera'|'last'|'start'} 또는 None.
+        'start': M7에 들어왔는데 아직 아무것도 모름 -> 3차선 구간은 가운데 차로로 들어가므로 2차선."""
         if self.phase in ('armed', 'running') and self.avoid_lane in LANE_NUMBER:
             k, src = self.avoid_lane, 'avoid'          # 회피 노드: odom+IMU + 카메라 선 종류·차선 보정
         elif self.cam_lane is not None:
             k, src = self.cam_lane, 'camera'           # 회피 전·후: 차선 노드 선 종류
         elif self.last_lane is not None:
-            k, src = self.last_lane[0], 'last'         # 잠깐 못 봄: 마지막 값
+            k = self.last_lane[0]                      # 잠깐 못 봄: 마지막 값
+            src = 'start' if self.last_lane[1] == 'start' else 'last'
         else:
             return None
-        if src != 'last':
+        if src not in ('last', 'start'):
             self.last_lane = (k, src)
         n = LANE_NUMBER[k]
         return {'lane': n, 'avoid_lane': k, 'side': {1: '왼쪽', 2: '가운데', 3: '오른쪽'}[n], 'src': src}
@@ -260,6 +281,8 @@ class M7Link:
 
         if not self.in_m7:                      # M7에 새로 들어옴
             self.in_m7 = True
+            if self.cam_lane is None:
+                self.last_lane = (0, 'start')   # 3차선 구간은 가운데로 들어감 -> 카메라가 확정하기 전에도 2차선 (지난 판 값은 버림)
             self.phase = 'idle'
             self.entry_dist = dist
             self.line = None
@@ -271,6 +294,8 @@ class M7Link:
             self.active_t = self.release_t = None
             self.sign_buf.clear()
             self.sign_seen = self.sign_near = False
+            self.sign_edge = self.sign_exit = False
+            self.sign_pass_dist = None
             self.sign_lost = 0
             self.off_by = None
             self.trigger = None
@@ -292,7 +317,7 @@ class M7Link:
         self.pos = pos
 
         if self.phase == 'running' and self.p.off_mode == 'sign':
-            why = self._sign_off(pos)
+            why = self._sign_off(pos, dist)
             if why:
                 self.phase = 'done'
                 self.off_by = 'sign'
@@ -304,8 +329,15 @@ class M7Link:
                 return out
 
         if self.phase == 'idle' and self.p.enable_mode == 'obstacle':
-            if pos is None or pos < self.p.trigger_gate_mm:
+            if pos is None:
                 return out
+            if pos < self.p.trigger_gate_mm:
+                # 도면 위치가 늦게 잡혀(11/11 시뮬레이션: -0.3 m면 43 cm 늦게 켬) 이미 직선인데 기다리는 것 방지:
+                #   카메라 양쪽 선이 곧게 보이면(코너를 벗어남) 문턱 - trigger_gate_early_mm 부터 받는다
+                straight = (lane.get('status') == 'BOTH' and lane.get('heading_rad') is not None
+                            and abs(math.degrees(float(lane['heading_rad']))) <= self.p.max_heading_deg)
+                if not (straight and pos >= self.p.trigger_gate_mm - self.p.trigger_gate_early_mm):
+                    return out
             near = self.front_mm is not None and self.front_mm <= self.p.trigger_front_mm
             if not near and pos < self.p.trigger_fallback_mm:
                 return out
@@ -345,9 +377,22 @@ class M7Link:
         self.events.append(f'회피 켬 ({why}): {self.trigger}, 위치 기준 {self.how}, 시작선 {pos:+.0f} mm, section {self.section_m:.2f} m')
         return out
 
-    def _sign_off(self, pos: Optional[float]) -> Optional[str]:
-        """표지로 끌 때인지. 안전 조건: 섬 앞 off_gate_mm 안 + 바깥 차로(A/B)."""
-        if not (self.sign_seen and (self.sign_near or self.sign_lost >= self.p.off_sign_lost_frames)):
+    def _sign_off(self, pos: Optional[float], dist: float = 0.0) -> Optional[str]:
+        """표지로 끌 때인지. 안전 조건: 섬 앞 off_gate_mm 안 + 바깥 차로(A/B).
+        지나감 = 가까움(상자 높이) | 화면 옆으로 나감 | 확인 뒤 off_sign_lost_frames 연속 안 보임. 그 뒤 off_sign_after_mm 더 감."""
+        if not self.sign_seen:
+            return None
+        if self.sign_near:
+            why = '표지 가까움'
+        elif self.sign_exit:
+            why = '표지 화면 밖으로 나감'
+        elif self.sign_lost >= self.p.off_sign_lost_frames:
+            why = '표지 지나감'
+        else:
+            return None
+        if self.sign_pass_dist is None:
+            self.sign_pass_dist = dist
+        if dist - self.sign_pass_dist < self.p.off_sign_after_mm:
             return None
         island = self.p.island_s_mm - self.p.start_s_mm
         if pos is None or pos < island - self.p.off_gate_mm:
@@ -355,7 +400,7 @@ class M7Link:
         lane = self.avoid_lane if self.avoid_lane is not None else self.avoid_target
         if lane in (None, 0):
             return None                      # 아직 가운데 차로: 섬에 부딪히므로 끄지 않음
-        return '표지 가까움' if self.sign_near else '표지 지나감'
+        return why
 
     def _check_hold(self, t: float) -> None:
         if self.hold or not self.claimed or self.phase != 'running':
@@ -441,7 +486,8 @@ class M7Link:
                 'm7_how': self.how,
                 'm7_pos_mm': None if self.pos is None else round(self.pos),
                 'm7_front_mm': None if self.front_mm is None else round(self.front_mm),
-                'm7_sign': 'near' if self.sign_near else (f'lost{self.sign_lost}' if self.sign_seen else None),
+                'm7_sign': ('near' if self.sign_near else 'exit' if self.sign_exit
+                            else (f'lost{self.sign_lost}' if self.sign_seen else None)),
                 'm7_off_by': self.off_by,
                 'm7_trigger': self.trigger,
                 'm7_lane': (self.lane_now() or {}).get('lane'),

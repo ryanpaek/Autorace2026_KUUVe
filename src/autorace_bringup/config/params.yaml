@@ -120,9 +120,12 @@ obstacle_node:
     m7_fork_fallback: auto                 # 켤 때까지 갈림길 표지를 못 읽으면: auto | A | B
     # M7 켜기 (11/09): 횡단보도를 벗어나면 라이다로 앞 차로 감시 -> 장애물이 가까워지면 켬. 예전 방식: line
     m7_enable_mode: obstacle               # obstacle | line(시작선 흰 선)
-    m7_trigger_front_mm: 1000.0            # 라이다 -> 앞 차로 장애물이 이 안이면 켬. 0.7 m는 너무 가까움(시뮬레이션: 멈춤·차선 이탈)
+    m7_trigger_front_mm: 1000.0            # 라이다 -> 앞 차로 장애물이 이 안이면 켬. 11/11 m7_trigger_sim: 700/850/1000 모두 40/40,
+                                           #   700은 거친 조건에서 후진 판이 조금 더 많음 (20 vs 15). 700으로 써도 됨
     m7_trigger_half_width_mm: 200.0        # 앞 차로 폭 (차 중심 ±). 옆 차로 LIMO는 안 들어옴
     m7_trigger_gate_mm: -250.0             # 시작선 기준 이 위치부터 (코너 안에서 켜지지 않게, 코너 끝 = -288)
+    m7_trigger_gate_early_mm: 300.0        # 카메라 양쪽 선이 곧으면(코너 벗어남) 문턱 -300부터. 도면 위치가 늦게 잡혀 늦게 켜지는 것 방지
+                                           #   (11/11 시뮬레이션: 도면 -0.3 m면 앞 617 mm에서 켬·충돌 3 -> 914 mm·충돌 0)
     m7_trigger_fallback_mm: 1000.0         # 앞 차로에 장애물이 끝까지 없으면 시작선 + 이만큼에서 켬
     # M7 끄기 (11/09): YOLO 갈림길 표지를 확인한 뒤 지나가면 끔. 예전 방식만: none
     m7_off_mode: sign                      # sign | none (none이어도 회피 노드 자체 종료·FSM 강제 종료는 그대로)
@@ -135,6 +138,10 @@ obstacle_node:
     m7_off_sign_lost_frames: 5             # 확인한 뒤 5프레임 연속 안 보이면 '지나감' -> 끔
     m7_off_sign_near_h_px: 0.0             # 표지 상자 높이가 이 이상이면 바로 끔 (0 = 안 씀, 실차로 정할 것)
     m7_off_gate_mm: 1500.0                 # 섬 앞 끝 1.5 m 안에서만 (멀리서 LIMO에 가려 사라지는 오판 방지)
+    m7_off_sign_edge_px: 10.0              # 표지 상자가 화면 좌우 끝 10 px 안에 닿은 뒤 사라지면 '화면 밖으로 나감' = 지나감 (0 = 안 씀)
+    m7_off_sign_edge_frames: 2             #   그 뒤 2프레임 연속 안 보이면 (한 번 놓친 것과 구분)
+    m7_off_sign_img_w: 640.0
+    m7_off_sign_after_mm: 400.0            # 지나감을 안 뒤 이만큼 더 가서 끔. 실차: 로그 '표지가 화면 옆으로 나감' 위치를 보고 맞춤
 
 detector_node:
   ros__parameters:
