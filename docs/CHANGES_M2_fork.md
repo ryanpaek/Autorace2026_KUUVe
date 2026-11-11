@@ -71,3 +71,15 @@ A = 1차선(+1, 왼쪽), B = 3차선(-1, 오른쪽).
 - `tools/m7_bag_report.py`: M7~M2 동안 `fork_choice`가 바뀌면(표지 vs 끝난 차로) 경고.
 
 확인: mission 247, obstacle 84, perception 49, fork 4, avoid 37 passed. course_sim 7/7 완주(`fork_lane_conflict`는 이제 끝난 차로 A).
+
+### 토픽 형식 점검 (11/11)
+| 토픽 | 보내는 쪽 형식 | 받는 쪽 | 일치 |
+|---|---|---|---|
+| `/perception/detections` | `{"stamp", "infer_ms", "detections":[{"cls","conf","bbox":[x,y,w,h]}]}` (onnx: `class_names` 순서, .pt: 학습 라벨 -> `canonical_class`) | class_command_node, obstacle_node(M7Link 끄기), mission_node(`use_class_commands:=false`), fork_node | fork_node만 bbox를 `[x1,y1,x2,y2]`로 읽음 -> **고침** (`min_box_h` 0이라 기본 동작은 영향 없었음) |
+| `/perception/commands` | `{"schema_version":2, "mode", "commands":[{"class","command":"SELECT_ROUTE","route":"A"/"B","request_id"}]}` | mission_node CommandInbox (`mode` = FSM 상태일 때만) | 일치 |
+| `/fork_direction` | String `A`/`B` (obstacle_node, fork_node) | avoid_node `parse_exit` | 일치 |
+| `/m7/exit_lane` | JSON `{"lane","fork","text",…}` latched | mission_node `fork` | 일치 |
+
+계약 시험 `autorace_mission/test/test_fork_topic_contract.py`: 검출 JSON 한 줄을 실제 직렬화 그대로 ① 투표(M7 10프레임 중 7) -> 명령 -> FSM `fork_choice`,
+② M7Link 표지 확인·화면 옆 나감, ③ fork_node 상자 높이로 읽는다. `class_names`는 `params.yaml`에서 읽는다.
+실차 확인 필요: 카메라 header stamp가 0이면 class_command_node가 같은 stamp를 중복으로 보고 버린다(로그 `duplicate frame ignored`).
