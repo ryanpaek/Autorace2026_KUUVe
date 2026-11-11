@@ -358,6 +358,7 @@ def det(seen, h=40):
 
 
 def running_link(**kw):
+    kw.setdefault('off_sign_after_mm', 0.0)                  # 아래 예전 시험은 '지나감 = 바로 끔'으로 봄
     link = M7Link(M7LinkParams(off_mode='sign', **kw))
     drive(link, 13500.0, 13700.0)                            # 시작선에서 켬 (line 방식)
     link.on_avoid_active(True, 0.0)
@@ -522,3 +523,58 @@ def test_lane_remembered_right_after_avoid_done():
     link.phase = 'done'
     ln = link.lane_now()
     assert ln['lane'] == 3 and ln['src'] == 'last'
+
+
+# --- 11/11: 표지가 화면 옆으로 나가면 지나감, 그 뒤 off_sign_after_mm 더 가서 끔 -------------------
+def det_at(x1, w=40, h=40):
+    return [{'cls': 'fork_b', 'conf': 0.9, 'bbox': [x1, 100, w, h]}]
+
+
+def test_sign_exit_at_image_edge_counts_as_passed_quickly():
+    link = running_link()
+    link.on_avoid_state({'state': 'RUN', 'target': -1, 'now_lane': -1})
+    for x1 in (300, 350, 420, 520, 600):                     # 오른쪽으로 흘러가다
+        link.on_detections(det_at(x1, w=min(40, 640 - x1)))
+    link.on_detections(det_at(630, w=10))                    # 화면 끝에 닿음
+    link.on_detections([])
+    assert not link.sign_exit                                # 한 번 놓친 것은 아직
+    link.on_detections([])
+    assert link.sign_exit and link.sign_lost == 2            # 5프레임 기다리지 않음
+    acts = link.update(5.0, mission(17973.0 - 600.0), {})
+    assert ('disable',) in acts and link.state()['m7_sign'] == 'exit'
+
+
+def test_sign_lost_mid_image_still_needs_frames():
+    """가운데서 사라짐(가림·놓침)은 예전처럼 5프레임."""
+    link = running_link()
+    link.on_avoid_state({'state': 'RUN', 'target': -1, 'now_lane': -1})
+    for _ in range(4):
+        link.on_detections(det_at(300))
+    for _ in range(3):
+        link.on_detections([])
+    assert not link.sign_exit
+    assert ('disable',) not in link.update(5.0, mission(17973.0 - 600.0), {})
+
+
+def test_sign_off_waits_after_mm_from_pass_point():
+    link = running_link(off_sign_after_mm=400.0)
+    link.on_avoid_state({'state': 'RUN', 'target': -1, 'now_lane': -1})
+    for x1 in (300, 500, 630):
+        link.on_detections(det_at(x1, w=min(40, 640 - x1)))
+    link.on_detections([])
+    link.on_detections([])
+    assert ('disable',) not in link.update(5.0, mission(17973.0 - 900.0, dist=5000.0), {})
+    assert ('disable',) not in link.update(5.5, mission(17973.0 - 600.0, dist=5300.0), {})   # 300 mm
+    assert ('disable',) in link.update(6.0, mission(17973.0 - 500.0, dist=5400.0), {})       # 400 mm
+
+
+def test_lane_is_2_from_m7_entry_before_camera_knows():
+    """M7에 들어오는 순간부터 /m7/lane이 나오게: 카메라 확정 전엔 2차선(start)."""
+    link = M7Link()
+    assert link.lane_now() is None
+    link.update(0.0, mission(12500.0), {})
+    ln = link.lane_now()
+    assert ln['lane'] == 2 and ln['src'] == 'start'
+    for _ in range(5):
+        link.update(0.1, mission(12600.0), {'lane_id': 1})
+    assert link.lane_now()['lane'] == 1 and link.lane_now()['src'] == 'camera'

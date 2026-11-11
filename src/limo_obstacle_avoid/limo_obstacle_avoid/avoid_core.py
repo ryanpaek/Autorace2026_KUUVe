@@ -80,6 +80,8 @@ class AvoidParams:
     change_len: float = 1.0           # 차선 1칸 옮기는 데 필요한 앞쪽 여유
     clear_back: float = 0.0           # 옮길 차선의 차 끝이 (뒤범퍼 - 이값)보다 뒤여야 들어감 (음수=더 일찍)
     better_margin: float = 0.3        # 옮길 차선이 지금보다 이만큼 더 비어야 옮김
+    rechoose_dy: float = 0.12         # 차로를 옮기기 시작했어도 원래 차로 중심에서 이만큼 안이면, 새로 확정된
+                                      #   장애물로 다른 차로가 더 비어 보일 때 목표를 바꿈 (켜자마자 고른 쪽이 다음 줄에서 막힘 방지)
     hold_time: float = 0.8            # 차선 바꾼 뒤 최소 유지 시간 [s]
     stop_dist: float = 0.30           # 지금 조향대로 이만큼 더 가면 차체가 부딪힐 때만 정지(→ 후진). 옆 차로·옆에 붙은 장애물은 안 봄
     path_margin: float = 0.02         # 위 판단에서 차체 둘레 여유 [m]
@@ -739,6 +741,19 @@ class AvoidPlanner:
             if nxt is not None:
                 self.events.append((x, f'차선 {cur:+d} → {nxt:+d}  (앞 {f_cur:.2f}m)'))
                 self.target = nxt
+                self.last_switch = t
+
+        # ①' 다시 고르기: 막 옮기기 시작했는데(원래 차로에서 rechoose_dy 안) 다른 차로가 더 비면 목표를 바꿈.
+        #     켜자마자 첫 장애물만 보고 고르면 뒤 줄이 아직 확정 전이라 왼쪽·오른쪽이 같아 보인다(11/11 시뮬레이션).
+        origin = self.nearest_lane(y)
+        if (p.rechoose_dy > 0 and self.target != origin and abs(y - self.center(origin)) < p.rechoose_dy
+                and self.rb is None and self.rec is None):
+            alt = self.choose(origin, obs)
+            if (alt is not None and alt != self.target
+                    and self.free_ahead(alt, obs) > self.free_ahead(self.target, obs) + p.better_margin):
+                self.events.append((x, f'다시 고름: 차선 {self.target:+d} → {alt:+d} '
+                                       f'(앞 {self.free_ahead(self.target, obs):.2f}m → {min(self.free_ahead(alt, obs), 9.9):.2f}m)'))
+                self.target = alt
                 self.last_switch = t
 
         # ②' 갈림길 방향을 알면 섬 앞 끝 전에 출구 차선으로 미리 옮김 (0/1/2차선)
