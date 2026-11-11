@@ -16,7 +16,8 @@
   - 위에서 본 라이다 그림 (차 기준): 차로 폭 안 가장 가까운 점, YOLO 방향, 진행 궤적
   - '지금 판단': 상태·제어 주체·바뀐 이유·다음 단계로 넘어가는 조건과 지금 값
   그림은 전부 노트북 브라우저가 그린다. 리모는 받은 JPEG를 그대로 넘기기만 해서 CPU를 거의 안 쓴다.
-제어에는 아무것도 보내지 않는다 (구독만).
+미션 조작 (11/11): 미션 고르기·건너뛰기·출발·비상 정지 버튼 (debug_control.py). 그 밖의 제어 명령(/cmd_vel 등)은 내지 않는다.
+  끄기: debug_control:=false (대회 때). 그래도 비상 정지는 받는다. 비밀번호: control_password
 """
 import json
 import math
@@ -30,8 +31,9 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CompressedImage, LaserScan
 from geometry_msgs.msg import Twist
-from std_msgs.msg import String
+from std_msgs.msg import Bool, Empty, String
 
+from autorace_mission.debug_control import CHOOSABLE, control_request
 from autorace_mission.explain import explain
 from autorace_mission.route import RouteMap
 
@@ -117,6 +119,13 @@ class DebugView(Node):
         self.declare_parameter('camera_topic', '/camera/color/image_raw/compressed')
         self.declare_parameter('camera_max_hz', 8.0)       # 브라우저로 넘길 최대 프레임 (와이파이 부담)
         self.declare_parameter('bev_config', '')            # 차선 노드 bev_limo.yaml (라이다 -> 영상 투영)
+        # 미션 조작 버튼 (11/11). false면 비상 정지만. 비밀번호를 주면 버튼 누를 때 물어봄 (같은 와이파이 다른 사람 막기)
+        self.declare_parameter('control_enabled', True)
+        self.declare_parameter('control_password', '')
+        self.ctl_pub = {'/mission/start': self.create_publisher(Empty, '/mission/start', 10),
+                        '/mission/set_state': self.create_publisher(String, '/mission/set_state', 10),
+                        '/mission/skip': self.create_publisher(String, '/mission/skip', 10),
+                        '/mission/estop': self.create_publisher(Bool, '/mission/estop', 10)}
         self.declare_parameter('front_axle_mm', 200.0)      # 뒷차축(차선 노드 기준점) -> 앞차축
         self.cam = None
         self._cam_t = 0.0
@@ -170,6 +179,22 @@ class DebugView(Node):
                 self.send_header('Cache-Control', 'no-store')
                 self.end_headers()
                 self.wfile.write(body)
+
+            def do_POST(self):
+                if self.path != '/control':
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                try:
+                    n = int(self.headers.get('Content-Length') or 0)
+                    body = json.loads(self.rfile.read(min(n, 4096)) or b'{}')
+                except ValueError:
+                    body = None
+                ok, text = node.control(body)
+                self.send_response(200 if ok else 403)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'ok': ok, 'msg': text}, ensure_ascii=False).encode())
 
             def do_GET(self):
                 if self.path in ('/', '/index.html'):
@@ -280,6 +305,27 @@ class DebugView(Node):
         with self.lock:
             self.jpeg = bytes(m.data)
 
+    def control(self, body):
+        with self.lock:
+            cur = (self.data.get('mission') or {}).get('state')
+        ok, text, pubs = control_request(body, bool(self.get_parameter('control_enabled').value),
+                                         str(self.get_parameter('control_password').value), cur)
+        for topic, val in pubs:
+            if val is None:
+                msg = Empty()
+            elif isinstance(val, bool):
+                msg = Bool(data=val)
+            else:
+                msg = String(data=val)
+            self.ctl_pub[topic].publish(msg)
+        log = self.get_logger().warning if ok else self.get_logger().info
+        log(f'[debug 조작] {text}' + ('' if ok else ' (거절)'))
+        with self.lock:
+            self.events.append({'t': time.strftime('%H:%M:%S'), 'state': '조작' if ok else '조작 거절',
+                                's': None, 'note': text})
+            self.events = self.events[-40:]
+        return ok, text
+
     def _pose(self, pv):
         if self.route is None or not isinstance(pv, dict) or pv.get('s') is None:
             return None
@@ -313,7 +359,9 @@ class DebugView(Node):
                 except Exception as e:   # 설명이 틀려도 화면은 살아 있게
                     why = {'state': '', 'title': f'설명 오류: {e}', 'control': '', 'next': [],
                            'because': [], 'warn': []}
-            return {'why': why, 'data': self.data, 'age': age, 'scan': self.scan, 'cmd': self.cmd, 'pose': pose,
+            ctl = {'enabled': bool(self.get_parameter('control_enabled').value),
+                   'password': bool(self.get_parameter('control_password').value), 'states': CHOOSABLE}
+            return {'why': why, 'control': ctl, 'data': self.data, 'age': age, 'scan': self.scan, 'cmd': self.cmd, 'pose': pose,
                     'events': self.events, 'has_img': self.jpeg is not None, 'has_cam': self.cam is not None}
 
 
@@ -338,6 +386,14 @@ img{width:100%;border-radius:4px;margin-top:4px}.stale{color:var(--bad)}
 .cond{display:grid;grid-template-columns:16px 1fr auto;gap:4px;align-items:center;margin:3px 0;font-size:12px}
 .bar{grid-column:2/4;height:4px;background:#2a2f36;border-radius:2px;overflow:hidden}.bar i{display:block;height:100%;background:var(--acc)}
 .met{color:var(--ok)}
+#ctl{background:#11161c;border:1px solid #2a2f36;border-radius:6px;padding:8px;margin-bottom:6px}
+#ctl select{background:#2a2f36;color:var(--fg);border:1px solid #3c4043;border-radius:4px;padding:4px;width:100%;margin:4px 0}
+#ctl .row{display:flex;gap:4px;flex-wrap:wrap;margin-top:4px}#ctl .row button{flex:1}
+#estop{background:#b3261e;border-color:#ea4335;font-weight:700;font-size:15px;padding:8px}#estopoff{flex:0.6}
+#ctlmsg{font-size:12px;color:var(--mute);margin-top:4px;min-height:16px}
+#modal{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;z-index:9}
+#modal .box{background:var(--panel);border:1px solid #3c4043;border-radius:8px;padding:16px;max-width:380px}
+#modal .box b{font-size:15px}#modal .row{display:flex;gap:8px;margin-top:12px;justify-content:flex-end}
 </style></head><body><div id="left">
 <div id="sensors"><div id="camw"><canvas id="cam"></canvas><div class="cap" id="camcap">카메라 + 라이다 + YOLO + 선 (영상 없음)</div></div>
 <div id="lidw"><canvas id="lid"></canvas><div class="cap">라이다 위에서 (차 기준, 앞 = 위, 원 0.5 m)</div></div></div>
@@ -346,12 +402,22 @@ img{width:100%;border-radius:4px;margin-top:4px}.stale{color:var(--bad)}
 <button id="sens">센서 화면: 켬</button><button id="snd">🔔 소리: 끔</button>
 <span id="hint" style="color:var(--mute);align-self:center">휠: 확대 · 끌기: 이동</span></div></div></div>
 <div id="side"><div id="why"><div class="big" id="st">연결 중…</div></div>
+<div id="ctl"><div style="display:flex;justify-content:space-between"><b>미션 조작</b><span id="ctlstate" style="color:var(--mute);font-size:12px"></span></div>
+<select id="ctlsel"></select>
+<div class="row"><button id="b_set" title="차를 그 미션 시작 위치(실행 가이드 3번 표)에 놓았을 때. 도면 위치도 그 시작점으로">시작 위치에서 시작</button>
+<button id="b_skip" title="지금 자리에서 그 미션으로. 도면 위치는 그대로">지금 자리에서 이 미션</button></div>
+<div class="row"><button id="b_next">다음 미션 ▶</button><button id="b_start">출발</button></div>
+<div class="row"><button id="estop">■ 비상 정지 (Space)</button><button id="estopoff">해제</button></div>
+<div id="ctlmsg"></div></div>
 <h3>차</h3><div class="kv" id="car"></div>
 <h3>인식</h3><div class="kv" id="perc"></div>
 <h3>미션 노드</h3><div class="kv" id="nodes"></div>
 <h3>차선 영상 (BEV)</h3><img id="lane" style="display:none"><div id="noimg" style="color:var(--mute)">(차선 디버그 영상 없음)</div>
 <h3>상태 기록</h3><div id="ev"></div>
 <div style="color:var(--mute);font-size:11px;margin-top:8px">카메라 위 그림 — 점: 라이다(바닥 닿는 곳, 빨강 가까움) · 초록 실선: 명령 궤적 · 노랑: 카메라 차로 가운데 · 하늘 점선: 도면 예상 차로 가운데 · 분홍: 흰 가로선 · 상자: YOLO(실선 = 확정)</div></div>
+<div id="modal"><div class="box"><b id="mt"></b><div id="mb" style="margin-top:6px;color:var(--mute)"></div>
+<input id="mpw" type="password" placeholder="비밀번호" style="display:none;margin-top:8px;width:100%;background:#2a2f36;color:var(--fg);border:1px solid #3c4043;border-radius:4px;padding:4px">
+<div class="row"><button id="mno">취소</button><button id="myes" style="background:#1a73e8;border-color:#1a73e8">보내기</button></div></div></div>
 <script>
 const $=id=>document.getElementById(id),DPR=devicePixelRatio;
 const cv=$('c'),cx=cv.getContext('2d'),cc=$('cam'),ccx=cc.getContext('2d'),lc=$('lid'),lcx=lc.getContext('2d');
@@ -484,7 +550,7 @@ function renderWhy(w,m){if(!w){$('why').innerHTML='<div class="big">'+(m.state||
   (w.next.length?`<h3>다음 단계로 넘어가는 조건 (하나라도)</h3>`+w.next.map(n=>`<div class="cond"><span class="${n.met?'met':''}">${n.met?'✔':'○'}</span><span>${esc(n.text)}</span><span style="color:var(--mute)">${esc(n.value)}</span>`+
    (n.progress!=null?`<div class="bar"><i style="width:${n.progress*100}%"></i></div>`:'')+'</div>').join(''):'')}
 async function poll(){try{const r=await fetch('/state');S=await r.json();const d=S.data,m=d.mission||{},rt=m.route||{},ln=d.lane||{},a=S.age;
- renderWhy(S.why,m);soundOnState(m);
+ renderWhy(S.why,m);soundOnState(m);renderCtl();
  const old=k=>a[k]==null?'<span class=stale>없음</span>':(a[k]>1.5?`<span class=stale>${a[k]}초 전</span>`:'');
  kv('car',{'도면 위치 s':rt.s_mm!=null?rt.s_mm+' mm '+old('mission'):'-','다음 선':rt.next?`${rt.next} (${rt.next_in_mm} mm)`:'-','마지막 맞춤':j(rt.last_fix),
   '자세':S.pose?(S.pose.ok?'차선으로 확인':'<span class=fb>오도메트리로 추정</span>'):'-','차선 맞춤':S.pose?esc(S.pose.lane_fix||'-'):'-',
@@ -498,6 +564,25 @@ async function poll(){try{const r=await fetch('/state');S=await r.json();const d
   'M7':j({active:ob.m7_active,done:ob.m7_done,trigger:ob.m7_trigger,exit:ob.m7_exit}),'라바콘':j({ahead:ob.cone_any_ahead_mm,done:ob.cones_done}),'회피 노드':(typeof d.avoid=='string'?d.avoid:'-')+' '+old('avoid'),'갈림길 노드':j(fk.decision||fk.direction||fk)});
  $('ev').innerHTML=S.events.slice().reverse().map(e=>`<div class="ev ${/FALLBACK/.test(e.note)?'fb':''}">${e.t} <b>${e.state}</b> s=${e.s??'-'}<br>${esc(e.note||'')}</div>`).join('');
  if(S.has_img){const im=$('lane');im.style.display='block';$('noimg').style.display='none';im.src='/lane.jpg?'+Date.now()}}catch(e){$('why').innerHTML='<div class="big">연결 끊김</div>'}setTimeout(poll,150)}
+// ---- 미션 조작 ----
+let PW='',ctlFilled=false;
+async function sendCtl(body){if(PW)body.password=PW;try{const r=await fetch('/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+ const j=await r.json();$('ctlmsg').innerHTML=(j.ok?'✔ ':'<span class=stale>✖ ')+esc(j.msg)+(j.ok?'':'</span>');if(!j.ok&&/비밀번호/.test(j.msg))PW=''}catch(e){$('ctlmsg').innerHTML='<span class=stale>✖ 보내기 실패 (연결)</span>'}}
+function ask(title,body,fn){const c=S&&S.control;$('mt').textContent=title;$('mb').textContent=body;const pw=c&&c.password&&!PW;$('mpw').style.display=pw?'block':'none';$('mpw').value='';
+ $('modal').style.display='flex';$('myes').focus();$('myes').onclick=()=>{if(pw)PW=$('mpw').value;$('modal').style.display='none';fn()};$('mno').onclick=()=>$('modal').style.display='none'}
+const selName=()=>$('ctlsel').value;
+$('b_set').onclick=()=>ask(`${selName()} 시작 위치에서 시작`,'보내는 순간 차가 움직여요. 차를 그 미션 시작 위치에 놓았나요? 도면 위치도 그 시작점으로 다시 맞춰요.',()=>sendCtl({action:'set_state',state:selName()}));
+$('b_skip').onclick=()=>ask(`지금 자리에서 ${selName()}`,'미션만 바꾸고 도면 위치는 그대로예요. 차가 바로 그 미션대로 움직여요.',()=>sendCtl({action:'skip',state:selName()}));
+$('b_next').onclick=()=>{const m=(S&&S.data.mission)||{};ask('다음 미션으로 건너뛰기',`${m.state||'?'} 를 끝난 것으로 보고 다음 미션으로 넘겨요. 도면 위치는 그대로예요.`,()=>sendCtl({action:'next'}))};
+$('b_start').onclick=()=>ask('출발','출발 체커에 반듯이 놓았나요? 보내는 순간 출발해요.',()=>sendCtl({action:'start'}));
+$('estop').onclick=()=>sendCtl({action:'estop'});
+$('estopoff').onclick=()=>ask('비상 정지 해제','해제하면 지금 미션대로 바로 다시 움직여요.',()=>sendCtl({action:'estop_off'}));
+addEventListener('keydown',e=>{if(e.code==='Space'&&!/INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName)){e.preventDefault();sendCtl({action:'estop'})}
+ if(e.code==='Escape')$('modal').style.display='none'});
+function renderCtl(){const c=S&&S.control,m=(S&&S.data.mission)||{};if(!c)return;
+ if(!ctlFilled){$('ctlsel').innerHTML=c.states.map(s=>`<option>${s}</option>`).join('');ctlFilled=true}
+ ['b_set','b_skip','b_next','b_start','estopoff','ctlsel'].forEach(id=>$(id).disabled=!c.enabled);
+ $('ctlstate').innerHTML=(c.enabled?'':'<span class=stale>꺼짐 · 비상 정지만</span> ')+(m.estop?'<span class=stale>ESTOP 켜짐</span>':'')}
 fetch('/track').then(r=>r.json()).then(t=>{T=t;fit()});upd();poll();pollTrail();camLoop();draw();
 </script></body></html>"""
 

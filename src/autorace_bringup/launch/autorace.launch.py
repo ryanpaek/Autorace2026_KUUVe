@@ -73,6 +73,8 @@ def generate_launch_description():
         DeclareLaunchArgument('use_fork_node', default_value='false'),
         # 웹 디버그 화면 (노트북 브라우저 http://<리모IP>:8080). 구독만 함
         DeclareLaunchArgument('debug_view', default_value='true'),
+        # 디버그 화면 미션 조작 버튼 (미션 고르기·건너뛰기·출발). 대회 때 false (비상 정지는 계속 됨)
+        DeclareLaunchArgument('debug_control', default_value='true'),
         # 주차 완료 '띠링'을 차 스피커로 (chime_node). 끄려면 chime:=false
         DeclareLaunchArgument('chime', default_value='true'),
         # 주차 켜기 (parking_node enabled). 통주행은 full.launch.py가 true로 준다
@@ -93,7 +95,9 @@ def generate_launch_description():
                                       LaunchConfiguration('use_class_commands'), value_type=bool)}],
              output='screen'),
         Node(package='autorace_mission', executable='debug_view', name='debug_view',
-             parameters=[params, {'route_file': route, 'bev_config': bev}], output='screen',
+             parameters=[params, {'route_file': route, 'bev_config': bev,
+                                  'control_enabled': ParameterValue(LaunchConfiguration('debug_control'),
+                                                                    value_type=bool)}], output='screen',
              condition=IfCondition(LaunchConfiguration('debug_view'))),
         Node(package='autorace_mission', executable='chime_node', name='chime_node',
              output='screen', condition=IfCondition(LaunchConfiguration('chime'))),

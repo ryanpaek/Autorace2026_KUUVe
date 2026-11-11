@@ -203,3 +203,24 @@ alsamixer                                   # 음소거(MM)·볼륨 확인
 ros2 param set /chime_node device plughw:1,0    # 기본 장치가 아니면 지정 (aplay로 재생)
 ```
 `volume`(0~1, 기본 0.6)은 시작할 때만 읽는다. 디버그 화면의 🔔 버튼(노트북 소리)과는 따로 동작한다.
+
+## 12. 디버그 화면에서 미션 조작 (11/11)
+오른쪽 '미션 조작' 칸. 버튼을 누르면 확인 창이 뜨고, **보내는 순간 차가 움직인다**.
+| 버튼 | 보내는 것 | 언제 |
+|---|---|---|
+| 시작 위치에서 시작 | `/mission/set_state` | 차를 3번 표의 그 미션 시작 위치에 놓았을 때. 도면 위치도 그 시작점으로 다시 맞춤 |
+| 지금 자리에서 이 미션 | `/mission/skip` | 주행 중 지금 자리에서 그 미션으로. 도면 위치는 그대로 |
+| 다음 미션 ▶ | `/mission/skip` | 지금 미션을 끝난 것으로 보고 다음으로 (위치 그대로) |
+| 출발 | `/mission/start` | 출발 체커에서 |
+| 비상 정지 (**Space 키**) / 해제 | `/mission/estop` | 비상 정지는 확인 없이 바로 |
+
+- 대회 때는 `debug_control:=false`로 끈다 (같은 와이파이 누구나 누를 수 있음). 꺼도 **비상 정지는 된다**
+- 비밀번호: `ros2 launch ... ` 전에 params.yaml `debug_view.ros__parameters.control_password` 또는 `ros2 param set /debug_view control_password 원하는값`
+- 누른 기록은 '상태 기록'과 리모 로그에 `[debug 조작]`으로 남는다
+
+## 13. 차선을 놓쳤을 때 도면 곡률로 조향 (11/11)
+예전엔 차선을 놓치면 IMU 방향을 유지해 **직진**했다 (도면상 코너인데도 안 꺾고 경로 이탈).
+이제 `lane_node.route_ff_weight_lost: 0.8` — 놓친 동안 조향을 도면 곡률 쪽으로 80% 섞는다.
+- 미션 노드가 '길 잃음'이면 도면 곡률을 안 섞는다 (틀린 위치에서 꺾지 않게)
+- 차선이 보일 때는 예전과 같다 (카메라 차선만)
+- 디버그 화면 '차선 영상'에 source가 `hold`일 때 꺾이는지 보면 된다. 엉뚱한 데서 꺾으면 위치 추정을 먼저 확인 (9절), 급하면 `ros2 param set /lane_node route_ff_weight_lost 0.0`

@@ -285,3 +285,15 @@ def test_mask_fn_replaces_hsv(cfg):
         out = f.process(blank_bgr)
     assert calls and out.status == 'BOTH'
     assert out.offset_mm == pytest.approx(80.0, abs=15)
+
+
+@pytest.mark.parametrize('w,expect', [(0.0, 0.0), (0.8, 1.2)])
+def test_lost_lane_follows_route_curvature(cfg, w, expect):
+    """11/11: 코너에서 차선을 놓치면 예전엔 IMU 방향 유지로 직진. route_ff_weight_lost를 주면 도면 곡률로 꺾는다."""
+    f = LaneFollower(cfg, LaneParams(route_ff_weight_lost=w))
+    run(f, synth.straight_lane(cfg), yaw=0.0)
+    f.route_k = [1.5] * 14                 # 도면: 앞에 왼쪽 R0.67 코너
+    f.route_step_mm = 100.0
+    out = run(f, synth.blank(cfg), frames=15, yaw=0.0)
+    assert out.source == 'hold'
+    assert out.kappa == pytest.approx(expect, abs=0.1)

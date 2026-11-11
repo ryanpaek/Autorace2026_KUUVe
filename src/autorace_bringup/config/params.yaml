@@ -27,6 +27,9 @@ lane_node:
     kappa_alpha: 0.5
     kappa_rate_max: 0.6
     lost_hold_frames: 30
+    # 11/11: 차선을 놓쳤을 때(hold) 조향을 IMU 방향 유지(직진) 대신 도면 곡률 쪽으로 이만큼 섞는다.
+    # 코너에서 차선을 놓치면 직진해 경로를 벗어나던 문제. 미션 노드가 길 잃음(lost)이면 안 섞음. 0이면 예전처럼 직진
+    route_ff_weight_lost: 0.8
     yaw_kp: 1.5
     curve_slowdown: 0.3
 
