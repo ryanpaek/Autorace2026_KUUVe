@@ -49,7 +49,7 @@ def obstacle_node_front(rng, a_min, a_inc, hw_mm):
     return min(ahead) if ahead else None
 
 
-def make_layout(rnd):
+def make_layout(rnd, enable_front=-0.25):
     """첫 줄에 가운데 차로 장애물(앞면 = 시작선 + 0.0~1.5 m)이 있는, 지나갈 수 있는 배치 (stress_sim 검사 그대로).
     섬 = 시작선 + 4.384 m (도면). 회피 노드는 섬을 0.2 m 이르게 본다(앞바퀴 기준 거리를 기준점에서 씀) -> 그 위치로 검사."""
     island = (ISLAND_S - START_S) / 1000.0 - WHEELBASE
@@ -64,9 +64,11 @@ def make_layout(rnd):
         for x, lane in cars:
             grouped.setdefault(round(x, 6), []).append(lane)
         rows2 = sorted(grouped.items())
-        # 켜는 순간 차 앞범퍼 ~ 첫 줄: 시작선 -0.25 m에서 켜도 첫 줄까지 0.85 m 이상 남게 (stress_sim feasible 기준)
-        rel = [(x + 0.25 + 0.6, ls) for x, ls in rows2]
-        if ss.feasible(rel + [(island + 0.25 + 0.6, [0])]):
+        # stress_sim feasible 은 '켜는 순간 기준점'에서 잰 거리 (첫 줄 0.85 m 이상 등).
+        #   켜는 곳 = 앞바퀴가 시작선 enable_front -> 기준점 = enable_front - 0.2
+        base = enable_front - WHEELBASE
+        rel = [(x - base, ls) for x, ls in rows2]
+        if ss.feasible(rel + [(island - base, [0])]):
             return cars
     raise RuntimeError('배치 생성 실패')
 

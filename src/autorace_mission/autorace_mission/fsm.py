@@ -18,9 +18,12 @@ TODO 표시가 붙은 곳은 실차·트랙에서 값을 재거나 로직을 채
 
 from __future__ import annotations
 
+import math
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Dict, Optional
+
+from autorace_mission.corner import CornerWatch
 
 SEQUENCE = ['WAIT_START', 'M5_BUMP', 'M6_ZIGZAG', 'M3_PEDESTRIAN', 'M7_OBSTACLE',
             'M2_FORK', 'M8_CONES', 'M1_TRAFFIC', 'M4_PARKING', 'FINISHED']
@@ -77,6 +80,12 @@ DEFAULT_PARAMS = {
     'cones_enter_before_mm': 0.0,    # 도면 위치 예비: 시작선 이만큼 앞(앞바퀴)에서 라바콘 모드 (1순위는 카메라로 선 통과)
     'cones_enter_cone_mm': 500.0,    # 차 앞 차로 안 콘이 앞바퀴에서 이 안이면 조금 일찍 들어간다
     'cones_approach_mm': 1550.0,     # 경로 지도 없을 때: M2 끝 -> 라바콘 모드 (도면 1854 - 300)
+    # 11/11 코너 지킴: M2 끝 -> 좌하단 코너(90°) -> 시작선(코너 끝 + 240 mm). 도면 위치가 앞서거나 코너에서 콘이 보이면
+    #   코너 안에서 라바콘 모드로 들어가 콘 쪽으로 곧장 감(지름길). 카메라로 시작선을 넘은 것 말고는 IMU로 코너를 다 돈 뒤에만
+    'm8_corner_turn_deg': 75.0,      # 0 = 안 씀
+    'm8_corner_straight_deg': 4.0,
+    'm8_corner_window_mm': 150.0,
+    'm8_corner_fail_mm': 300.0,      # 도면상 시작선 + 이만큼(지도 없으면 cones_approach + 이만큼)인데 코너를 못 알아채면 예전 규칙
     'cones_zone_mm': 2700.0,         # 라바콘 모드 최대 거리 (구간 2100 + 진입 300 + 여유)
     'cones_end_after_mm': 150.0,     # 끝선(앞바퀴)을 이만큼 지나면 obstacle 노드 판단과 상관없이 복귀
     'cones_handover_mm': 400.0,      # 차선을 다시 잡길 기다리는 최대 거리 (끝선 뒤 바로 코너)
@@ -244,6 +253,8 @@ class MissionFSM:
         self.line = None                             # 지그재그·라바콘 시작선 통과 감시 (StopApproach)
         self.cones_seen = False
         self.cones_gone_t = None
+        self.m8_corner = CornerWatch(self.p.get('m8_corner_turn_deg', 75.0), self.p.get('m8_corner_straight_deg', 4.0),
+                                     self.p.get('m8_corner_window_mm', 150.0))
         self._last_dist = None                       # odom 점프 감시용
         self._dist_adj = 0.0
         # 위치 다시 잡기 (11/10): 카메라로 확인한 미션 선을 앞바퀴가 지나거나 그 앞에 서면
@@ -259,6 +270,10 @@ class MissionFSM:
         self.log.append(f'{self.state or "-"} -> {state} {why}'.strip())
         self.state = state
         self.enter_t, self.enter_dist = inp.t, inp.dist_mm
+        if state == 'M8_CONES':
+            # 앞 미션(M2)에서 넘어올 때만 코너 지킴. 연습으로 바로 M8(set_state)이면 이미 코너 뒤에 놓음
+            use = self.p.get('m8_corner_turn_deg', 75.0) > 0 and why not in ('manual', 'init')
+            self.m8_corner.start(inp.yaw if use else None, inp.dist_mm)
         self._sub('', inp)
         for v in self.votes.values():
             v.reset()
@@ -558,6 +573,7 @@ class MissionFSM:
         if self.sub == '':
             # 1순위: 시작 흰 선을 앞바퀴가 지나는 순간 (서지 않음). 2순위: 도면 위치. 3순위: 거리
             near = self._line_crossed(inp, 'm8_start_line')
+            cam_near = bool(near) and self.line is not None and self.line.seen_d is not None
             if near and self.line.seen_d is None:
                 near = self._past(inp, 'm8_start_line', -p['cones_enter_before_mm'])
             if near is None:
@@ -568,6 +584,20 @@ class MissionFSM:
                 armed = bool(self._past(inp, 'm8_start_line', -800.0))
             ahead = inp.obstacle.get('cone_ahead_mm')
             close = ahead is not None and ahead <= p['cones_enter_cone_mm']
+            cw = self.m8_corner
+            if cw.active and not cw.done:
+                cw.update(inp.yaw, inp.dist_mm)
+                if cw.done:
+                    self.log.append(f'M8 corner done (IMU {math.degrees(cw.turned):.0f}deg)')
+            if cw.active and not cw.done and not cam_near:
+                # 아직 코너 안: 도면 위치·콘 가까움으로는 안 들어감 (카메라로 시작선을 넘은 것만 받음)
+                fail = self._past(inp, 'm8_start_line', p['m8_corner_fail_mm'])
+                if fail is None:
+                    fail = self._since(inp)[1] >= p['cones_approach_mm'] + p['m8_corner_fail_mm']
+                if not fail:
+                    return Command('lane', self._lane(p['slow_speed']))
+                cw.yaw0 = None                  # IMU로 코너를 못 알아챔 -> 예전 규칙
+                self.log.append(f'M8 corner not detected by IMU ({math.degrees(cw.turned):.0f}deg) -> route/distance')
             if near or (armed and close):
                 how = f'start line ({self.line.how or "route/distance"})' if near else f'cone ahead {ahead:.0f}mm'
                 self._sub('cones', inp, how)

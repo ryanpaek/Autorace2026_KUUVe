@@ -145,11 +145,12 @@ def main():
         for t, o in d.get('/obstacle/state', []):
             if not (t0 <= t <= t1 + 0.5) or not isinstance(o, dict):
                 continue
-            k = {x: o.get('m7_' + x) for x in ('phase', 'trigger', 'how', 'off_by', 'hold', 'hold_kind', 'exit', 'sign', 'lane')}
+            k = {x: o.get('m7_' + x) for x in ('phase', 'trigger', 'how', 'off_by', 'hold', 'hold_kind', 'exit', 'sign',
+                                                'lane', 'corner')}
             if k != prev:
                 print(f'{ts(t)}  phase={k["phase"]} trig={k["trigger"]} pos={o.get("m7_pos_mm")} '
                       f'how={k["how"]} front={o.get("m7_front_mm")} sign={k["sign"]} off={k["off_by"]} '
-                      f'hold={k["hold"]}/{k["hold_kind"]} lane={k["lane"]} exit={k["exit"]}')
+                      f'hold={k["hold"]}/{k["hold_kind"]} lane={k["lane"]} exit={k["exit"]} corner={k["corner"]}')
                 prev = k
                 if k['how'] == 'distance':
                     warn.append(f'{ts(t)} M7 위치를 진입 후 거리로 계산 (도면 길 잃음 + 시작선 카메라 못 봄) -> 켜기·끄기 위치 오차')
