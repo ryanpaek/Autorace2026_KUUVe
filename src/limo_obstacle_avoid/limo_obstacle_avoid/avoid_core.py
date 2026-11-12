@@ -1042,6 +1042,8 @@ class AvoidPlanner:
         if (psi > mh and k > 0) or (psi < -mh and k < 0):
             k = 0.0
         if self._edge_danger(y, psi):
+            if not getattr(self, 'edge_guarded', False):
+                self.events.append((self.pose.x, f'바깥 노란선 앞 (옆 {y:+.2f}m, 방향 {math.degrees(psi):+.0f}°) -> 안쪽으로 끝까지 꺾음'))
             self.edge_guarded = True
             return v * (-kmax if y > 0 else kmax)      # 바깥 노란선 앞: 안쪽으로 끝까지
         self.edge_guarded = False

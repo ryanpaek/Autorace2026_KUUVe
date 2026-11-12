@@ -309,3 +309,31 @@ def test_lane_fix_half_while_changing_and_up_to_20deg():
     assert c.lane_fix(lane(95.0, h_deg=15.0), 0.0)         # 15° (차 옆 위치 약 +5 cm): 반만
     d = running(y0=0.0)
     assert not d.lane_fix(lane(-60.0, h_deg=25.0), 0.0)    # 25°: 안 씀
+
+
+def test_edge_guard_turns_inward_near_outer_line():
+    """1차선(왼쪽 끝)에서 바깥(왼쪽)으로 25° 향해 있으면 오른쪽으로 끝까지 꺾음."""
+    pl = running(y0=0.60, psi0=math.radians(25.0))
+    pl.target = 1
+    w = pl.control(0.3, None, False)
+    assert w < 0 and pl.edge_guarded
+    ok = running(y0=0.52, psi0=0.0)
+    ok.target = 1
+    ok.control(0.3, None, True)
+    assert not ok.edge_guarded
+
+
+def test_choose_ignores_obstacle_being_passed_beside():
+    """1차선에서 2차선 장애물 옆을 지나는 중, 1차선 앞 0.9 m 장애물 -> 2차선을 고름 (옆 장애물은 '앞'이 아님)."""
+    from limo_obstacle_avoid.avoid_core import Obstacle
+    p = AvoidParams()
+    pl = AvoidPlanner(p)
+    pl.start(0.0, 0.0, 0.0, 0.0)
+    pl.pose.x, pl.pose.y, pl.pose.psi = 1.0, 0.52, 0.0
+    pl.target = 1
+    obs = [Obstacle(0.75, 1.07, -0.11, 0.11), Obstacle(2.1, 2.42, 0.41, 0.63), Obstacle(0.75, 1.07, -0.63, -0.41)]
+    for o in obs:
+        o.hits = p.confirm_hits
+    assert pl.choose(1, obs) == 0
+    p.clear_rollout = False
+    assert pl.choose(1, obs) is None                 # 예전: 옆 장애물 때문에 못 고름
