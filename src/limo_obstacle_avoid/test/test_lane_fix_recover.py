@@ -70,11 +70,12 @@ def _run_close_obstacle(recover):
     return ss.run([(0.6 + p.lidar_x, 0)], p, 4.38, seed=1, **ss.CONDITIONS[0][1])
 
 
-def test_recover_gets_unstuck():
-    stuck = _run_close_obstacle(False)
-    assert not stuck['done'] and not stuck['collided']          # 탈출 없으면 장애물 앞에 멈춘 채 끝
-    ok = _run_close_obstacle(True)
-    assert ok['done'] and not ok['collided']                    # 후진하며 꺾어 다시 잡고 통과
+def test_close_obstacle_passed_without_reverse():
+    """11/12 밤: 후진 끔(기본). 켜자마자 0.6 m 앞 장애물도 끝까지 꺾어 빠져 통과 (예전엔 후진해야 통과)."""
+    ok = _run_close_obstacle(False)
+    assert ok['done'] and not ok['collided']
+    old = _run_close_obstacle(True)                             # 예전 후진 방식도 여전히 통과 (켜면)
+    assert old['done'] and not old['collided']
 
 
 def test_recover_side_toward_target_lane():
@@ -159,6 +160,7 @@ def test_swing_after_trail_used_up_instead_of_standing():
     import stress_sim as ss
     for sw, want in ((0, False), (6, True)):
         p = AvoidParams()
+        p.recover, p.squeeze = True, False                     # 예전 후진 탈출 기능 자체 시험 (기본은 꺼짐)
         p.recover_max, p.recover_swing_max = 0, sw
         r = ss.run([(0.6 + p.lidar_x, 0)], p, 4.38, seed=1)
         assert r['done'] is want and not r['collided']
@@ -192,11 +194,16 @@ def test_side_obstacle_does_not_stop_or_reverse():
     assert not pl.blocked and v > 0 and pl.rb is None and pl.rec is None
 
 
-def test_obstacle_right_in_front_stops():
+def test_obstacle_right_in_front_turns_hard_no_reverse():
+    """앞범퍼 25 cm 앞 내 차로 장애물: 막힘으로 보고, 후진하지 않고 끝까지 꺾어 빠진다 (11/12 밤)."""
     pl = running(0.0)
-    _with_obs(pl, (0.20 + 0.25, 0.80, -0.11, 0.11))                # 앞범퍼 25 cm 앞, 내 차로
-    v, _ = pl.step(10.0)
-    assert pl.blocked and v == 0.0 and 0.0 < pl.hit_dist <= 0.30
+    _with_obs(pl, (0.20 + 0.25, 0.80, -0.11, 0.11))
+    v, w = pl.step(10.0)
+    assert pl.blocked and 0.0 < pl.hit_dist <= 0.30
+    assert v > 0 and pl.squeezing and abs(w) == pytest.approx(v / pl.p.min_turn_radius)
+    for t in range(40):
+        v, _ = pl.step(10.0 + 0.05 * t)
+        assert v >= 0.0                                          # 후진 없음
 
 
 def test_obstacle_in_front_beyond_0p3_does_not_stop():
@@ -309,3 +316,31 @@ def test_lane_fix_half_while_changing_and_up_to_20deg():
     assert c.lane_fix(lane(95.0, h_deg=15.0), 0.0)         # 15° (차 옆 위치 약 +5 cm): 반만
     d = running(y0=0.0)
     assert not d.lane_fix(lane(-60.0, h_deg=25.0), 0.0)    # 25°: 안 씀
+
+
+def test_edge_guard_turns_inward_near_outer_line():
+    """1차선(왼쪽 끝)에서 바깥(왼쪽)으로 25° 향해 있으면 오른쪽으로 끝까지 꺾음."""
+    pl = running(y0=0.60, psi0=math.radians(25.0))
+    pl.target = 1
+    w = pl.control(0.3, None, False)
+    assert w < 0 and pl.edge_guarded
+    ok = running(y0=0.52, psi0=0.0)
+    ok.target = 1
+    ok.control(0.3, None, True)
+    assert not ok.edge_guarded
+
+
+def test_choose_ignores_obstacle_being_passed_beside():
+    """1차선에서 2차선 장애물 옆을 지나는 중, 1차선 앞 0.9 m 장애물 -> 2차선을 고름 (옆 장애물은 '앞'이 아님)."""
+    from limo_obstacle_avoid.avoid_core import Obstacle
+    p = AvoidParams()
+    pl = AvoidPlanner(p)
+    pl.start(0.0, 0.0, 0.0, 0.0)
+    pl.pose.x, pl.pose.y, pl.pose.psi = 1.0, 0.52, 0.0
+    pl.target = 1
+    obs = [Obstacle(0.75, 1.07, -0.11, 0.11), Obstacle(2.1, 2.42, 0.41, 0.63), Obstacle(0.75, 1.07, -0.63, -0.41)]
+    for o in obs:
+        o.hits = p.confirm_hits
+    assert pl.choose(1, obs) == 0
+    p.clear_rollout = False
+    assert pl.choose(1, obs) is None                 # 예전: 옆 장애물 때문에 못 고름
