@@ -270,3 +270,51 @@ def test_keep_obstacle_hidden_behind_nearer_one():
     for _ in range(10):
         pl.update_scan(_scan_through(0.6))
     assert any(abs(o.xmin - 1.6) < 0.01 for o in pl.obs)
+
+
+def _confirmed(o):
+    o.hits = 5
+    return o
+
+
+def test_return_to_left_lane_right_away_if_it_is_clear():
+    """11/12 밤: 2->1차로로 옮기자마자 1차로 0.9 m 앞에 장애물. 떠난 2차로가 이미 비었으면 1.5초 안 기다리고 바로 돌아감"""
+    for clear_ok, want in ((True, 0), (False, 1)):
+        pl = _pl_center()
+        pl.p.flip_ok_if_clear = clear_ok
+        pl.p.side_wait = False
+        pl.pose.y = 0.52
+        pl.target = 1
+        pl.flip_from = 0
+        pl.last_switch = 9.5                       # 0.5초 전에 옮김
+        pl.obs = [_confirmed(Obstacle(1.1, 1.43, 0.42, 0.62))]
+        pl.step(10.0)
+        assert pl.target == want
+
+
+def test_side_wait_goes_straight_then_changes():
+    """옮기기 시작했는데 가려는 차로 바로 옆(앞범퍼 근처)에 장애물이 걸리면 원래 차로로 0.3 m 직진 뒤 다시 옮김"""
+    pl = _pl_center()
+    pl.pose.y = 0.0
+    pl.target = 1
+    pl.last_switch = 9.9
+    pl.obs = [_confirmed(Obstacle(0.15, 0.48, 0.42, 0.62))]     # 1차로, 차 옆~앞범퍼
+    v, w = pl.step(10.0)
+    assert any('직진 뒤' in e for _, e in pl.events)
+    assert v > 0 and abs(w) < 0.15                              # 꺾지 않고 거의 똑바로
+    assert pl.target == 1                                       # 목표는 그대로 (지나가면 다시 옮김)
+    pl.pose.x += 0.35                                           # 0.3 m 지나고 장애물도 지남
+    pl.obs = []
+    v, w = pl.step(10.5)
+    assert w > 0.2                                              # 다시 1차로 쪽으로 꺾음
+
+
+def test_side_wait_off_when_obstacle_is_ahead_not_beside():
+    """가려는 차로 장애물이 옆이 아니라 앞이면 기다려도 소용없음 -> side_wait 안 함"""
+    pl = _pl_center()
+    pl.pose.y = 0.0
+    pl.target = 1
+    pl.last_switch = 9.9
+    pl.obs = [_confirmed(Obstacle(0.9, 1.23, 0.42, 0.62))]
+    pl.step(10.0)
+    assert not any('직진 뒤' in e for _, e in pl.events)
