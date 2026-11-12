@@ -95,7 +95,8 @@ class AvoidParams:
     #   넘을 것 같으면 안쪽으로 끝까지 꺾음 (회피 중 노란선 밖으로 나간 것, 11/12 실차)
     edge_guard: bool = True
     edge_margin: float = 0.03
-    edge_look: float = 0.40
+    edge_look: float = 0.30
+    edge_from: float = 0.85           # 차로 중심에서 바깥 차로 쪽으로 lane_width x 이만큼 넘어온 뒤에만 지킴
     better_margin: float = 0.3        # 옮길 차선이 지금보다 이만큼 더 비어야 옮김
     rechoose_dy: float = 0.12         # 차로를 옮기기 시작했어도 원래 차로 중심에서 이만큼 안이면, 새로 확정된
                                       #   장애물로 다른 차로가 더 비어 보일 때 목표를 바꿈 (켜자마자 고른 쪽이 다음 줄에서 막힘 방지)
@@ -1062,8 +1063,8 @@ class AvoidPlanner:
     def _edge_danger(self, y, psi):
         """바깥 차로에서 바깥쪽으로 가는데 edge_look 앞에서 차체 앞 모서리가 노란선(가장자리 - edge_margin)을 넘나."""
         p = self.p
-        if not p.edge_guard or abs(y) < 0.5 * p.lane_width:
-            return False
+        if not p.edge_guard or abs(y) < p.edge_from * p.lane_width:
+            return False                                # 바깥 차로 안쪽까지 들어온 뒤에만 (옮기는 중간엔 안 끼어듦)
         side = 1.0 if y > 0 else -1.0
         out = side * psi                                # + 면 바깥쪽으로 향함
         edge = (p.num_side_lanes + 0.5) * p.lane_width - p.edge_margin
