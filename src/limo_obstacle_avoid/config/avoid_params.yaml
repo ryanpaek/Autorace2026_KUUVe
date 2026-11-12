@@ -52,6 +52,7 @@
     range_max: 3.0
     roi_front: 2.5
     roi_back: 0.6
+    obs_max_center_y: 0.67   # 11/12 밤: 덩어리 중심이 이보다 밖이면 트랙 밖 물체(노이즈)로 버림 (바깥 차로 LIMO 중심 0.52 + 15 cm)
     roi_side_extra: 0.10
     cluster_gap: 0.12
     cluster_min_pts: 3

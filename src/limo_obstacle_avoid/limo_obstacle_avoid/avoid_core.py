@@ -78,6 +78,7 @@ class AvoidParams:
     roi_front: float = 2.5            # 앞으로 이만큼까지만 봄
     roi_back: float = 0.6             # 뒤로 이만큼까지 (옆 차 지나가는 중 확인용)
     roi_side_extra: float = 0.10      # 3차선 바깥으로 이만큼만 더 봄 (트랙 밖 사람 무시)
+    obs_max_center_y: float = 0.67    # 11/12 밤: 장애물 덩어리 중심이 차로 중심선에서 이보다 밖이면 트랙 밖 물체로 보고 버림 [m]
     cluster_gap: float = 0.12         # 점 사이가 이보다 멀면 다른 물체
     cluster_min_pts: int = 3          # 점이 이보다 적으면 노이즈
     merge_dist: float = 0.20          # 같은 장애물로 합치는 거리
@@ -372,7 +373,11 @@ class AvoidPlanner:
                 ys = [q[1] for q in cur]
                 lx, wy = max(xs) - min(xs), max(ys) - min(ys)
                 # 너무 크면 벽·테두리(길이 max_obs_len, 폭 max_obs_width 초과), 너무 작으면 기둥·다리 -> 버림 (11/10)
-                if lx <= p.max_obs_len and wy <= p.max_obs_width and max(lx, wy) >= p.min_obs_size:
+                yc = 0.5 * (max(ys) + min(ys))
+                # 11/12 밤 실차: 트랙 밖(노란 실선 밖) 물체·사람이 장애물로 들어옴 -> 중심이 바깥 차로 중심보다
+                #   obs_max_center_y 넘게 밖이면 버림 (바깥 차로 LIMO 중심 0.52 m, 위치 오차 15 cm까지 받음)
+                if (lx <= p.max_obs_len and wy <= p.max_obs_width and max(lx, wy) >= p.min_obs_size
+                        and abs(yc) <= p.obs_max_center_y):
                     clusters.append((min(xs), max(xs), min(ys), max(ys)))
             cur.clear()
 
