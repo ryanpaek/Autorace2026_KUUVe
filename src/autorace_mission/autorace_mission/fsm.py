@@ -110,6 +110,9 @@ DEFAULT_PARAMS = {
     # 11/12: true면 M4에 들어오자마자 주차 노드에 넘긴다 (표지·도면 위치를 안 기다림). 주차 노드가 1·3번 짝을 찾아 시작.
     # 표지 인식 실패 + 도면 위치 틀어짐이면 주차 노드가 IDLE인 채 지나가던 문제 (params에서 켬)
     'm4_direct': False,
+    # 11/12: 주차 노드에 넘긴 뒤 차선 설정에 넣을 왼쪽 오프셋 (mm). 주차 노드가 따로 보내면 이 노드가 1초마다
+    # /lane/config를 다시 보내며 덮어써서(차선 노드는 통째로 교체) 왼쪽 붙기가 안 됐음. 0 = 안 넣음
+    'm4_target_offset_mm': 0.0,
     'stop_on_green_arrival': True,  # 도착 때 녹색이어도 일단 서고 녹색 확인 후 출발 (안전 기본값)
     'green_go_delay_sec': 0.3,
     # 도면 경로 지도 (track_route.yaml). mission_node가 points를 넣어 준다.
@@ -700,4 +703,6 @@ class MissionFSM:
                           else ('FALLBACK: near pre line' if near else 'no route map'))
         if not self.parking_armed:
             return Command('lane', self._lane(self.p['slow_speed']))   # 아직 주차 노드에 안 넘김. 서행으로 접근
-        return Command('parking', self._lane(self.p['slow_speed']))    # 서지 않고 서행으로 진입
+        off = self.p.get('m4_target_offset_mm', 0.0)
+        kw = {'target_offset_mm': off} if off else {}
+        return Command('parking', self._lane(self.p['slow_speed'], **kw))    # 서지 않고 서행으로 진입

@@ -75,6 +75,7 @@ mission_node:
     cones_min_mm: 500.0                    # 라바콘 모드로 이만큼 간 뒤부터 끝 판단
     m4_arm_before_mm: 800.0                # 주차 표지 못 봤을 때: 도면상 주차 앞 선 이만큼 앞부터 주차 노드가 선을 받음
     m4_direct: true                        # 11/12: M4 들어오자마자 주차 노드에 넘김 (표지·도면 위치 안 기다림). 주차 노드 skip_wait_line과 같이
+    m4_target_offset_mm: 50.0              # 11/12: 주차 노드에 넘긴 뒤 차선 왼쪽 5cm 붙기 (주차 노드 publish_lane_cfg: false와 같이)
     fork_len_mm: 2300.0                    # 도면 기준, 모의맵 실측으로 확인
     fork_default: A
     stop_on_green_arrival: true
@@ -210,7 +211,7 @@ parking_node:
     pair_dist_mm: 1040.0                   # 정차 리모 두 대 사이 = 칸 2개 (500 + 20 + 500 + 20)
     turn_lead_mm: 320.0                    # 칸 가운데가 앞바퀴보다 이만큼 앞일 때 꺾기 (회전반경 530 - 축거 210)
     straighten_yaw_deg: 87.0               # 이만큼 돌면 바퀴 펴기 (정지 후 2~4도 더 돎, calib 3번)
-    max_realign: 2                         # 재정렬 최대 횟수 (0 = 끔). 1번에 약 10초
+    max_realign: 0                         # 재정렬 최대 횟수 (0 = 끔). 11/12: 2 -> 0 (만점 자리에서도 후진·재진입 반복, 고쳐지지도 않음)
     follow_col5: true                      # 꺾은 뒤 정면 5번 리모로 2번 칸 세로 가운데선 구해서 따라가기 (11/10)
     side_guard_mm: 50.0                    # 꺾는 중·들어가는 중 리모까지 이보다 가까우면 멈추고 재정렬. 0 = 끔
     final_head_tol_deg: 4.0                # 끝 정렬: 방향이 이보다 틀어지면 한 번 더 (시간이 아까우면 크게)
@@ -224,3 +225,8 @@ parking_node:
     skip_wait_line: true                   # 11/12: 흰 선 안 기다리고 바로 1·3번 짝 찾기 (mission_node m4_direct와 같이 켬/끔)
     follow_max_direct_mm: 3500.0           # 짝 없이 이만큼 가면 멈춤 (도면: M4 시작 ~3.8m, 꺾는 곳 ~6.56m, 차선 끝 8.13m)
     wait_blocked_before_pair: true         # 짝 찾기 전 앞이 막히면 주차를 끝내지 말고 서서 기다림
+    turn_ref: corner                       # 11/12: 꺾는 기준 = 1번 상자 '2번 칸 쪽 + 차로 쪽' 모서리 (pair = 예전 짝 중점 평균)
+    turn_from_corner_mm: 140.0             #   라이다가 모서리 선을 이만큼 지나면 꺾기 (turn_lead 320 환산. 실차로 맞출 것)
+    stop_from_col5_mm: 220.0               # 11/12: 꺾은 뒤 앞범퍼 -> 5번 22cm면 정지 (리모가 칸 가운데면 칸 끝 선 약 6cm 전)
+    publish_lane_cfg: false                # 11/12: 차선 오프셋은 미션 노드가 보냄 (m4_target_offset_mm). 둘이 보내면 1초마다 덮어씀
+    guard_stop_mm: 20.0                    # 재정렬 끈 상태에서 꺾는 중 리모에 2cm보다 가까우면 박기 전에 정지

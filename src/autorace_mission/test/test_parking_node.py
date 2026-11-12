@@ -433,3 +433,63 @@ def test_empty_filtered_pair_list_does_not_fall_back_to_raw():
     for i in range(10):
         _, _, info = logic.step({**base, 't': i * 0.1, 'dist_mm': i * 10.0, 'clusters': raw, 'clusters_pair': []})
     assert info['phase'] == 'FOLLOW' and logic.pair_line is None
+
+
+# ---------------------------------------------------------------- 11/12 1번 모서리 기준 꺾기 + 5번 앞 22cm 정지
+NEW_1112 = {'skip_wait_line': True, 'car_min_size_mm': 150.0, 'turn_ref': 'corner', 'turn_from_corner_mm': 140.0,
+            'stop_from_col5_mm': 220.0, 'max_realign': 0, 'guard_stop_mm': 20.0, 'pullout_mm': 500.0, 'pause_sec': 0.3}
+
+
+def test_corner_turn_and_col5_stop_parks_in_one_go():
+    """1번 모서리로 꺾는 시점을 잡고 5번 앞 22cm에 서면, 재정렬 없이 한 번에 2번 칸 안 (대회 배치, 시야 ±105도)."""
+    log, out = [], {}
+    n_in, hit, res = drive([1, 3, 4, 5, 6], 2, NEW_1112, fov_deg=210.0, log=log, out=out)
+    assert (n_in, hit, res) == (4, False, 'PARKED')
+    assert any(i.get('turn_ref') == 'corner' for i in log)
+    assert log[-1]['realigns'] == 0 and log[-1]['stop_how'] == 'col5'
+    x, y, th = out['pose']
+    bumper_y = y + (105.0 + 161.0) * math.sin(th)            # 앞범퍼 (차가 -y로 들어감)
+    assert bumper_y > -620.0 + 30.0                           # 칸 끝 선(-620)보다 3cm 이상 앞
+
+
+def test_corner_turn_point_ignores_lidar_mount_error():
+    """라이다 위치 값이 5cm 틀려도 모서리 기준이면 꺾는 위치가 같다 (짝 중점 평균은 5cm 넘게 달라짐)."""
+    def turn_x(ov):
+        seen = []
+        orig = pn.ParkingV2._enter
+
+        def rec(self, phase, inp):
+            if phase == 'PAUSE' and not seen:
+                seen.append(self.px)                          # 꺾기 직전 차 위치 (출발점 기준 실제 이동 거리)
+            orig(self, phase, inp)
+        pn.ParkingV2._enter = rec
+        try:
+            drive([1, 3, 4, 5, 6], 2, ov, fov_deg=210.0)
+        finally:
+            pn.ParkingV2._enter = orig
+        return seen[0] if seen else None
+    a = turn_x(NEW_1112)
+    b = turn_x(dict(NEW_1112, front_axle_from_lidar_mm=-97.0))
+    c = turn_x(dict(NEW_1112, turn_ref='pair'))
+    d = turn_x(dict(NEW_1112, turn_ref='pair', front_axle_from_lidar_mm=-97.0))
+    assert None not in (a, b, c, d)
+    assert abs(a - b) <= 20.0 < abs(c - d)
+
+
+def test_measure_corner_from_points():
+    """1번 상자 차로 쪽 면 점들의 진행 방향 끝 = 모서리 (칸 가운데 기준 약 -410)."""
+    logic = pn.ParkingV2(dict(pn.DEFAULTS, turn_ref='corner'))
+    logic.px, logic.py = 0.0, 0.0
+    logic.pair_line = (1000.0, -600.0, 0.0, -1.0)              # 2번 칸 가운데 (1000, -600), 깊이 방향 -y
+    # 앞바퀴 = (210, 0). 1번 중심 x = 480, 차로 쪽 면 y = -600 + 161 = -439, 폭 220 -> x 370~590
+    pts = [(x - 210.0, -439.0) for x in range(380, 591, 15)] + [(590.0 - 210.0, -439.0 - d) for d in range(20, 200, 30)]
+    sc = logic._measure_corner({'yaw': 0.0, 'points': pts})
+    assert sc is not None and abs(sc - (-410.0)) <= 15.0
+
+
+def test_mission_sends_parking_lane_offset():
+    """11/12: 미션 노드가 주차 노드에 넘긴 뒤 차선 설정에 왼쪽 오프셋을 넣는다 (1초마다 다시 보내도 유지)."""
+    from autorace_mission.fsm import Inputs, MissionFSM
+    fsm = MissionFSM({'start_state': 'M4_PARKING', 'm4_direct': True, 'm4_target_offset_mm': 50.0})
+    cmd = fsm.step(Inputs(t=0.0, dist_mm=0.0))
+    assert cmd.source == 'parking' and cmd.lane.get('target_offset_mm') == 50.0
