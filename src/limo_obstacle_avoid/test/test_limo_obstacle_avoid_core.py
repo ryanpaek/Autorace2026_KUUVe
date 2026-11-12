@@ -158,6 +158,7 @@ def test_two_lane_exit_in_simulation():
     assert r['ok'] and r['right_side'] and not r['collided'], r
     p = AvoidParams()
     p.center_before_island = False                                  # 예전(옆 차로에서 기다림)이면 불가, 충돌·멈춤 없이 통과
+    p.center_force = False
     r = fork_sim.run(lay, p, 4.38, 'B', 1.0)
     assert not r['right_side'] and not r['collided'] and r['done']
 
@@ -364,3 +365,51 @@ def test_no_creep_when_lidar_also_blocks():
     pl = _stuck_beside(0.44)
     v, _ = pl.step(10.0)
     assert v == 0.0
+
+
+# ── 11/12 밤: M7 시작 약 4000 mm(섬 앞 2.07 m)에서 일단 2차선, 옆·앞 장애물이면 0.4 m 더 가서 ──
+def _pl_force(y_lane, rem):
+    p = AvoidParams()
+    p.center_before_island = False                  # 기존 '섬까지 다 비어야' 모으기는 빼고 이것만 봄
+    pl = AvoidPlanner(p)
+    pl.start(0.0, 0.0, 0.0, 0.0)
+    pl.pose.y = 0.52 * y_lane
+    pl.target = y_lane
+    pl.last_switch = -10.0
+    pl.pose.x = p.section_length - rem - p.robot_front
+    return pl
+
+
+def test_center_force_at_4000():
+    pl = _pl_force(1, 2.0)
+    pl.obs = [_confirmed(Obstacle(pl.pose.x + 1.5, pl.pose.x + 1.83, -0.11, 0.11))]   # 2차로 1.3 m 앞 (섬 전)
+    pl.step(10.0)
+    assert pl.target == 0
+    assert any('일단 2차선' in e for _, e in pl.events)
+
+
+def test_center_force_not_before_4000_or_when_exit_known():
+    pl = _pl_force(-1, 2.3)                          # 아직 4000 mm 전
+    pl.step(10.0)
+    assert pl.target == -1
+    pl = _pl_force(-1, 2.0)
+    pl.exit_pref = -1                                # 표지를 이미 앎 -> 출구 차로 그대로
+    pl.step(10.0)
+    assert pl.target == -1
+
+
+def test_center_force_waits_04_when_obstacle_beside():
+    pl = _pl_force(1, 2.05)
+    x0 = pl.pose.x
+    pl.obs = [_confirmed(Obstacle(x0 - 0.1, x0 + 0.23, -0.11, 0.11))]   # 2차로 바로 옆
+    pl.p.use_island = False
+    pl.step(10.0)
+    assert pl.target == 1
+    assert any('0.4m 더 가서' in e for _, e in pl.events)
+    pl.obs = []                                      # 지나감
+    pl.pose.x = x0 + 0.2
+    pl.step(10.5)
+    assert pl.target == 1                            # 아직 0.4 m 안 감
+    pl.pose.x = x0 + 0.41
+    pl.step(11.0)
+    assert pl.target == 0                            # 0.4 m 더 간 뒤 2차선으로
