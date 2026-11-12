@@ -63,6 +63,7 @@ class AvoidParams:
     use_island: bool = True           # 섬을 가상 장애물로 넣을지
     exit_lane: str = 'auto'           # 'auto' | 'A'(왼쪽 +1) | 'B'(오른쪽 -1)
     done_margin: float = 0.3          # 섬 시작 + 이만큼 지나고 차선에 붙으면 완료
+    done_max_psi_deg: float = 8.0     # 11/12 밤: 끝낼 때 차가 이보다 비스듬하면 조금 더 가며 바로잡고 끝냄 (차선 노드가 비스듬한 채 받아 차선을 벗어나던 것)
     # ── 차량 (LIMO PRO) ──
     robot_front: float = 0.20         # base_link → 앞 범퍼
     robot_rear: float = 0.16          # base_link → 뒤 범퍼
@@ -939,7 +940,8 @@ class AvoidPlanner:
 
         # ④ 끝났나?
         L = p.section_length
-        if (x > L + p.done_margin and in_lane) or x > L + p.island_length:
+        settled = in_lane and abs(math.degrees(self.pose.psi)) <= p.done_max_psi_deg
+        if (x > L + p.done_margin and settled) or x > L + p.island_length:
             self.state = 'DONE'
             self.events.append((x, f'완료 (차선 {self.target:+d})'))
             return 0.0, 0.0

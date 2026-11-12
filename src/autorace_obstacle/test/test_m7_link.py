@@ -636,3 +636,16 @@ def test_state_reports_distance_to_island_tip():
     assert link.state()['m7_to_tip_mm'] is None
     link.pos = 3384.0
     assert link.state()['m7_to_tip_mm'] == 1000
+
+
+def test_sign_off_waits_until_settled_in_side_lane():
+    """11/12 밤: 표지를 지났어도 차가 비스듬하거나(>8°) 아직 차로 중심 밖이면 끄지 않고, 자리 잡으면 끈다."""
+    link = running_link()
+    link.on_avoid_state({'state': 'RUN', 'target': -1, 'now_lane': -1, 'psi_deg': -20.0, 'y': -0.40})
+    for _ in range(4):
+        link.on_detections(det(True))
+    for _ in range(5):
+        link.on_detections(det(False))
+    assert ('disable',) not in link.update(5.0, mission(17973.0 - 600.0), {})
+    link.on_avoid_state({'state': 'RUN', 'target': -1, 'now_lane': -1, 'psi_deg': -3.0, 'y': -0.50})
+    assert ('disable',) in link.update(5.1, mission(17973.0 - 590.0), {})
