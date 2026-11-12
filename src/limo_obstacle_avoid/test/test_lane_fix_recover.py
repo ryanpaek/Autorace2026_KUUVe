@@ -366,3 +366,21 @@ def test_lane_keep_blend_single_line():
     pl.lane_last, pl.lane_t = {'status': 'R', 'kappa': -1.0}, 0.0
     w = pl.control(0.2, 0.05, True)
     assert pl.blend_used and w == pytest.approx(0.2 * 0.7 * -1.0, abs=0.02)
+
+
+def test_no_flip_back_to_lane_just_left():
+    """11/12 밤 실차: -1 차로에서 0으로 옮기자마자 0.4초 뒤 다시 -1로 (반복). 방금 떠난 차로로 1.5초 안에는 안 돌아감."""
+    from limo_obstacle_avoid.avoid_core import Obstacle
+    p = AvoidParams()
+    pl = AvoidPlanner(p)
+    pl.start(0.0, 0.0, 0.0, 0.0)
+    pl.pose.x, pl.pose.y = 1.0, -0.50
+    pl.target, pl.flip_from, pl.last_switch = 0, -1, 9.8        # 방금 -1 -> 0 으로 바꿈
+    o = Obstacle(2.0, 2.32, -0.11, 0.11)                        # 0 차로 앞 0.8 m (막혔다고 보지만 정말 붙은 건 아님)
+    o2 = Obstacle(1.6, 1.92, 0.41, 0.63)                        # +1 차로도 막힘 (이어서 +1로 가는 것도 안 됨)
+    o.hits = o2.hits = p.confirm_hits
+    pl.obs = [o, o2]
+    pl.step(10.0)
+    assert pl.target == 0                                       # 예전: 바로 -1로 되돌아감
+    pl.step(11.5)
+    assert pl.target == -1                                      # 1.5초 지나면 허용
