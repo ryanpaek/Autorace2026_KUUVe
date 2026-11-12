@@ -34,7 +34,7 @@ DEFAULT_PARAMS = {
     'base_speed': 0.30,          # m/s, 규정 권장 0.3~0.4
     'slow_speed': 0.20,          # 서행 (규정 최대 0.2). 11/09 팀 결정: 0.2
     'approach_speed': 0.18,      # 정지선·장애물 접근 속도
-    'm7_speed': 0.10,            # 11/12: M7(횡단보도 끝 코너 ~ 3차선 회피) 차선 주행 속도. 회피 노드 속도도 0.10 (avoid_params.yaml)
+    'm7_speed': 0.20,            # 11/12: M7(횡단보도 끝 코너 ~ 3차선 회피) 차선 주행 속도. 회피 노드 속도도 0.20 (avoid_params.yaml)
     'vote_window': 8,            # 다수결 창 (인식 프레임 수)
     'vote_need': 5,
     'det_conf': 0.5,
