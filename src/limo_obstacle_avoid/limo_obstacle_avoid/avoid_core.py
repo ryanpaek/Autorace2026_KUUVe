@@ -83,6 +83,11 @@ class AvoidParams:
     cluster_min_pts: int = 3          # 점이 이보다 적으면 노이즈
     merge_dist: float = 0.20          # 같은 장애물로 합치는 거리
     max_obs_width: float = 0.45       # 장애물 하나의 최대 폭 (LIMO 0.22)
+    # 11/12 밤 실차(m7_stop_watch): 같은 LIMO를 여러 번 본 것을 합칠 때 상자를 합집합으로 키워서, 위치 추정이 몇 cm씩
+    #   흔들리면 폭이 0.45 m까지 커지고(실제 0.22) 옆 차로를 침범 -> 옆 차로에서 '가는 길 막힘'으로 6초 넘게 멈춤.
+    #   합쳐서 merge_max_w(옆)·merge_max_len(앞뒤)을 넘으면 최근 관측을 중심으로 그 크기로 줄인다 (예전: 따로 새 장애물을 만들어 겹친 상자 3개)
+    merge_max_w: float = 0.30
+    merge_max_len: float = 0.70       # 앞뒤는 안 줄임(= max_obs_len). 0.45로 줄이면 드리프트 복합 조건 40 -> 33
     max_obs_len: float = 0.70         # 한 번에 본 덩어리가 앞뒤로 이보다 길면 벽·트랙 테두리로 보고 버림 (LIMO 0.32)
     min_obs_size: float = 0.08        # 덩어리 가로·세로 중 긴 쪽이 이보다 작으면 버림 (기둥·다리. 리모 면 0.22)
     obs_min_len: float = 0.33         # 앞면만 보여도 이 길이만큼 차가 있다고 가정 (LIMO 길이)
@@ -143,6 +148,13 @@ class AvoidParams:
     side_wait_m: float = 0.30
     side_wait_look: float = 1.00      #   옮기는 길을 이만큼 굴려 봐서 옆 장애물에 닿으면 (change_len과 같게)
     side_wait_max: int = 3            #   한 번 옮길 때 최대 횟수 (그 뒤엔 예전처럼 끝까지 꺾기)
+    # 11/12 밤 실차 요청: 막혀서(끝까지 꺾어도 못 빠짐) 서게 되면, 쌓인 지도 말고 '이번 라이다 한 바퀴'로 똑바로 creep_m 앞이
+    #   비었는지 보고 비었으면 creep_speed로 creep_m 전진한 뒤 다시 판단 (지도 상자가 커져 옆 장애물에 막힌 것으로 서던 것).
+    #   한 번 멈춤에 최대 creep_max번. 범퍼 앞 비상(emergency)이면 안 함
+    creep: bool = True
+    creep_m: float = 0.30
+    creep_speed: float = 0.15
+    creep_max: int = 6
     stop_dist: float = 0.30           # 지금 조향대로 이만큼 더 가면 차체가 부딪힐 때만 정지(→ 후진). 옆 차로·옆에 붙은 장애물은 안 봄
     # 11/12: 막혔을 때 바로 서서 후진하지 말고 먼저 조향을 끝까지 꺾어 빠져 본다. 끝까지 꺾은 길로도
     #   squeeze_min_dist 안에서 부딪히면(장애물이 0.2 m까지 붙음) 그때만 서고 예전처럼 후진·탈출
@@ -582,13 +594,22 @@ class AvoidPlanner:
         for (x0, x1, y0, y1) in clusters:
             merged = False
             for o in self.obs:
+                if o.virtual:
+                    continue
                 if x0 <= o.xmax + md and x1 >= o.xmin - md and y0 <= o.ymax + md and y1 >= o.ymin - md:
                     ny0, ny1 = min(o.ymin, y0), max(o.ymax, y1)
+                    nx0, nx1 = min(o.xmin, x0), max(o.xmax, x1)
                     if ny1 - ny0 > p.max_obs_width:
                         continue
-                    if max(o.xmax, x1) - min(o.xmin, x0) > p.max_obs_len:   # 벽 조각이 이어 붙어 길어지는 것 방지
+                    if nx1 - nx0 > p.max_obs_len:   # 벽 조각이 이어 붙어 길어지는 것 방지
                         continue
-                    o.xmin, o.xmax = min(o.xmin, x0), max(o.xmax, x1)
+                    if ny1 - ny0 > p.merge_max_w:          # 합집합으로 커짐 -> 최근 관측 중심, merge_max_w 폭
+                        c, h = 0.5 * (y0 + y1), 0.5 * max(p.merge_max_w, y1 - y0)
+                        ny0, ny1 = c - h, c + h
+                    if nx1 - nx0 > p.merge_max_len:
+                        c, h = 0.5 * (x0 + x1), 0.5 * max(p.merge_max_len, x1 - x0)
+                        nx0, nx1 = c - h, c + h
+                    o.xmin, o.xmax = nx0, nx1
                     o.ymin, o.ymax = ny0, ny1
                     o.hits += 1
                     o.seen = True
@@ -1084,6 +1105,15 @@ class AvoidPlanner:
             if out is not None:
                 self.stuck_since = None
                 return out
+        if self.blocked and not self.emergency:
+            out = self._creep_step(t)
+            if out is not None:
+                self.stuck_since = None
+                return out
+        else:
+            self.creep = None
+            if not self.blocked:
+                self.creep_n = 0
         if self.blocked or self.emergency:
             v = 0.0
             # 서 있으면 상황이 안 바뀐다 → 잠시 뒤 후진하며 크게 꺾어 다시 잡기 (횟수 제한)
@@ -1127,6 +1157,30 @@ class AvoidPlanner:
             return 0.0, 0.0
 
         return v, self.control(v, t, in_lane)
+
+    def _creep_step(self, t):
+        """막힘: 이번 스캔 덩어리로만 똑바로 creep_m(+여유) 앞이 비었으면 천천히 전진 (위 creep 설명)"""
+        p = self.p
+        if not p.creep:
+            return None
+        x = self.pose.x
+        cr = getattr(self, 'creep', None)
+        if cr is not None and x - cr['x0'] >= p.creep_m:
+            self.creep = cr = None                      # 다 감 -> 다시 판단 (아직 막혔으면 아래에서 또)
+        raw = [Obstacle(*c) for c in (getattr(self, 'last_clusters', None) or [])]
+        if cr is not None and self.path_hit(raw, 0.0, p.stop_dist, fixed=True) < INF:
+            self.creep = None                           # 가는 중 라이다로 앞이 막힘 -> 정지
+            return None
+        if cr is None:
+            if getattr(self, 'creep_n', 0) >= p.creep_max:
+                return None
+            if self.path_hit(raw, 0.0, p.creep_m + p.stop_dist, fixed=True) < INF:
+                return None                             # 지금 라이다로도 앞이 막힘 -> 정말 막힘
+            self.creep_n = getattr(self, 'creep_n', 0) + 1
+            self.creep = {'x0': x}
+            self.events.append((x, f'막힘(지도)인데 지금 라이다로는 앞 {p.creep_m:.2f}m 빔 -> 천천히 전진 '
+                                   f'({self.creep_n}/{p.creep_max})'))
+        return p.creep_speed, 0.0
 
     def _side_wait_step(self, obs, t):
         """옮기는 초반(아직 원래 차로 쪽)에 옮기는 길이 가려는 차로 옆 장애물에 닿으면 원래 차로로 side_wait_m 직진"""
@@ -1340,7 +1394,7 @@ class AvoidPlanner:
             'psi_deg': round(math.degrees(self.pose.psi), 1),
             'target': self.target,
             'now_lane': self.nearest_lane(self.pose.y),
-            'emergency': self.emergency, 'blocked': self.blocked, 'squeezing': getattr(self, 'squeezing', False), 'edge_guard': getattr(self, 'edge_guarded', False),
+            'emergency': self.emergency, 'blocked': self.blocked, 'creeping': getattr(self, 'creep', None) is not None, 'squeezing': getattr(self, 'squeezing', False), 'edge_guard': getattr(self, 'edge_guarded', False),
             'hit_m': None if self.hit_dist == INF else round(self.hit_dist, 2),
             'recovering': self.rec is not None or self.rb is not None, 'recover_n': self.rec_n,
             'rollback': self.rb is not None, 'rollback_m': round(self.rollback_m, 2),
