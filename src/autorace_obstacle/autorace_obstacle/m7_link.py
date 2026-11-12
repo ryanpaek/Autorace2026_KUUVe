@@ -96,6 +96,8 @@ class M7LinkParams:
     off_sign_edge_px: float = 10.0      # 상자가 화면 좌우 끝 이만큼 안에 닿으면 '가장자리' (검출기가 화면 밖은 잘라냄. 0 = 안 씀)
     off_sign_edge_frames: int = 2       # 가장자리에서 본 뒤 이만큼 연속 안 보이면 '화면 밖으로 나감' (한 번 놓친 것과 구분)
     off_sign_img_w: float = 640.0       # 카메라 가로 화소
+    off_settle_deg: float = 8.0         # 11/12 밤: 표지로 끌 때 차가 이보다 비스듬하면 기다림
+    off_settle_dy_m: float = 0.08       #   목표 차로 중심에서 이보다 떨어져 있어도 기다림
     off_sign_after_mm: float = 400.0    # 지나감을 안 뒤 이만큼 더 가서 끔 (화각 70°·표지가 섬 앞 끝이면 섬 앞 끝 약 25 cm 전. 실차로 맞춤)
     off_gate_mm: float = 1500.0         # 섬 앞 끝까지 이 안일 때만 표지로 끔 (멀리서 가려져 사라지는 오판 방지)
 
@@ -178,6 +180,8 @@ class M7Link:
         self.pos = None              # 마지막으로 계산한 앞바퀴 - 시작선 (mm), 진단용
         self.enable_t = None
         self.section_m = None
+        self.avoid_psi = None        # /avoid/state psi_deg (차로 방향 기준 차 방향)
+        self.avoid_dy = None         # 목표 차로 중심에서 옆으로 떨어진 거리 (m)
         self.heading_forced = False
         self.how = None              # 'line' | 'route' | 'distance'
         self.fork_sent = None
@@ -239,6 +243,10 @@ class M7Link:
         self.avoid_running = st.get('state') == 'RUN'
         if 'target' in st:
             self.avoid_target = st.get('target')
+        if 'psi_deg' in st:
+            self.avoid_psi = st.get('psi_deg')
+        if 'y' in st and st.get('target') is not None:
+            self.avoid_dy = abs(float(st['y']) - 0.52 * float(st['target']))
         if 'now_lane' in st:
             self.avoid_lane = st.get('now_lane')
             if self.phase in ('armed', 'running') and self.avoid_lane in LANE_NUMBER:
@@ -485,6 +493,13 @@ class M7Link:
         lane = self.avoid_lane if self.avoid_lane is not None else self.avoid_target
         if lane in (None, 0):
             return None                      # 아직 가운데 차로: 섬에 부딪히므로 끄지 않음
+        # 11/12 밤: 옮기는 중(목표 차로 밖)이거나 비스듬하면 아직 끄지 않음 -> 차선 노드가 비스듬한 채 받으면 차선을 벗어남
+        if self.avoid_target is not None and self.avoid_target != self.avoid_lane:
+            return None
+        if self.avoid_psi is not None and abs(self.avoid_psi) > self.p.off_settle_deg:
+            return None
+        if self.avoid_dy is not None and self.avoid_dy > self.p.off_settle_dy_m:
+            return None
         return why
 
     def _check_hold(self, t: float) -> None:

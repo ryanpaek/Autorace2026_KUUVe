@@ -344,3 +344,17 @@ def test_choose_ignores_obstacle_being_passed_beside():
     assert pl.choose(1, obs) == 0
     p.clear_rollout = False
     assert pl.choose(1, obs) is None                 # 예전: 옆 장애물 때문에 못 고름
+
+
+def test_done_waits_until_straight():
+    """섬 끝 + done_margin을 지나도 차가 8° 넘게 비스듬하면 아직 안 끝냄 (차선 노드가 비스듬한 채 받지 않게)."""
+    pl = running(0.52, math.radians(15.0))
+    pl.target = 1
+    pl.pose.x = pl.p.section_length + pl.p.done_margin + 0.05
+    pl.step(10.0)
+    assert pl.state == 'RUN'
+    ok = running(0.52, math.radians(3.0))
+    ok.target = 1
+    ok.pose.x = ok.p.section_length + ok.p.done_margin + 0.05
+    ok.step(10.0)
+    assert ok.state == 'DONE'
