@@ -181,6 +181,10 @@ def main():
                     rec = s['recover_n']
                     print(f'{ts(t)}  [avoid] 탈출 {rec}번째 (rollback={s.get("rollback")} x={s.get("x")} '
                           f'y={s.get("y")} target={s.get("target")} hit={s.get("hit_m")})')
+                    if s.get('lane_why'):                       # 11/12: 왜 다른 차로로 못 갔나
+                        print(f'             차로 판단: {s["lane_why"]}')
+                    if s.get('obs_near') is not None:
+                        print(f'             앞 장애물 [앞 m, 옆 y 범위 m]: {s["obs_near"]}  (차로 중심 y = +0.52 / 0 / -0.52)')
                 em += bool(s.get('emergency'))
         if rec >= 3:
             warn.append(f'M7에서 탈출(후진) {rec}번: 막힘 반복')
