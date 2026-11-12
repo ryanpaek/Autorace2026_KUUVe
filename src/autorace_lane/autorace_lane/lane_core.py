@@ -219,7 +219,7 @@ class LaneParams:
     jump_max_frames: int = 6          # 이만큼 연속으로 튀면 새 값을 받아들인다
     lost_hold_frames: int = 30        # 차선을 놓친 뒤 버티는 프레임 수 (30fps면 1초)
     lost_corner_frames: int = 120     # 11/12 밤: M7 직전 코너 미리보기가 있을 때 선을 놓쳐도 코너 곡률로 버티는 프레임 수
-    route_corner_weight: float = 0.6  # 11/12 밤: M7 직전 코너에서 선이 보여도 코너 곡률을 섞는 비율
+    route_corner_weight: float = 0.8  # 11/12 밤: M7 직전 코너에서 선이 보여도 코너 곡률을 섞는 비율 (실차 60~70도 뒤 직진 -> 0.6에서 0.8)
     lost_decay: float = 0.95          # IMU가 없을 때 마지막 곡률의 프레임당 감쇠
     # 헤딩 유지 (IMU)
     yaw_kp: float = 1.5               # 헤딩 오차 1 rad당 요레이트 명령 (rad/s)

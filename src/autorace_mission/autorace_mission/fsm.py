@@ -92,6 +92,8 @@ DEFAULT_PARAMS = {
     'm7_corner_dir': -1.0,           # 오른쪽 코너 = 곡률 음수
     'm7_corner_start_mm': 330.0,     # M7 진입(횡단보도 끝 + 약 6 cm) -> 코너 시작
     'm7_corner_done_deg': 85.0,      # IMU로 이만큼 돌면 끝 (0이면 이 기능 끔)
+    'm7_corner_lead_mm': 300.0,      # 차선 노드 route_ff_preview_mm 와 같게
+    'm7_corner_give_up_mm': 1500.0,  # 코너 시작 + 호 길이 + 이만큼 가도 IMU가 다 돈 걸 못 보면 그만 (예전 800)
     'm7_corner_plain_lane': True,    # 코너 동안은 3차선 설정 대신 보통 차선 설정 (흰 선을 차선으로 보지 않음)
     'm8_corner_turn_deg': 75.0,      # 0 = 안 씀
     'm8_corner_straight_deg': 4.0,
@@ -313,16 +315,19 @@ class MissionFSM:
         turned = abs(math.atan2(math.sin(yaw - yaw0), math.cos(yaw - yaw0)))
         since = dist_mm - d0
         arc = r * math.pi / 2.0
-        if turned >= math.radians(p['m7_corner_done_deg']) or since > p['m7_corner_start_mm'] + arc + 800.0:
+        if turned >= math.radians(p['m7_corner_done_deg']) or since > p['m7_corner_start_mm'] + arc + p['m7_corner_give_up_mm']:
             self.m7c = None                              # 다 돎 (또는 너무 지나 IMU를 못 믿음) -> 끝
             self.log.append(f'M7 corner preview off (turned {math.degrees(turned):.0f} deg, {since:.0f}mm)')
             return None
-        if turned < math.radians(5.0):
-            start, end = p['m7_corner_start_mm'] - since, p['m7_corner_start_mm'] - since + arc
-        else:
-            start, end = -1.0, r * (math.pi / 2.0 - turned)
         k = p['m7_corner_dir'] * 1000.0 / r
-        return [round(k, 4) if start <= i * step_mm < end else 0.0 for i in range(n)]
+        if turned < math.radians(5.0):
+            # 차선 노드는 미리보기의 route_ff_preview_mm(300) 앞 값을 쓴다 -> 그만큼 밀어 코너 시작에서 꺾게 (일찍 꺾어 안쪽을 자르지 않게)
+            start = p['m7_corner_start_mm'] - since + p['m7_corner_lead_mm']
+            return [round(k, 4) if i * step_mm >= start else 0.0 for i in range(n)]
+        # 11/12 밤 실차: 돌기 시작한 뒤에는 IMU로 다 돌 때까지 미리보기 전체를 코너 곡률로.
+        #   예전엔 '남은 호 길이'까지만 넣어서, 남은 각이 약 27° 아래로 줄면 차선 노드가 보는 300 mm 앞이 0이 되어
+        #   코너 돕기가 끊겼다 -> 60~70°만 돌고 직진 (실차 m7_live: 52~55°에서 멈춤)
+        return [round(k, 4)] * n
 
     def _anchor(self, name: Optional[str], approach: Optional['StopApproach'], rem: Optional[float]) -> None:
         """카메라로 본 선일 때만, 상태마다 선 하나당 한 번 위치 다시 잡기를 요청."""
