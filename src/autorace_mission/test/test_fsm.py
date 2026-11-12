@@ -424,3 +424,17 @@ def test_m7_corner_uses_plain_lane_config_until_turned():
     fsm.m7_corner_k(1500.0, _m.radians(-88.0))                   # 다 돎 -> 미리보기 끝
     cmd = fsm.step(Inputs(t=0.2, dist_mm=1500.0, yaw=_m.radians(-88.0), obstacle={}))
     assert cmd.lane.get('lane_color') == 'both' and cmd.lane.get('lane_width_mm') == 520.0
+
+
+def test_m8_corner_preview_after_m2():
+    """11/12 밤 실차: M2 끝 뒤 좌하단 코너에서 차선을 놓치고 멋대로 감 -> M2에서 넘어오면 같은 IMU 코너 미리보기 (연습 M8은 아님)."""
+    import math as _m
+    fsm = MissionFSM({'start_state': 'M2_FORK'})
+    fsm._goto('M8_CONES', Inputs(t=0.0, dist_mm=5000.0, yaw=0.0), 'fork B done')
+    k = fsm.m7_corner_k(5000.0, 0.0)                     # 진입 직후: 650 mm 뒤 코너 (+300 밈)
+    assert k[0] == 0.0 and k[9] == 0.0 and k[10] == pytest.approx(-1.5625, abs=1e-3)
+    assert all(v == pytest.approx(-1.5625, abs=1e-3) for v in fsm.m7_corner_k(5900.0, _m.radians(-30.0)))
+    assert fsm.m7_corner_k(6900.0, _m.radians(-86.0)) is None
+    practice = MissionFSM({'start_state': 'M2_FORK'})
+    practice._goto('M8_CONES', Inputs(t=0.0, dist_mm=0.0, yaw=0.0), 'manual')
+    assert practice.m7_corner_k(0.0, 0.0) is None

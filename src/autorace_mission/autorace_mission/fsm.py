@@ -92,7 +92,9 @@ DEFAULT_PARAMS = {
     'm7_corner_dir': -1.0,           # 오른쪽 코너 = 곡률 음수
     'm7_corner_start_mm': 330.0,     # M7 진입(횡단보도 끝 + 약 6 cm) -> 코너 시작
     'm7_corner_done_deg': 85.0,      # IMU로 이만큼 돌면 끝 (0이면 이 기능 끔)
-    'm7_corner_lead_mm': 300.0,      # 차선 노드 route_ff_preview_mm 와 같게
+    'm7_corner_lead_mm': 300.0,
+    'm8_corner_preview': True,       # 11/12 밤: M2 끝 뒤 좌하단 코너도 같은 IMU 코너 미리보기
+    'm8_corner_start_mm': 650.0,     # M8 진입(합류 끝 m2_merge_end) -> 코너 시작 (도면 20272 -> 20921)      # 차선 노드 route_ff_preview_mm 와 같게
     'm7_corner_give_up_mm': 1500.0,  # 코너 시작 + 호 길이 + 이만큼 가도 IMU가 다 돈 걸 못 보면 그만 (예전 800)
     'm7_corner_plain_lane': True,    # 코너 동안은 3차선 설정 대신 보통 차선 설정 (흰 선을 차선으로 보지 않음)
     'm8_corner_turn_deg': 75.0,      # 0 = 안 씀
@@ -289,8 +291,13 @@ class MissionFSM:
         if state == 'M7_OBSTACLE':
             # 횡단보도에서 넘어올 때만 (연습으로 set_state M7이면 이미 코너 뒤 직선에 놓음)
             use = self.p.get('m7_corner_done_deg', 85.0) > 0 and why not in ('manual', 'init') and inp.yaw is not None
-            self.m7c = (inp.yaw, inp.dist_mm) if use else None
+            self.m7c = (inp.yaw, inp.dist_mm, 'M7_OBSTACLE', self.p['m7_corner_start_mm']) if use else None
         if state == 'M8_CONES':
+            # 11/12 밤 실차: M2 끝(합류) 뒤 좌하단 코너(R640 오른쪽 90°)에서도 차선을 놓치고(NONE->hold->stop) 멋대로 감
+            #   -> M7 직전 코너와 같은 IMU 코너 미리보기 (M2에서 넘어올 때만)
+            use = (self.p.get('m8_corner_preview', True) and self.p.get('m7_corner_done_deg', 85.0) > 0
+                   and why not in ('manual', 'init') and inp.yaw is not None)
+            self.m7c = (inp.yaw, inp.dist_mm, 'M8_CONES', self.p['m8_corner_start_mm']) if use else None
             # 앞 미션(M2)에서 넘어올 때만 코너 지킴. 연습으로 바로 M8(set_state)이면 이미 코너 뒤에 놓음
             use = self.p.get('m8_corner_turn_deg', 75.0) > 0 and why not in ('manual', 'init')
             self.m8_corner.start(inp.yaw if use else None, inp.dist_mm)
@@ -307,22 +314,24 @@ class MissionFSM:
         """M7 직전 코너 곡률 미리보기 (앞바퀴에서 0, step, 2step ... 앞, 1/m, 왼쪽 +). 코너가 아니면 None.
         아직 안 돌기 시작했으면(5° 미만) 진입 거리로 코너 시작을 잡고, 돌기 시작했으면 IMU로 남은 각만큼."""
         c = getattr(self, 'm7c', None)
-        if c is None or self.state != 'M7_OBSTACLE' or yaw is None:
+        if c is None or yaw is None or self.state != c[2]:
             return None
-        yaw0, d0 = c
+        if self.state == 'M8_CONES' and self.sub not in ('', 'approach'):
+            return None                                  # 라바콘 구간부터는 콘 따라가기
+        yaw0, d0, _, start_mm = c
         p = self.p
         r = p['m7_corner_r_mm']
         turned = abs(math.atan2(math.sin(yaw - yaw0), math.cos(yaw - yaw0)))
         since = dist_mm - d0
         arc = r * math.pi / 2.0
-        if turned >= math.radians(p['m7_corner_done_deg']) or since > p['m7_corner_start_mm'] + arc + p['m7_corner_give_up_mm']:
+        if turned >= math.radians(p['m7_corner_done_deg']) or since > start_mm + arc + p['m7_corner_give_up_mm']:
             self.m7c = None                              # 다 돎 (또는 너무 지나 IMU를 못 믿음) -> 끝
-            self.log.append(f'M7 corner preview off (turned {math.degrees(turned):.0f} deg, {since:.0f}mm)')
+            self.log.append(f'{self.state[:2]} corner preview off (turned {math.degrees(turned):.0f} deg, {since:.0f}mm)')
             return None
         k = p['m7_corner_dir'] * 1000.0 / r
         if turned < math.radians(5.0):
             # 차선 노드는 미리보기의 route_ff_preview_mm(300) 앞 값을 쓴다 -> 그만큼 밀어 코너 시작에서 꺾게 (일찍 꺾어 안쪽을 자르지 않게)
-            start = p['m7_corner_start_mm'] - since + p['m7_corner_lead_mm']
+            start = start_mm - since + p['m7_corner_lead_mm']
             return [round(k, 4) if i * step_mm >= start else 0.0 for i in range(n)]
         # 11/12 밤 실차: 돌기 시작한 뒤에는 IMU로 다 돌 때까지 미리보기 전체를 코너 곡률로.
         #   예전엔 '남은 호 길이'까지만 넣어서, 남은 각이 약 27° 아래로 줄면 차선 노드가 보는 300 mm 앞이 0이 되어
