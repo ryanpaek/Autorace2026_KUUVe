@@ -396,3 +396,19 @@ def test_cones_corner_guard_off_for_practice_start():
     fsm = MissionFSM({'start_state': 'M2_FORK', 'cones_source_ready': True})
     fsm._goto('M8_CONES', Inputs(t=0.0, dist_mm=0.0, yaw=0.0), 'manual')
     assert not fsm.m8_corner.active
+
+
+def test_m7_corner_preview_from_crosswalk_only():
+    """11/12 밤: 횡단보도에서 넘어온 M7은 코너를 IMU로 다 돌 때까지 R640 오른쪽 곡률을 미리보기로 낸다. 연습 set_state M7은 안 냄."""
+    import math as _m
+    fsm = MissionFSM({'start_state': 'M3_PEDESTRIAN'})
+    inp = Inputs(t=0.0, dist_mm=1000.0, yaw=0.0)
+    fsm._goto('M7_OBSTACLE', inp, 'left crosswalk')
+    k = fsm.m7_corner_k(1000.0, 0.0)                     # 진입 직후: 330 mm 뒤부터 코너
+    assert k[0] == 0.0 and k[4] == pytest.approx(-1.5625, abs=1e-3)
+    k = fsm.m7_corner_k(1600.0, _m.radians(-45.0))       # 45° 돎: 남은 45° 동안 (약 500 mm)
+    assert k[0] == pytest.approx(-1.5625, abs=1e-3) and k[4] != 0.0 and k[6] == 0.0
+    assert fsm.m7_corner_k(2200.0, _m.radians(-86.0)) is None    # 다 돎 -> 끝
+    manual = MissionFSM({'start_state': 'M3_PEDESTRIAN'})
+    manual._goto('M7_OBSTACLE', inp, 'manual')
+    assert manual.m7_corner_k(1000.0, 0.0) is None

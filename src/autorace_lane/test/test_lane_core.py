@@ -297,3 +297,18 @@ def test_lost_lane_follows_route_curvature(cfg, w, expect):
     out = run(f, synth.blank(cfg), frames=15, yaw=0.0)
     assert out.source == 'hold'
     assert out.kappa == pytest.approx(expect, abs=0.1)
+
+
+def test_m7_corner_preview_keeps_turning_when_lost(cfg):
+    """11/12 밤: M7 직전 코너(미션 노드가 m7_corner로 보냄)에서 선을 놓치면 직진(hold)·정지 대신 코너 곡률로 계속 돈다."""
+    f = LaneFollower(cfg, LaneParams(route_ff_weight_lost=0.8))
+    run(f, synth.straight_lane(cfg), yaw=0.0)
+    f.route_k = [-1.5625] * 14            # R640 오른쪽
+    f.route_step_mm = 100.0
+    f.route_corner = True
+    out = run(f, synth.blank(cfg), frames=60, yaw=0.0)   # lost_hold_frames(30)를 넘겨도
+    assert out.source == 'route' and out.speed_scale > 0.0
+    assert out.kappa == pytest.approx(-1.5625, abs=0.1)
+    f.route_corner = False                 # 코너가 아니면 예전대로 (오래 놓치면 정지)
+    out = run(f, synth.blank(cfg), frames=40, yaw=0.0)
+    assert out.source in ('hold', 'stop')
