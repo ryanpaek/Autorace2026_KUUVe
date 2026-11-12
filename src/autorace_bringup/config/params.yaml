@@ -73,6 +73,7 @@ mission_node:
     cones_gone_sec: 0.5                    # 이 시간 동안 0개면 라바콘 끝
     cones_min_mm: 500.0                    # 라바콘 모드로 이만큼 간 뒤부터 끝 판단
     m4_arm_before_mm: 800.0                # 주차 표지 못 봤을 때: 도면상 주차 앞 선 이만큼 앞부터 주차 노드가 선을 받음
+    m4_direct: true                        # 11/12: M4 들어오자마자 주차 노드에 넘김 (표지·도면 위치 안 기다림). 주차 노드 skip_wait_line과 같이
     fork_len_mm: 2300.0                    # 도면 기준, 모의맵 실측으로 확인
     fork_default: A
     stop_on_green_arrival: true
@@ -219,3 +220,6 @@ parking_node:
     car_min_size_mm: 150.0                 # 짝 찾기: 이보다 작은 덩어리 버림 (60 -> 150, 11/12). 주차 표지판 기둥이 1번 리모와 짝이 되면
                                            #   빈 칸(1번 앞)으로 들어감. 리모 옆면 220mm. 시뮬레이션: 기둥 8cm 2/12 -> 12/12, 대회 배치 12/12 그대로
     single_fallback: false                 # 짝 없이 오른쪽 물체 하나 보고 꺾기(V1 예비). 11/12 전체 주행: 표지판에 속아 1번 칸 충돌 -> 끔
+    skip_wait_line: true                   # 11/12: 흰 선 안 기다리고 바로 1·3번 짝 찾기 (mission_node m4_direct와 같이 켬/끔)
+    follow_max_direct_mm: 3500.0           # 짝 없이 이만큼 가면 멈춤 (도면: M4 시작 ~3.8m, 꺾는 곳 ~6.56m, 차선 끝 8.13m)
+    wait_blocked_before_pair: true         # 짝 찾기 전 앞이 막히면 주차를 끝내지 말고 서서 기다림

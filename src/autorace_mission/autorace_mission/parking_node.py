@@ -29,9 +29,11 @@
 
 흐름도
 ① WAIT_LINE: 차선 노드 명령을 넘기며 기다림 (armed = 주차 표지 봤거나 도면상 근처)
+│   ├─ skip_wait_line (11/12, 미션 노드 m4_direct와 같이): M4 들어오자마자 → FOLLOW (trigger=direct)
 │   └─ armed이고 (흰 선 보임 또는 1·3번 짝 연속 3번) → 주차 모드
 │
 ├─② FOLLOW: 차선 따라가기, 왼쪽 차선과 8cm (target_offset_mm 50)
+│   ├─ 짝 찾기 전 앞이 막힘 → 서서 기다림 (wait_blocked_before_pair)
 │   ├─③ 라이다: 오른쪽 리모 두 대 짝 찾기 (사이 약 104cm) → 중점 = 목표 칸 가운데
 │   │   └─ 중점이 앞바퀴보다 32cm 앞에 오면 → PAUSE
 │   └─ (예비, 기본 끔 single_fallback) 짝 못 찾고 리모만 한 물체가 앞바퀴 옆 → EXTRA: 0.2m 더 → PAUSE
@@ -410,6 +412,14 @@ class ParkingV2:
         by = self.py + self.p['body_center_from_rear_mm'] * math.sin(yaw)
         return -(bx - cx) * uy + (by - cy) * ux
 
+    @staticmethod
+    def _pair_src(inp):
+        """짝 찾기용 덩어리. 크기로 거른 목록이 비어 있어도 그대로 쓴다.
+        (11/12: 'clusters_pair or clusters'였을 때 거른 목록이 비면 거르기 전 목록(표지판 기둥 포함)으로 돌아가
+        기둥 + 반쯤 보인 1번이 짝이 됨 -> 1번 앞 빈 곳으로 들어감)"""
+        cp = inp.get('clusters_pair')
+        return inp['clusters'] if cp is None else cp
+
     def _guard_hit(self, inp):
         """옆 감시: side_guard_mm보다 가까우면 True (칸 가운데를 알 때만)."""
         p = self.p
@@ -541,14 +551,21 @@ class ParkingV2:
             # armed: 미션 노드가 주차 표지를 봤거나 도면상 주차 앞 선 근처 (/mission/state parking_armed)
             # 11/10: 표지를 흰 선 지난 뒤에 확정하면 선을 놓친다 -> 오른쪽 두 리모 짝(1·3번)을 연속으로 보면 그것도 시작 신호.
             # 짝은 같은 줄 두 대가 약 104cm 떨어져야 생겨서, 커브 등에 한 대만 서 있는 리모로는 안 켜진다.
+            if p['skip_wait_line']:
+                # 11/12: M4 들어오면(미션 노드 m4_direct) 흰 선 없이 바로 짝 찾기 (꺾는 시점은 원래도 짝 중점 기준)
+                self.trigger = 'direct'
+                self.lane_cfg = {'target_offset_mm': p['target_offset_mm']}
+                self._enter('FOLLOW', inp)
             armed = inp.get('armed', True)
-            seen = (p['pair_trigger'] and armed and find_pair(
-                inp.get('clusters_pair') or inp['clusters'], p['side_far_mm'], p['pair_dist_mm'],
+            seen = self.phase == 'WAIT_LINE' and (p['pair_trigger'] and armed and find_pair(
+                self._pair_src(inp), p['side_far_mm'], p['pair_dist_mm'],
                 p['pair_tol_mm']) is not None)
             self.trig_n = self.trig_n + 1 if seen else 0
             by_line = moved >= p['ignore_mm'] and lines and armed
             by_pair = self.trig_n >= p['pair_trigger_frames']
-            if by_line or by_pair:
+            if self.phase != 'WAIT_LINE':
+                pass
+            elif by_line or by_pair:
                 self.trigger = 'line' if by_line else 'pair'
                 self.lane_cfg = {'target_offset_mm': p['target_offset_mm']}
                 self._enter('FOLLOW', inp)
@@ -558,8 +575,12 @@ class ParkingV2:
         if self.phase == 'FOLLOW':          # ② 왼쪽 붙어 차선 따라가기, ③ 오른쪽 리모 찾기
             moved = inp['dist_mm'] - self.d_phase
             if inp['blocked']:
+                if p['wait_blocked_before_pair'] and self.pair_line is None:
+                    # 11/12: 짝 찾기 전(주차 칸 전 직선)에 앞이 막히면 끝내지 말고 서서 기다림 (사람 발·물건)
+                    return self._out(0.0, 0.0)
                 return self._done('BLOCKED', inp)
-            pair = find_pair(inp.get('clusters_pair') or inp['clusters'], p['side_far_mm'], p['pair_dist_mm'],
+            follow_max = p['follow_max_direct_mm'] if self.trigger == 'direct' else p['follow_max_mm']
+            pair = find_pair(self._pair_src(inp), p['side_far_mm'], p['pair_dist_mm'],
                              p['pair_tol_mm'])
             if pair is not None:                       # ③ 두 리모 짝 -> 칸 가운데 선 (평균)
                 mx, my, vx, vy = pair
@@ -598,7 +619,7 @@ class ParkingV2:
             if not p['single_fallback']:
                 # 11/12: 전체 주행에서 주차 표지판(입구 오른쪽)을 리모로 보고 EXTRA -> 일찍 꺾어 1번 칸에 충돌.
                 # 대회는 칸 양옆에 리모가 늘 있어(규정: 최소 2대) 짝이 생긴다 -> 한 물체만 보고 꺾지 않는다.
-                if moved >= p['follow_max_mm']:
+                if moved >= follow_max:
                     return self._done('FAIL_NO_CAR', inp)
                 return self._out(inp['lane_v'], None)
             # (켰을 때) 한 물체 예비 규칙: 리모만 한 크기 덩어리만 (표지판 기둥·사람 다리 제외)
@@ -611,7 +632,7 @@ class ParkingV2:
                       for x, _ in right)
             if self.seen_ahead and hit:
                 self._enter('EXTRA', inp)
-            elif moved >= p['follow_max_mm']:
+            elif moved >= follow_max:
                 return self._done('FAIL_NO_CAR', inp)
             else:
                 return self._out(inp['lane_v'], None)
@@ -806,6 +827,9 @@ DEFAULTS = {
     # 사람 다리·라바콘(약 60~100)은 못 거름 -> 주차 구역 옆에 사람이 서 있지 않게
     'car_min_size_mm': 60.0,
     'side_far_mm': 1300.0,     # ③ 오른쪽 리모 찾는 거리 (앞줄 약 0.4m, 뒷줄 약 1.0m)
+    'skip_wait_line': False,   # 11/12: true면 WAIT_LINE 건너뛰고 바로 FOLLOW(짝 찾기). 미션 노드 m4_direct와 같이 켬 (params)
+    'follow_max_direct_mm': 3500.0,  # 바로 시작했을 때 짝 없이 이만큼 가면 멈춤. 도면: M4 시작 약 3.8m -> 꺾는 곳 6.56m, 차선 끝 8.13m
+    'wait_blocked_before_pair': True,  # 짝 찾기 전 앞이 막히면 BLOCKED로 끝내지 말고 서서 기다림
     'single_fallback': False,  # 짝 없이 오른쪽 물체 하나만 보고 꺾기 (V1 방식). 11/12: 표지판에 속아 1번 칸 충돌 -> 기본 끔
     'single_min_size_mm': 150.0,  # 켰을 때 이보다 작은 덩어리는 무시 (리모 옆면 220mm)
     'extra_mm': 200.0,         # (추가) 리모 옆 확인 후 더 갈 거리. 0 = 캡틴 원래 계획 (시뮬레이션: 0이면 0점)

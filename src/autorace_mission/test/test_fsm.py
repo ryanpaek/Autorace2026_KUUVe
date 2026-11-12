@@ -396,3 +396,11 @@ def test_cones_corner_guard_off_for_practice_start():
     fsm = MissionFSM({'start_state': 'M2_FORK', 'cones_source_ready': True})
     fsm._goto('M8_CONES', Inputs(t=0.0, dist_mm=0.0, yaw=0.0), 'manual')
     assert not fsm.m8_corner.active
+
+
+def test_parking_direct_hands_over_at_m4_start():
+    """11/12 m4_direct: 표지도 없고 도면상 앞 선에서 멀어도 M4 들어오자마자 주차 노드에 넘긴다."""
+    fsm = MissionFSM({'start_state': 'M4_PARKING', 'route_points': {'m4_pre_line': 5000.0}, 'm4_direct': True})
+    cmd = fsm.step(Inputs(t=0.0, dist_mm=0.0, route_s=3000.0, confirmed_classes={}))
+    assert cmd.source == 'parking' and fsm.parking_armed
+    assert cmd.lane['speed'] == fsm.p['slow_speed']

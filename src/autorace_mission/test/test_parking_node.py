@@ -380,3 +380,56 @@ def test_single_fallback_ignores_small_objects_when_enabled():
                                  'clusters': [(x, -400.0)], 'clusters_pair': [], 'clusters_single': []})
         phases.add(info['phase'])
     assert 'EXTRA' not in phases
+
+
+def _direct_logic(**over):
+    p = dict(pn.DEFAULTS); p['skip_wait_line'] = True; p.update(over)
+    return pn.ParkingV2(p)
+
+
+def test_skip_wait_line_goes_follow_without_line():
+    """11/12: skip_wait_line이면 흰 선·짝 없이 바로 FOLLOW (trigger=direct), 왼쪽 붙기 시작."""
+    logic = _direct_logic()
+    base = {'yaw': 0.0, 'lane_v': 0.2, 'lane_w': 0.0, 'end_lines_mm': [], 'blocked': False, 'armed': False,
+            'stoplines_mm': [], 'clusters': []}
+    _, _, info = logic.step({**base, 't': 0.0, 'dist_mm': 0.0})
+    assert info['phase'] == 'FOLLOW' and info['trigger'] == 'direct'
+    assert logic.lane_cfg == {'target_offset_mm': pn.DEFAULTS['target_offset_mm']}
+
+
+def test_direct_no_pair_stops_after_follow_max_direct():
+    """짝 없이 follow_max_direct_mm(3.5m)를 가면 FAIL_NO_CAR. 그 전(2.5m)에는 안 멈춤."""
+    logic = _direct_logic()
+    base = {'yaw': 0.0, 'lane_v': 0.2, 'lane_w': 0.0, 'end_lines_mm': [], 'blocked': False,
+            'stoplines_mm': [], 'clusters': []}
+    info = None
+    for i in range(0, 200):
+        d = i * 20.0
+        _, _, info = logic.step({**base, 't': i * 0.1, 'dist_mm': d})
+        if d == 3000.0:
+            assert info['phase'] == 'FOLLOW'
+        if info['phase'] == 'DONE':
+            break
+    assert info['result'] == 'FAIL_NO_CAR' and 3480.0 <= d <= 3560.0
+
+
+def test_blocked_before_pair_waits_instead_of_ending():
+    """짝 찾기 전에 앞이 막히면 BLOCKED로 끝내지 않고 서서 기다렸다가 다시 감."""
+    logic = _direct_logic()
+    base = {'yaw': 0.0, 'lane_v': 0.2, 'lane_w': 0.0, 'end_lines_mm': [], 'stoplines_mm': [], 'clusters': []}
+    logic.step({**base, 't': 0.0, 'dist_mm': 0.0, 'blocked': False})
+    for i in range(1, 10):
+        v, _, info = logic.step({**base, 't': i * 0.1, 'dist_mm': 100.0, 'blocked': True})
+        assert info['phase'] == 'FOLLOW' and v == 0.0
+    v, _, info = logic.step({**base, 't': 1.1, 'dist_mm': 100.0, 'blocked': False})
+    assert info['phase'] == 'FOLLOW' and v > 0.0
+
+
+def test_empty_filtered_pair_list_does_not_fall_back_to_raw():
+    """11/12 버그: 크기로 거른 목록(clusters_pair)이 비면 거르기 전 목록으로 돌아가 기둥 + 1번이 짝이 됐음."""
+    logic = _direct_logic()
+    base = {'yaw': 0.0, 'lane_v': 0.2, 'lane_w': 0.0, 'end_lines_mm': [], 'stoplines_mm': [], 'blocked': False}
+    raw = [(200.0, -420.0), (1240.0, -420.0)]      # 기둥(작음) + 1번, 사이 1040mm -> 거르기 전이면 짝
+    for i in range(10):
+        _, _, info = logic.step({**base, 't': i * 0.1, 'dist_mm': i * 10.0, 'clusters': raw, 'clusters_pair': []})
+    assert info['phase'] == 'FOLLOW' and logic.pair_line is None

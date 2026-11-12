@@ -106,6 +106,9 @@ DEFAULT_PARAMS = {
     # M4 주차: 주차 표지(parking)를 보면 주차 노드가 앞 선을 받기 시작한다 (서지 않고 서행으로 진입).
     # 표지를 못 봐도 도면상 주차 앞 선 m4_arm_before_mm 앞부터는 받는다 (2순위). 경로 지도가 없으면 항상 받음
     'm4_arm_before_mm': 800.0,
+    # 11/12: true면 M4에 들어오자마자 주차 노드에 넘긴다 (표지·도면 위치를 안 기다림). 주차 노드가 1·3번 짝을 찾아 시작.
+    # 표지 인식 실패 + 도면 위치 틀어짐이면 주차 노드가 IDLE인 채 지나가던 문제 (params에서 켬)
+    'm4_direct': False,
     'stop_on_green_arrival': True,  # 도착 때 녹색이어도 일단 서고 녹색 확인 후 출발 (안전 기본값)
     'green_go_delay_sec': 0.3,
     # 도면 경로 지도 (track_route.yaml). mission_node가 points를 넣어 준다.
@@ -684,6 +687,9 @@ class MissionFSM:
         if inp.parking.get('done', False):
             self._next(inp, 'parked')
             return Command('stop', self._lane(0.0))
+        if not self.parking_armed and self.p.get('m4_direct', False):
+            self.parking_armed = True
+            self._sub('armed', inp, 'direct (M4 start)')
         if not self.parking_armed:
             near = self._past(inp, 'm4_pre_line', -self.p['m4_arm_before_mm'])
             # 표지(명령) 1순위, 도면상 앞 선 근처 2순위. 경로 지도가 없으면: 원시 검출 경로는 바로, 명령 경로는 표지만
