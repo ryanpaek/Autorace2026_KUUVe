@@ -325,3 +325,35 @@ def test_m7_corner_blends_corner_even_when_lines_seen(cfg):
     f.route_corner = False
     out = run(f, synth.straight_lane(cfg), frames=20, yaw=0.0)
     assert abs(out.kappa) < 0.3                                     # 코너가 아니면 예전대로 선을 따름
+
+
+def test_corner_uses_inner_line_only(cfg):
+    """11/12 밤: 미리 아는 코너(오른쪽)에서는 양쪽이 보여도 안쪽(오른쪽) 선 + 반폭으로 중앙선.
+    바깥(왼쪽) 선이 다른 차로 선이라 멀리 잡혀도 안쪽 선 기준이면 차로 가운데를 유지"""
+    img = synth.straight_lane(cfg, center_x_mm=-85.0, width_mm=700.0)   # 오른쪽 선 +265, 왼쪽 선 -435 (바깥 선 잘못)
+    f = LaneFollower(cfg, LaneParams())
+    out = run(f, img, frames=10, yaw=0.0)
+    assert out.status == 'BOTH' and abs(out.offset_mm) > 60          # 예전: 양쪽 가운데 -> 85 mm 쏠림
+    f = LaneFollower(cfg, LaneParams())
+    f.route_k = [-1.5625] * 14
+    f.route_step_mm = 100.0
+    f.route_corner = True
+    out = run(f, img, frames=10, yaw=0.0)
+    assert out.status == 'R' and out.debug.get('inner') == 'R'
+    assert abs(out.offset_mm) < 30                                    # 안쪽 선 기준 -> 가운데
+
+
+def test_inner_line_only_near_corner(cfg):
+    """코너가 아직 먼 미리보기(앞 600 mm 안에 곡률 없음)나 코너 미리보기가 아니면 예전처럼 양쪽"""
+    img = synth.straight_lane(cfg)
+    f = LaneFollower(cfg, LaneParams())
+    f.route_k = [0.0] * 8 + [-1.5625] * 6
+    f.route_step_mm = 100.0
+    f.route_corner = True
+    assert run(f, img, frames=5, yaw=0.0).status == 'BOTH'
+    f.route_k = [-1.5625] * 14
+    f.route_corner = False
+    assert run(f, img, frames=5, yaw=0.0).status == 'BOTH'
+    f.route_corner = True
+    f.p.corner_inner_line = False
+    assert run(f, img, frames=5, yaw=0.0).status == 'BOTH'

@@ -98,7 +98,7 @@ class AvoidParams:
     forget_min_x: float = 0.25        # 차 기준 앞 이 거리부터 [m] (base_link 기준)
     forget_max_x: float = 2.2
     # ── 판단 ──
-    trigger_dist: float = 1.3   # 내 차선 앞 장애물이 (앞범퍼 기준) 이 안이면 차선 변경. 11/12 1.0 -> 1.3 (더 일찍)
+    trigger_dist: float = 1.5   # 내 차선 앞 장애물이 (앞범퍼 기준) 이 안이면 차선 변경. 11/12 1.0 -> 1.3 -> 밤 1.5 (멀리서 미리. 1.8은 갈림길 시뮬레이션 30->28)
     change_len: float = 1.0           # 차선 1칸 옮기는 데 필요한 앞쪽 여유
     clear_back: float = 0.0           # 옮길 차선의 차 끝이 (뒤범퍼 - 이값)보다 뒤여야 들어감 (음수=더 일찍)
     clear_rollout: bool = True        # 11/12: 옆 장애물을 지나는 중이면 꺾어 들어가는 길을 굴려 봐서 안 부딪히면 바로 옮김
@@ -152,6 +152,13 @@ class AvoidParams:
     lookahead: float = 0.35   # pure pursuit 전방주시. 11/12 0.40 -> 0.35: 더 크게 꺾어 확 피함 (0.30은 속도 0.3과 같이 쓰면 코너 끝에서 켤 때 이탈 1/30)
     min_turn_radius: float = 0.53     # LIMO 아커만 최소 회전반경 실측값 (이보다 작게 두면 못 도는 경로를 계획)
     max_heading_deg: float = 40.0     # 이 이상 비틀어지면 더 꺾지 않음 (30으로 줄이면 붙은 배치 시험 4개 실패 -> 그대로)
+    # 11/12 밤 실차 요청: 멀리서 미리, 각을 덜 벌려 옮김 (크게 틀면 카메라가 선을 놓치고 사각지대가 커짐).
+    #   지금 차가 들어 있는 차로의 앞 장애물이 gentle_free 넘게 멀면 전방 주시 gentle_lookahead, 최대 틀기 gentle_heading_deg.
+    #   (가려는 차로도 같은 조건). 가까워지면(또는 옆에 붙으면) 예전처럼 lookahead·max_heading_deg 로 크게 꺾음
+    gentle: bool = False             # 시뮬레이션에서 나빠져 끔 (듬성 배치 40/40 -> 35/40, 20° 넘은 시간 21% -> 40%): 각을 묶으면 비스듬히 오래 감
+    gentle_free: float = 1.6         # 1.0·1.2는 붙은 배치(zigzag6·mixed7)에서 막힘. 랜덤 120판: 1.4/0.5/25°는 114, 1.6/0.6/30°는 120
+    gentle_lookahead: float = 0.60
+    gentle_heading_deg: float = 30.0
     reach_tol: float = 0.08           # 차선 중심에서 이 안이면 '도착'
     # ── 갈림길(미션 2) 출구 차선 미리 이동 ──
     fork_shift: bool = True           # 갈림길 방향을 알면 섬 앞 끝 전에 출구 차선(A=+1, B=-1)으로 미리 옮김 (0/1/2차선)
@@ -1041,6 +1048,12 @@ class AvoidPlanner:
                     self.last_switch = t
                     self.rechosen = True
 
+        # 부드럽게 옮기기: 지금 들어 있는 차로 앞 장애물이 멀면 작은 각으로 (위 gentle 설명)
+        #   가려는 차로도 옆·앞 gentle_free 안에 장애물이 없어야 (옆 장애물 뒤로 S자로 들어갈 때는 크게 꺾어야 함)
+        self.gentle_on = (p.gentle and not self.sharp
+                          and self.free_ahead(self.nearest_lane(y), obs, skip_beside=False) >= p.gentle_free
+                          and self.free_ahead(self.target, obs, skip_beside=False) >= p.gentle_free)
+
         # ③ 속도
         in_lane = abs(y - self.center(self.target)) < p.reach_tol
         if in_lane and self.sharp:
@@ -1165,7 +1178,9 @@ class AvoidPlanner:
 
     def _ld(self):
         """전방 주시 거리. 후진(되돌아가기·탈출)한 뒤 다음 차로에 들어갈 때까지는 짧게 -> 더 크게 꺾어 빨리 빠짐."""
-        return self.p.recover_lookahead if self.sharp else self.p.lookahead
+        if self.sharp:
+            return self.p.recover_lookahead
+        return self.p.gentle_lookahead if getattr(self, 'gentle_on', False) else self.p.lookahead
 
     def _pursuit_k(self, x, y, psi):
         """(x, y, psi)에서 목표 차로 중심을 따라가는 곡률 (control과 같은 식, 차선 노드 섞기 없음)."""
@@ -1177,7 +1192,7 @@ class AvoidPlanner:
         k = 2.0 * yr / (xr * xr + yr * yr)
         kmax = 1.0 / p.min_turn_radius
         k = max(-kmax, min(kmax, k))
-        mh = math.radians(p.max_heading_deg)
+        mh = math.radians(p.gentle_heading_deg if getattr(self, 'gentle_on', False) else p.max_heading_deg)
         if (psi > mh and k > 0) or (psi < -mh and k < 0):
             k = 0.0
         return k
