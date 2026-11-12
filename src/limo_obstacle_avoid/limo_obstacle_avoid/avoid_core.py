@@ -39,6 +39,14 @@ def parse_exit(s):
     return None
 
 
+def _with_lookahead(p, ld):
+    """shift_distance 계산용: lookahead만 바꾼 얕은 복사."""
+    import copy
+    q = copy.copy(p)
+    q.lookahead = ld
+    return q
+
+
 # ──────────────────────────────────────────────────────────────
 # 파라미터 (config/avoid_params.yaml 에서 덮어씀)
 # ──────────────────────────────────────────────────────────────
@@ -85,6 +93,11 @@ class AvoidParams:
     rechoose_dy: float = 0.12         # 차로를 옮기기 시작했어도 원래 차로 중심에서 이만큼 안이면, 새로 확정된
                                       #   장애물로 다른 차로가 더 비어 보일 때 목표를 바꿈 (켜자마자 고른 쪽이 다음 줄에서 막힘 방지)
     rechoose_sec: float = 0.6         # 위 다시 고르기는 차로를 고른 뒤 이 시간 안에 한 번만 (계속 바꾸면 왔다 갔다 함)
+    # 11/12: 옮겨 가는 차로에 가까운 장애물이 (늦게) 보이면 hold_time을 기다리지 않고 바로 다른 차로(원래 차로 포함)로 목표를 바꿈.
+    #   예전: 고른 뒤 0.8초는 못 바꿔서 그 장애물 앞까지 가서 서고 -> 0.3 m 후진 -> 다시 앞으로 (실차 '차로 바꾼 직후 앞 장애물'에서 반복)
+    abort_free: float = 0.80          # 옮겨 가는 차로 앞이 이보다 짧으면 다시 고름 [m]
+    abort_gap_sec: float = 0.5        # 다시 고르기 사이 최소 간격 [s]
+    rollback_need_sharp: bool = True  # 후진을 멈출 '틀 공간'을 크게 꺾는 기준(recover_lookahead)으로 잼
     hold_time: float = 0.8            # 차선 바꾼 뒤 최소 유지 시간 [s]
     stop_dist: float = 0.30           # 지금 조향대로 이만큼 더 가면 차체가 부딪힐 때만 정지(→ 후진). 옆 차로·옆에 붙은 장애물은 안 봄
     # 11/12: 막혔을 때 바로 서서 후진하지 말고 먼저 조향을 끝까지 꺾어 빠져 본다. 끝까지 꺾은 길로도
@@ -652,7 +665,9 @@ class AvoidPlanner:
             nxt = cur                                  # 지금 차로 앞이 충분히 비었으면 그대로
         if nxt is not None and nxt != cur:
             # 옆 차로로 틀 공간이 생길 때까지는 더 물러난다 (차체가 지금 차로 장애물 옆을 벗어나는 데 필요한 앞 거리)
-            need = shift_distance(p, nxt - cur)[0] + 0.05
+            # 후진 뒤에는 짧은 전방 주시(recover_lookahead)로 크게 꺾으므로 그 기준으로 필요한 거리를 잼 (11/12)
+            q = _with_lookahead(p, p.recover_lookahead) if p.rollback_need_sharp else p
+            need = shift_distance(q, nxt - cur)[0] + 0.05
             if self.free_ahead(cur, obs) < need:
                 nxt = None
         if nxt is not None and rb['dist'] >= 0.05:
@@ -788,6 +803,28 @@ class AvoidPlanner:
                                        f'(앞 {self.free_ahead(self.target, obs):.2f}m → {min(self.free_ahead(alt, obs), 9.9):.2f}m)'))
                 self.target = alt
                 self.rechosen = True
+
+        # ①'' 옮기는 중인데 가는 차로 앞이 막혀 있음 -> 바로 다시 고름 (원래 차로로 돌아가기 포함, hold_time 무시)
+        if (p.abort_free > 0 and self.target != origin and self.rb is None and self.rec is None
+                and t - getattr(self, '_abort_t', -1e9) >= p.abort_gap_sec):
+            f_tg = self.free_ahead(self.target, obs)
+            if f_tg < p.abort_free:
+                best, best_f = None, f_tg + p.better_margin
+                for lane in self.lanes:
+                    if lane == self.target:
+                        continue
+                    if lane != origin and not self.path_clear(origin, lane, obs):
+                        continue
+                    f = self.free_ahead(lane, obs)
+                    if f > best_f:
+                        best, best_f = lane, f
+                if best is not None:
+                    self.events.append((x, f'옮기는 차로 앞 {f_tg:.2f}m 막힘 -> 다시 고름: {lane_name(self.target)} → '
+                                           f'{lane_name(best)} (앞 {min(best_f, 9.9):.2f}m)'))
+                    self.target = best
+                    self.last_switch = t
+                    self._abort_t = t
+                    self.sharp = True
 
         # ②' 갈림길 방향을 알면 섬 앞 끝 전에 출구 차선으로 미리 옮김 (0/1/2차선)
         if p.fork_shift and self.exit_pref is not None and self.target != self.exit_pref \
