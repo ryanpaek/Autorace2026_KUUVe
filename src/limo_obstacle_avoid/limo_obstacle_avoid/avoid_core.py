@@ -87,6 +87,11 @@ class AvoidParams:
     rechoose_sec: float = 0.6         # 위 다시 고르기는 차로를 고른 뒤 이 시간 안에 한 번만 (계속 바꾸면 왔다 갔다 함)
     hold_time: float = 0.8            # 차선 바꾼 뒤 최소 유지 시간 [s]
     stop_dist: float = 0.30           # 지금 조향대로 이만큼 더 가면 차체가 부딪힐 때만 정지(→ 후진). 옆 차로·옆에 붙은 장애물은 안 봄
+    # 11/12: 막혔을 때 바로 서서 후진하지 말고 먼저 조향을 끝까지 꺾어 빠져 본다. 끝까지 꺾은 길로도
+    #   squeeze_min_dist 안에서 부딪히면(장애물이 0.2 m까지 붙음) 그때만 서고 예전처럼 후진·탈출
+    squeeze: bool = True
+    squeeze_min_dist: float = 0.20    # 끝까지 꺾은 길로 이만큼 더 가도 안 부딪혀야 꺾어서 감 [m]
+    squeeze_speed: float = 0.12       # 끝까지 꺾어 빠질 때 속도 [m/s]
     path_margin: float = 0.02         # 위 판단에서 차체 둘레 여유 [m]
     path_rollout: bool = True         # 위 판단의 길: 목표 차로로 가다 똑바로 서는 실제 조향을 굴려 봄 (false: 지금 곡률 유지)
     emerg_lane_band: bool = True      # 범퍼 앞 비상: 지금 차로~가려는 차로 안(도면 차로 경계)의 점만 셈. 그 밖 차로 장애물 무시
@@ -811,6 +816,12 @@ class AvoidPlanner:
         k_now = self.control(1.0, t, in_lane)
         self.hit_dist = self.path_hit(obs, k_now, p.stop_dist)
         self.blocked = self.hit_dist < INF
+        self.squeezing = False
+        if self.blocked and not self.emergency and p.squeeze:
+            out = self._squeeze(obs, t)
+            if out is not None:
+                self.stuck_since = None
+                return out
         if self.blocked or self.emergency:
             v = 0.0
             # 서 있으면 상황이 안 바뀐다 → 잠시 뒤 후진하며 크게 꺾어 다시 잡기 (횟수 제한)
@@ -855,7 +866,7 @@ class AvoidPlanner:
         return v, self.control(v, t, in_lane)
 
     # ---------- 바로 앞 충돌 판단 ----------
-    def path_hit(self, obs, k, dist):
+    def path_hit(self, obs, k, dist, fixed=False):
         """지금 계획대로 dist[m] 더 갈 때 차체(여유 path_margin)가 장애물과 처음 겹치는 거리. 없으면 INF.
         실제 장애물과 섬만 본다 (출구 선호 가상벽은 차로 고르기용이라 제외).
         길은 '목표 차로 중심으로 가다가 똑바로 서는' pure pursuit을 그대로 굴려서 만든다 (11/10 밤).
@@ -874,7 +885,7 @@ class AvoidPlanner:
         for i in range(n + 1):
             sd = ds * i
             if i > 0:
-                kk = self._pursuit_k(x, y, h) if p.path_rollout else k
+                kk = self._pursuit_k(x, y, h) if (p.path_rollout and not fixed) else k
                 hm = h + 0.5 * kk * ds
                 x, y, h = x + ds * math.cos(hm), y + ds * math.sin(hm), h + kk * ds
             c, s = math.cos(h), math.sin(h)
@@ -883,6 +894,36 @@ class AvoidPlanner:
                 if _rect_hits_box(car, o.xmin, o.x_end(p.obs_min_len), o.ymin, o.ymax):
                     return sd
         return INF
+
+    def _squeeze(self, obs, t):
+        """막혔을 때 조향을 끝까지 꺾어 빠지기. 갈 쪽(목표 차로 / 갈 수 있는 차로 / 더 빈 옆 차로) 먼저,
+        안 되면 반대쪽. 끝까지 꺾은 원호로 squeeze_min_dist 더 가도 안 부딪힐 때만. 못 하면 None (-> 정지·후진)."""
+        p = self.p
+        kmax = 1.0 / p.min_turn_radius
+        mh = math.radians(p.max_heading_deg)
+        first = self._recover_side(obs)
+        now = self.nearest_lane(self.pose.y)
+        for side in (first, -first):
+            if now + side not in self.lanes and self.target == now:
+                continue                               # 바깥 차로에서 바깥쪽으로는 안 꺾음 (트랙 밖)
+            if side * self.pose.psi > mh:              # 이미 그쪽으로 많이 틀어짐 -> 더 꺾으면 차로 밖
+                continue
+            k = side * kmax
+            if self.path_hit(obs, k, p.squeeze_min_dist, fixed=True) < INF:
+                continue
+            want = now + side
+            if want in self.lanes and self.target != want and self.target == now:
+                self.events.append((self.pose.x, f'막힘 -> 끝까지 꺾어 빠짐: {lane_name(now)} → {lane_name(want)}'))
+                self.target = want
+                self.last_switch = t
+            elif not getattr(self, '_sq_logged', False):
+                self.events.append((self.pose.x, f'막힘 -> 끝까지 {"왼쪽" if side > 0 else "오른쪽"}으로 꺾어 빠짐'))
+            self._sq_logged = True
+            self.squeezing = True
+            v = min(p.squeeze_speed, p.v_change)
+            return v, v * k
+        self._sq_logged = False
+        return None
 
     def _ld(self):
         """전방 주시 거리. 후진(되돌아가기·탈출)한 뒤 다음 차로에 들어갈 때까지는 짧게 -> 더 크게 꺾어 빨리 빠짐."""
@@ -940,7 +981,7 @@ class AvoidPlanner:
             'psi_deg': round(math.degrees(self.pose.psi), 1),
             'target': self.target,
             'now_lane': self.nearest_lane(self.pose.y),
-            'emergency': self.emergency, 'blocked': self.blocked,
+            'emergency': self.emergency, 'blocked': self.blocked, 'squeezing': getattr(self, 'squeezing', False),
             'hit_m': None if self.hit_dist == INF else round(self.hit_dist, 2),
             'recovering': self.rec is not None or self.rb is not None, 'recover_n': self.rec_n,
             'rollback': self.rb is not None, 'rollback_m': round(self.rollback_m, 2),
