@@ -36,10 +36,10 @@ M1의 pedestrian은 사용자 설명의 신호 횡단보도에 대응하는 요�
 
 ## 명령과 지속 규약
 
-| 클래스 (v3 ID) | 명령 | 의미 |
+| 클래스 (v3~v4.5 공통 ID) | 명령 | 의미 |
 |---|---|---|
-| red (0) | `PAUSE_UNTIL_GREEN` | `stop_target: before_stop_line`. 기존 정지선 접근 제어로 여유를 두고 일시정지, 녹색까지 유지 |
-| yellow (1) | 기본 명령 없음 | 검출·투표 정보만 기록. `yellow_action: pause`로 변경 가능 |
+| red (0) | `PAUSE_UNTIL_GREEN` | `stop_target: before_stop_line`. 기존 정지선 접근 제어로 일시정지 (10cm 고정 아님), 녹색까지 유지 |
+| yellow (1) | 기본 이동 명령 없음 | 검출·투표 정보 + `signals`의 `YELLOW_OBSERVED`. 기본 무동작이며 기존 `yellow_action: pause` 옵션도 유지 |
 | green (2) | `RESUME_NORMAL` | 신호등 정지 해제. 다른 제약이 없다면 정상 주행 지속 |
 | fork_a (3), fork_b (4) | `SELECT_ROUTE`, `route: A/B` | V자 갈림길의 지정 경로. 90도 회전 아님 |
 | pedestrian (5) | `STOP_AT_PEDESTRIAN_LINE` | `traffic_policy: obey_if_present`. M3은 기존 무신호 정지, M1은 신호 준수 |
@@ -66,7 +66,7 @@ M1의 pedestrian은 사용자 설명의 신호 횡단보도에 대응하는 요�
 
 이것은 **코스 지도 + 카메라의 선 검출**이며 노면 글자 '서행'을 읽는 기능은 아니다. 일반 정지선이 보였다는 이유만으로 서행선으로 인정하지 않는다. 지도 매칭이 꺼져 있거나 실패하면 이 발행부의 `SLOW`는 나오지 않는다. `bump` 요청은 바닥 서행선 조건과 독립적이다.
 
-명령 경로에서는 M5의 지도 위치만으로 감속을 시작하는 우회를 끄고 확인된 서행/방지턱 요청을 사용한다. M4는 확인된 주차 요청 전까지 접근 주행하며, 요청을 받으면 한 번 주차 상태에 진입한다. parking_node는 M4이면서 미션의 source가 parking일 때 기존 주차 로직을 실행한다. 활성 구간에서는 같은 로직 객체를 계속 사용하며, 반복 요청이 상태·타이머를 초기화하지 않는다. 기존 `parking_node.enabled` 설정은 유지하므로 실차 실행에는 해당 설정이 필요하다.
+현재 팀 FSM은 명령 경로에서도 M5/M4의 지도 위치 fallback을 유지한다. M5는 서행선 300mm 앞에서 감속할 수 있고, M4는 표지를 못 봐도 도면상 주차 앞 선 근처에서 주차 준비를 할 수 있다. 이는 발행부의 SLOW 조건 및 “선을 넘은 순간”과 다른 제어 정책이다. parking_node는 M4이면서 source가 parking일 때 기존 주차 로직을 실행한다. 이번 v4.5 PR은 이 제어 정책과 parking_node.enabled=false를 변경하지 않는다. 발행부 조건과 FSM fallback의 차이는 제어 담당자와 별도로 논의한다.
 
 ## 오검출 필터와 현장 조정
 
@@ -111,7 +111,7 @@ ros2 param set /class_command_node yellow_action none
 colcon build --symlink-install --packages-up-to autorace_bringup
 source install/setup.bash
 ros2 launch autorace_bringup perception_commands.launch.py \
-  model_path:="$PWD/models/autorace_yolo_v3.onnx"
+  model_path:="$PWD/models/autorace_yolo_v45.onnx"
 ros2 topic echo /perception/commands
 ```
 
@@ -121,7 +121,7 @@ ros2 topic echo /perception/commands
 ros2 topic pub -r 10 /mission/state std_msgs/msg/String '{data: "{\"state\":\"M1_TRAFFIC\"}"}'
 ```
 
-실제 mission_node와 시험 모드 발행자를 동시에 실행하지 않는다. 서행 시험은 실제 지도 매칭을 함께 쓰거나 `route.fixes`가 증가하는 모의 메시지를 보내야 한다. 전체 `autorace.launch.py`에서 이미 발행부를 켰다면 따로 실행하지 않는다. 별도 발행부를 쓸 때는 전체 launch의 `use_class_commands:=false`로 중복 실행을 막는다.
+실제 mission_node와 시험 모드 발행자를 동시에 실행하지 않는다. 서행 시험은 실제 지도 매칭을 함께 쓰거나 `route.fixes`가 증가하는 모의 메시지를 보내야 한다. 전체 `autorace.launch.py`에서 이미 발행부를 켰다면 따로 실행하지 않는다. 기본 명령 경로 시험에서는 단독 launch와 전체 스택을 동시에 실행하지 않는다. `use_class_commands:=false`는 원시 검출 제어 경로로 바꾸는 옵션이므로 단순 중복 실행 방지 수단으로 사용하지 않는다.
 
 ## 검증
 
@@ -144,3 +144,10 @@ python3 -m unittest discover -s src/autorace_perception/test -p 'test_class_comm
 ```bash
 python3 -m unittest discover -s src/autorace_mission/test -p 'test_command*.py' -v
 ```
+
+
+## v4.5 부가 관측 신호
+
+`schema_version=2`와 기존 `commands`는 유지한다. 선택적 `signals` 배열을 추가해 현재 프레임에서도 보이고 투표를 통과한 황색을 `{"class":"yellow","signal":"YELLOW_OBSERVED","action":"none",...}`으로 발행한다. 기본 yellow_action=none에서 이 신호는 속도 변경이나 적색 정지 해제가 아니다. 기존 수신부는 signals를 읽지 않으므로 제어 동작은 동일하다. 기존 pause 옵션을 선택하면 signals.action도 pause로 표시한다.
+
+이번 기본 conf는 detector와 class_command 모두 0.7이다. 실제 ROS 설정과 320/640 선택은 [v4.5 모델 안내](yolo_v45.md)를 따른다.

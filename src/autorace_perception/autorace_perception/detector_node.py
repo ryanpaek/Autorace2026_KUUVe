@@ -21,6 +21,7 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
+from rcl_interfaces.msg import ParameterDescriptor, SetParametersResult
 from sensor_msgs.msg import CompressedImage, Image
 from std_msgs.msg import String
 
@@ -40,21 +41,23 @@ class DetectorNode(Node):
         super().__init__('detector_node')
         p = self.declare_parameter
         p('image_topic', '/camera/color/image_raw')
-        p('model_path', '')
-        p('class_names', DEFAULT_CLASSES)
-        p('input_size', 640)
-        p('conf_threshold', 0.5)
+        readonly = ParameterDescriptor(read_only=True)
+        p('model_path', '', readonly)
+        p('class_names', DEFAULT_CLASSES, readonly)
+        p('input_size', 640, readonly)
+        p('conf_threshold', 0.7)
         p('nms_threshold', 0.45)
-        p('infer_hz', 10.0)
+        p('infer_hz', 5.0, readonly)
         p('publish_debug', True)
         # onnxruntime 스레드 수. 0이면 기본값(코어 전부). 11/09 통주행: 기본값이면 LIMO(6코어)에서
         # 장당 536ms + 차선 노드 19Hz -> 9Hz로 떨어짐. 2로 제한해 나머지 코어를 차선·센서에 남긴다
-        p('ort_threads', 2)
+        p('ort_threads', 2, readonly)
         self.names = [str(c) for c in self.get_parameter('class_names').value]
         self.size = int(self.get_parameter('input_size').value)
         self.latest = None
         self.backend = None
         self._load_model(self.get_parameter('model_path').value)
+        self.add_on_set_parameters_callback(self._on_parameters)
 
         topic = self.get_parameter('image_topic').value
         if topic.endswith('/compressed'):
@@ -82,6 +85,11 @@ class DetectorNode(Node):
             self.session = ort.InferenceSession(path, sess_options=so,
                                                 providers=['CPUExecutionProvider'])
             self.input_name = self.session.get_inputs()[0].name
+            shape = self.session.get_inputs()[0].shape
+            if len(shape) != 4 or any(isinstance(v, int) and v != e
+                                     for v, e in zip(shape, [1, 3, self.size, self.size])):
+                raise ValueError(f'ONNX input {shape} does not match input_size={self.size}; '
+                                 'choose a matching export and restart')
             self.backend = 'onnx'
         else:
             from ultralytics import YOLO
@@ -101,6 +109,15 @@ class DetectorNode(Node):
         if img is not None:
             self.latest = (img, msg.header)
 
+    def _on_parameters(self, parameters):
+        for parameter in parameters:
+            if parameter.name in ('conf_threshold', 'nms_threshold'):
+                v = parameter.value
+                if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 <= v <= 1:
+                    return SetParametersResult(successful=False,
+                                               reason=f'{parameter.name} must be in [0, 1]')
+        return SetParametersResult(successful=True)
+
     def _on_timer(self):
         if self.latest is None:
             return
@@ -116,7 +133,9 @@ class DetectorNode(Node):
                 dets = decode(out, self.names, frame.shape[:2], scale, px, py, self.size,
                               conf, float(self.get_parameter('nms_threshold').value))
             elif self.backend == 'ultralytics':
-                res = self.model.predict(frame, imgsz=self.size, conf=conf, verbose=False)[0]
+                res = self.model.predict(frame, imgsz=self.size, conf=conf, rect=False,
+                                         iou=float(self.get_parameter('nms_threshold').value),
+                                         verbose=False)[0]
                 for b in res.boxes:
                     x1, y1, x2, y2 = [float(v) for v in b.xyxy[0].tolist()]
                     dets.append({'cls': canonical_class(res.names[int(b.cls)]),
@@ -129,7 +148,7 @@ class DetectorNode(Node):
         stamp = header.stamp.sec + header.stamp.nanosec * 1e-9
         self.pub.publish(String(data=json.dumps(
             {'stamp': stamp, 'infer_ms': round(dt, 1), 'detections': dets})))
-        if self.get_parameter('publish_debug').value and dets:
+        if self.get_parameter('publish_debug').value:
             dbg = frame.copy()
             for d in dets:
                 x, y, w, h = d['bbox']
