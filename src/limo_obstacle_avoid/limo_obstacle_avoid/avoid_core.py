@@ -137,6 +137,14 @@ class AvoidParams:
     center_from_m: float = 2.6        #   섬 앞 끝까지 이 거리 안에서
     center_until_m: float = 1.6       #   이 거리까지 (그보다 가까우면 2차로로 들어가지 않음: 1차로 옮겨 나갈 거리 1.1 m + 여유)
     center_leave_m: float = 0.95      #   가운데에서 표지를 기다리다 끝내 모르면 섬 앞 이 거리에서 옆 차로로 (1차로 옮겨 나갈 최소 0.84 m + 여유)
+    # 11/12 밤 실차 요청: M7 시작(횡단보도 끝)에서 약 4000 mm(= 3차선 시작선 + 2.32 m = 섬 앞 2.07 m)에 오면
+    #   표지를 아직 모를 때 '일단' 2차로로. 위 center_before_island(섬까지 2차로가 다 비어야 함)보다 조건이 느슨하다:
+    #   2차로 앞 center_force_free(또는 섬까지)만 비고 지나갈 길이 비면 옮김. 옆·앞에 장애물이 있으면 center_force_wait_m
+    #   더 가서 다시 본다. 섬 앞 center_until_m(1.6 m)보다 가까워지면 안 함 (2차로 도착 뒤 표지 보고 옆 출구로 갈 거리)
+    center_force: bool = True
+    center_force_rem_m: float = 2.07
+    center_force_free: float = 1.0
+    center_force_wait_m: float = 0.40
     rollback_need_sharp: bool = True  # 후진을 멈출 '틀 공간'을 크게 꺾는 기준(recover_lookahead)으로 잼
     hold_time: float = 0.4   # 차선 바꾼 뒤 최소 유지 시간 [s]. 11/12 0.8 -> 0.4 (옮기는 중에도 다음 판단을 빨리)
     flip_block_sec: float = 1.5       # 11/12 밤: 방금 떠난 차로로 이 시간 안에는 안 돌아감 (실차 -1 <-> 0 왔다갔다)
@@ -342,6 +350,12 @@ class AvoidPlanner:
     # ---------- 상태 ----------
     def reset(self):
         self.state = 'IDLE'          # IDLE → RUN → DONE
+        self.force_wait_x = None     # center_force: 이 x까지 더 가서 다시 봄
+        self.sw = None               # side_wait 직진 중
+        self.sw_n = 0
+        self.creep = None            # creep 전진 중
+        self.creep_n = 0
+        self._center_why = None
         self.t_start = 0.0
         self.obs = []
         self.target = self.p.start_lane
@@ -1096,6 +1110,28 @@ class AvoidPlanner:
         out = self._side_wait_step(obs, t)
         if out is not None:
             return out
+
+        # ②''''' M7 시작 약 4000 mm에서 일단 2차로 (위 center_force 설명)
+        if (p.center_force and self.exit_pref is None and self.target != 0 and 0 in self.lanes
+                and self.rb is None and self.rec is None and t - self.last_switch >= p.hold_time
+                and self.nearest_lane(y) == self.target):
+            rem = p.section_length - (x + p.robot_front)
+            wx = getattr(self, 'force_wait_x', None)
+            if p.center_until_m < rem <= p.center_force_rem_m and (wx is None or x >= wx):
+                f0 = self.free_ahead(0, obs, skip_beside=False)   # 옆에 지나가는 중인 것도 있으면 음수
+                if f0 >= min(p.center_force_free, rem - 0.05) and self.path_clear(self.target, 0, obs):
+                    self.events.append((x, f'M7 약 4000 mm(섬 앞 {rem:.2f}m): 일단 2차선으로 ({lane_name(self.target)} → 2차선)'))
+                    self.flip_from = self.target
+                    self.target = 0
+                    self.last_switch = t
+                    self.rechosen = True
+                    self.force_wait_x = None
+                else:
+                    self.force_wait_x = x + p.center_force_wait_m
+                    why = (f'2차로 옆·앞 {f0:.2f}m에 장애물' if f0 < min(p.center_force_free, rem - 0.05)
+                           else '지나갈 길 막힘')
+                    self.events.append((x, f'M7 약 4000 mm(섬 앞 {rem:.2f}m): 2차선으로 가려는데 {why} -> '
+                                           f'{p.center_force_wait_m:.1f}m 더 가서 다시'))
 
         # ③ 속도
         in_lane = abs(y - self.center(self.target)) < p.reach_tol

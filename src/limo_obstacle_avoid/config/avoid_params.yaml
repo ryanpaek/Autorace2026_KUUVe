@@ -85,6 +85,10 @@
     center_from_m: 2.6
     center_until_m: 1.6
     center_leave_m: 0.95     #   가운데에서 표지를 끝내 모르면 섬 앞 0.95 m에서 옆 차로로
+    center_force: true       # 11/12 밤: M7 시작 약 4000 mm(섬 앞 2.07 m)에서 표지를 모르면 일단 2차선 (2차로 앞 1 m만 비면)
+    center_force_rem_m: 2.07
+    center_force_free: 1.0
+    center_force_wait_m: 0.40  #   옆·앞에 장애물이 있으면 0.4 m 더 가서 다시 (섬 앞 1.6 m보다 가까워지면 안 함)
     cont_change: true        # 11/12: 옮기는 도중 가던 차로 앞이 막히면 다음 차로까지 이어서 한 번에 (안전 조건 아래)
     cont_min_free: 1.80      #   다음 차로 앞 1.8 m 넘게 비어야 (11/12 밤 1.3 -> 1.8: 두 차로 한 번에는 줄임)
     cont_island_m: 2.00      #   섬까지 2.0 m 넘게 남아야 (그리고 40° 안, 지나갈 길 빔, 한 번 옮길 때 한 번만)
