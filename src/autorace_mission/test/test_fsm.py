@@ -404,10 +404,10 @@ def test_m7_corner_preview_from_crosswalk_only():
     fsm = MissionFSM({'start_state': 'M3_PEDESTRIAN'})
     inp = Inputs(t=0.0, dist_mm=1000.0, yaw=0.0)
     fsm._goto('M7_OBSTACLE', inp, 'left crosswalk')
-    k = fsm.m7_corner_k(1000.0, 0.0)                     # 진입 직후: 330 mm 뒤부터 코너
-    assert k[0] == 0.0 and k[4] == pytest.approx(-1.5625, abs=1e-3)
-    k = fsm.m7_corner_k(1600.0, _m.radians(-45.0))       # 45° 돎: 남은 45° 동안 (약 500 mm)
-    assert k[0] == pytest.approx(-1.5625, abs=1e-3) and k[4] != 0.0 and k[6] == 0.0
+    k = fsm.m7_corner_k(1000.0, 0.0)                     # 진입 직후: 330 mm 뒤 코너 (+ 차선 노드 미리보기 300 mm 만큼 밈)
+    assert k[0] == 0.0 and k[5] == 0.0 and k[7] == pytest.approx(-1.5625, abs=1e-3)
+    k = fsm.m7_corner_k(1600.0, _m.radians(-60.0))       # 돌기 시작한 뒤에는 다 돌 때까지 전부 코너 곡률 (60~70°에서 끊기던 것)
+    assert all(v == pytest.approx(-1.5625, abs=1e-3) for v in k)
     assert fsm.m7_corner_k(2200.0, _m.radians(-86.0)) is None    # 다 돎 -> 끝
     manual = MissionFSM({'start_state': 'M3_PEDESTRIAN'})
     manual._goto('M7_OBSTACLE', inp, 'manual')
