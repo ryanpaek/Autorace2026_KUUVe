@@ -113,7 +113,7 @@ class AvoidParams:
     # 11/12: 막혔을 때 바로 서서 후진하지 말고 먼저 조향을 끝까지 꺾어 빠져 본다. 끝까지 꺾은 길로도
     #   squeeze_min_dist 안에서 부딪히면(장애물이 0.2 m까지 붙음) 그때만 서고 예전처럼 후진·탈출
     squeeze: bool = True
-    squeeze_min_dist: float = 0.20    # 끝까지 꺾은 길로 이만큼 더 가도 안 부딪혀야 꺾어서 감 [m]
+    squeeze_min_dist: float = 0.10    # 끝까지 꺾은 길로 이만큼 더 가도 안 부딪혀야 꺾어서 감 [m]. 11/12 밤 0.2 -> 0.1 (후진 없앰)
     squeeze_speed: float = 0.30   # 끝까지 꺾어 빠질 때 속도. 11/12 0.12 -> 0.30
     path_margin: float = 0.02         # 위 판단에서 차체 둘레 여유 [m]
     path_rollout: bool = True         # 위 판단의 길: 목표 차로로 가다 똑바로 서는 실제 조향을 굴려 봄 (false: 지금 곡률 유지)
@@ -167,7 +167,7 @@ class AvoidParams:
     lane_fix_change_scale: float = 0.5     #   옮기는 중·10° 넘을 때 반영 비율
     lane_row: float = 0.55            # 차선 노드 offset_mm 을 재는 행 (기준점 앞 m)
     # ── 멈춤 탈출: 막혀서 서 있으면 상황이 안 바뀌어 계속 선다 → 조금 후진하며 크게 꺾어 다시 잡음 ──
-    recover: bool = True
+    recover: bool = False             # 11/12 밤: 후진(되돌아가기·탈출) 완전히 끔. 막히면 끝까지 꺾어 빠지기(squeeze)만, 안 되면 서서 기다림
     recover_after: float = 0.4        # 이만큼 계속 막혀 있으면 탈출 시작 [s] (0.8 -> 0.4: 서 있는 시간 줄임)
     recover_dist: float = 0.40   # 탈출 후진 거리 [m]. 11/12 0.25 -> 0.40
     recover_speed: float = 0.30   # 후진 속도 [m/s]. 11/12 0.10 -> 0.30
@@ -898,7 +898,7 @@ class AvoidPlanner:
         self.hit_dist = self.path_hit(obs, k_now, p.stop_dist)
         self.blocked = self.hit_dist < INF
         self.squeezing = False
-        if self.blocked and not self.emergency and p.squeeze:
+        if (self.blocked or (self.emergency and not p.recover)) and p.squeeze:
             out = self._squeeze(obs, t)
             if out is not None:
                 self.stuck_since = None

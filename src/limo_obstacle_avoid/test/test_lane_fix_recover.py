@@ -70,11 +70,12 @@ def _run_close_obstacle(recover):
     return ss.run([(0.6 + p.lidar_x, 0)], p, 4.38, seed=1, **ss.CONDITIONS[0][1])
 
 
-def test_recover_gets_unstuck():
-    stuck = _run_close_obstacle(False)
-    assert not stuck['done'] and not stuck['collided']          # 탈출 없으면 장애물 앞에 멈춘 채 끝
-    ok = _run_close_obstacle(True)
-    assert ok['done'] and not ok['collided']                    # 후진하며 꺾어 다시 잡고 통과
+def test_close_obstacle_passed_without_reverse():
+    """11/12 밤: 후진 끔(기본). 켜자마자 0.6 m 앞 장애물도 끝까지 꺾어 빠져 통과 (예전엔 후진해야 통과)."""
+    ok = _run_close_obstacle(False)
+    assert ok['done'] and not ok['collided']
+    old = _run_close_obstacle(True)                             # 예전 후진 방식도 여전히 통과 (켜면)
+    assert old['done'] and not old['collided']
 
 
 def test_recover_side_toward_target_lane():
@@ -159,6 +160,7 @@ def test_swing_after_trail_used_up_instead_of_standing():
     import stress_sim as ss
     for sw, want in ((0, False), (6, True)):
         p = AvoidParams()
+        p.recover, p.squeeze = True, False                     # 예전 후진 탈출 기능 자체 시험 (기본은 꺼짐)
         p.recover_max, p.recover_swing_max = 0, sw
         r = ss.run([(0.6 + p.lidar_x, 0)], p, 4.38, seed=1)
         assert r['done'] is want and not r['collided']
@@ -192,11 +194,16 @@ def test_side_obstacle_does_not_stop_or_reverse():
     assert not pl.blocked and v > 0 and pl.rb is None and pl.rec is None
 
 
-def test_obstacle_right_in_front_stops():
+def test_obstacle_right_in_front_turns_hard_no_reverse():
+    """앞범퍼 25 cm 앞 내 차로 장애물: 막힘으로 보고, 후진하지 않고 끝까지 꺾어 빠진다 (11/12 밤)."""
     pl = running(0.0)
-    _with_obs(pl, (0.20 + 0.25, 0.80, -0.11, 0.11))                # 앞범퍼 25 cm 앞, 내 차로
-    v, _ = pl.step(10.0)
-    assert pl.blocked and v == 0.0 and 0.0 < pl.hit_dist <= 0.30
+    _with_obs(pl, (0.20 + 0.25, 0.80, -0.11, 0.11))
+    v, w = pl.step(10.0)
+    assert pl.blocked and 0.0 < pl.hit_dist <= 0.30
+    assert v > 0 and pl.squeezing and abs(w) == pytest.approx(v / pl.p.min_turn_radius)
+    for t in range(40):
+        v, _ = pl.step(10.0 + 0.05 * t)
+        assert v >= 0.0                                          # 후진 없음
 
 
 def test_obstacle_in_front_beyond_0p3_does_not_stop():
