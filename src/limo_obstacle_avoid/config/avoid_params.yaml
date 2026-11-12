@@ -73,16 +73,16 @@
     stop_dist: 0.30          # 지금 조향대로 0.3 m 더 가면 차체가 부딪힐 때만 정지(→ 후진). 옆 차로·옆에 붙은 장애물로는 안 섬 (11/10 밤)
     squeeze: true            # 11/12: 막히면 먼저 조향 끝까지 꺾어 빠짐 (앞뒤 왔다갔다 대신)
     squeeze_min_dist: 0.20   #   끝까지 꺾은 길로도 0.2 m 안에서 부딪히면 그때만 정지 -> 후진·탈출
-    squeeze_speed: 0.12
+    squeeze_speed: 0.30   # 11/12 0.12 -> 0.30
     path_margin: 0.02        # 위 판단에서 차체 둘레 여유
     path_rollout: true       # 위 판단의 길 = 목표 차로로 가다 똑바로 서는 실제 조향 (false: 지금 꺾은 그대로 0.3 m)
     emerg_lane_band: true    # 범퍼 앞 비상은 지금 차로~가려는 차로 안 점만 (1->2차선 중 3차선 장애물로 안 섬)
     emerg_min_pts: 2         # 범퍼 앞 비상 박스에 라이다 점이 이만큼 있어야 비상 (점 하나 튀어서 서는 것 방지)
 
     # ── 제어 (4단계에서 튜닝) ──
-    v_cruise: 0.25
-    v_change: 0.20
-    lookahead: 0.40          # 11/10 0.50 -> 0.40 (stress_sim 280/280, 장애물 최소 간격 약 7.5 -> 12~14cm). 흔들리면 0.45~0.50
+    v_cruise: 0.30   # 11/12 0.25 -> 0.30
+    v_change: 0.30   # 11/12 0.20 -> 0.30
+    lookahead: 0.30   # 11/12 0.40 -> 0.30: 더 크게 꺾어 확 피함 (흔들리면 0.35)
     min_turn_radius: 0.53    # 최소 회전반경 실측값
     max_heading_deg: 40.0
     reach_tol: 0.08
@@ -118,14 +118,14 @@
     # ── 멈춤 탈출 (11/09): 막혀서 0.8초 서 있으면 0.25 m 후진하며 크게 꺾어 다시 계획 (최대 3번) ──
     recover: true
     recover_after: 0.4       # 막혀서 이만큼 서 있으면 탈출 시작 (0.8 -> 0.4)
-    recover_dist: 0.25
-    recover_speed: 0.10
+    recover_dist: 0.40   # 11/12 0.25 -> 0.40
+    recover_speed: 0.30   # 11/12 0.10 -> 0.30
     recover_time: 4.0
     recover_max: 3           # trail(온 길 되돌아가기) 횟수
     recover_swing_max: 6     # trail을 다 쓰고도 막히면 후진+최대 조향으로 머리를 빈 쪽으로 (같은 쪽 2번 실패하면 반대쪽). 0이면 예전처럼 정지
     recover_mode: trail      # trail: 막히면 온 길 그대로 후진, 갈 차로(틀 공간 포함)가 생기면 멈추고 그리로 / swing: 예전
     trail_step: 0.05
     rollback_lookahead: 0.30
-    rollback_max_dist: 0.30  # 한 번 되돌아갈 최대 거리 [m] (1.5 -> 0.3)
-    recover_lookahead: 0.25  # 후진한 뒤 다음 차로에 들어갈 때까지 전방 주시 (0.40보다 짧게 = 더 크게 꺾어 빨리 빠짐)
+    rollback_max_dist: 0.40   # 11/12 0.3 -> 0.4
+    recover_lookahead: 0.20   # 11/12 0.25 -> 0.20: 후진 뒤 최소 회전반경까지 꺾음
     rollback_time: 15.0
