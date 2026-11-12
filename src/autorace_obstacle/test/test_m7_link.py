@@ -119,10 +119,20 @@ def test_fork_forwarded_and_fallback():
     link = M7Link(M7LinkParams(fork_fallback='A'))
     acts = drive(link, 13000.0, 13700.0)
     forks = [a for _, a in acts if a[0] == 'fork']
-    assert forks == [('fork', 'A')]                        # 표지를 못 읽음 -> 켤 때 대체값
+    assert forks == [('fork', 'auto'), ('fork', 'A')]     # M7 들어오면 '모름'(지난 판 방향 지움) -> 표지를 못 읽음 -> 켤 때 대체값
     link2 = M7Link()
     acts = drive(link2, 13000.0, 13700.0, fork='B')
-    assert [a for _, a in acts if a[0] == 'fork'] == [('fork', 'B')]   # 한 번만
+    assert [a for _, a in acts if a[0] == 'fork'] == [('fork', 'B')]   # 한 번만 (이미 표지를 알면 'auto' 안 보냄)
+
+
+def test_fork_cleared_each_new_m7_run():
+    """11/12 밤: 회피 노드에 지난 판 방향이 남지 않게, 새 판 M7에 들어올 때 표지를 아직 모르면 'auto'를 한 번 보냄"""
+    link = M7Link()
+    acts = drive(link, 13000.0, 13700.0, fork='A')
+    assert [a for _, a in acts if a[0] == 'fork'] == [('fork', 'A')]
+    link.update(20.0, {'state': 'M2_FORK', 'route': {}}, {})                 # 다음 미션으로
+    acts = drive(link, 13000.0, 13300.0, t0=30.0)                           # 새 판 (표지 아직 모름)
+    assert [a for _, a in acts if a[0] == 'fork'] == [('fork', 'auto')]
 
 
 def test_done_sets_exit_and_state():
