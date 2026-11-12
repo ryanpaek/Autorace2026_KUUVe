@@ -136,6 +136,13 @@ class AvoidParams:
     hold_time: float = 0.4   # 차선 바꾼 뒤 최소 유지 시간 [s]. 11/12 0.8 -> 0.4 (옮기는 중에도 다음 판단을 빨리)
     flip_block_sec: float = 1.5       # 11/12 밤: 방금 떠난 차로로 이 시간 안에는 안 돌아감 (실차 -1 <-> 0 왔다갔다)
     flip_ok_free: float = 0.5         #   지금 가는 차로 앞이 이보다 짧으면(정말 막힘) 예외로 허용 [m]
+    flip_ok_if_clear: bool = True     # 11/12 밤: 떠난 차로가 이미 비었으면(옆·앞 trigger_dist 안에 장애물 없음) 바로 돌아가도 됨.
+                                      #   옮기자마자 새 차로에 장애물이 나타났는데 0.5 m까지 붙어야 반응하던 것
+    # 11/12 밤 실차 요청: 일찍 옮기기 시작했는데 가려는 차로 옆에 장애물이 걸리면(라이다) 꺾지 말고 원래 차로로 side_wait_m 직진한 뒤 다시 옮김
+    side_wait: bool = True
+    side_wait_m: float = 0.30
+    side_wait_look: float = 1.00      #   옮기는 길을 이만큼 굴려 봐서 옆 장애물에 닿으면 (change_len과 같게)
+    side_wait_max: int = 3            #   한 번 옮길 때 최대 횟수 (그 뒤엔 예전처럼 끝까지 꺾기)
     stop_dist: float = 0.30           # 지금 조향대로 이만큼 더 가면 차체가 부딪힐 때만 정지(→ 후진). 옆 차로·옆에 붙은 장애물은 안 봄
     # 11/12: 막혔을 때 바로 서서 후진하지 말고 먼저 조향을 끝까지 꺾어 빠져 본다. 끝까지 꺾은 길로도
     #   squeeze_min_dist 안에서 부딪히면(장애물이 0.2 m까지 붙음) 그때만 서고 예전처럼 후진·탈출
@@ -956,7 +963,9 @@ class AvoidPlanner:
             # 11/12 밤 실차: 방금 떠난 차로로 0.4초마다 되돌아가는 왔다갔다(-1 <-> 0)가 있었다 -> 그 차로로는
             #   flip_block_sec 동안 안 돌아감 (지금 가는 차로가 flip_ok_free 안으로 정말 막혔을 때만 허용)
             if (nxt is not None and nxt == self.flip_from and t - self.last_switch < p.flip_block_sec
-                    and f_cur >= p.flip_ok_free):
+                    and f_cur >= p.flip_ok_free
+                    and not (p.flip_ok_if_clear
+                             and self.free_ahead(nxt, obs, skip_beside=False) >= p.trigger_dist)):
                 nxt = None
             if nxt is not None:
                 self.events.append((x, f'차선 {cur:+d} → {nxt:+d}  (앞 {f_cur:.2f}m)'))
@@ -1054,6 +1063,11 @@ class AvoidPlanner:
                           and self.free_ahead(self.nearest_lane(y), obs, skip_beside=False) >= p.gentle_free
                           and self.free_ahead(self.target, obs, skip_beside=False) >= p.gentle_free)
 
+        # ②'''' 옆 장애물 기다리기 (위 side_wait 설명)
+        out = self._side_wait_step(obs, t)
+        if out is not None:
+            return out
+
         # ③ 속도
         in_lane = abs(y - self.center(self.target)) < p.reach_tol
         if in_lane and self.sharp:
@@ -1113,6 +1127,78 @@ class AvoidPlanner:
             return 0.0, 0.0
 
         return v, self.control(v, t, in_lane)
+
+    def _side_wait_step(self, obs, t):
+        """옮기는 초반(아직 원래 차로 쪽)에 옮기는 길이 가려는 차로 옆 장애물에 닿으면 원래 차로로 side_wait_m 직진"""
+        p = self.p
+        x, y = self.pose.x, self.pose.y
+        sw = getattr(self, 'sw', None)
+        if sw is not None:
+            if sw['target'] != self.target or x >= sw['x_end'] or self.rb is not None or self.rec is not None:
+                self.sw = None
+            else:
+                lane = sw['lane']
+                saved = self.target
+                self.target = lane                      # 원래 차로 중심을 따라 똑바로
+                try:
+                    k = self.control(1.0, t, False)
+                    hit = self.path_hit(obs, k, p.stop_dist)
+                finally:
+                    self.target = saved
+                if hit < INF:
+                    self.sw = None                      # 직진도 막힘 -> 예전 처리(끝까지 꺾기)
+                    return None
+                self.waiting_side = True
+                return p.v_change, p.v_change * k
+        self.waiting_side = False
+        if not p.side_wait or self.rb is not None or self.rec is not None:
+            return None
+        origin = self.nearest_lane(y)
+        if origin == self.target or abs(y - self.center(self.target)) < p.reach_tol:
+            self.sw_n = 0
+            return None
+        if getattr(self, 'sw_n', 0) >= p.side_wait_max:
+            return None
+        hit, o = self._path_hit_obs(obs, p.side_wait_look)
+        if hit == INF or o is None or o.virtual or not self._in_corridor(o, self.target):
+            return None
+        if o.xmin > x + p.robot_front + p.side_wait_m:
+            return None                                 # 앞쪽 장애물(옆이 아님) -> 기다려도 소용없음
+        saved = self.target
+        self.target = origin
+        try:
+            k = self.control(1.0, t, False)
+            straight_hit = self.path_hit(obs, k, p.side_wait_m + p.stop_dist)
+        finally:
+            self.target = saved
+        if straight_hit < INF:
+            return None
+        self.sw = {'x_end': x + p.side_wait_m, 'lane': origin, 'target': self.target}
+        self.sw_n = getattr(self, 'sw_n', 0) + 1
+        self.events.append((x, f'옆 장애물(x {o.xmin:.2f}) 걸림 -> {lane_name(origin)}로 {p.side_wait_m:.2f}m 직진 뒤 다시 '
+                               f'{lane_name(self.target)}로 ({self.sw_n}/{p.side_wait_max})'))
+        return self._side_wait_step(obs, t)
+
+    def _path_hit_obs(self, obs, dist):
+        """path_hit과 같은 굴리기, (거리, 닿은 장애물)"""
+        p = self.p
+        boxes = [o for o in obs if not (o.virtual and o.tag == 'exit')]
+        x, y, h = self.pose.x, self.pose.y, self.pose.psi
+        hw = p.robot_half_width + p.path_margin
+        front, rear = p.robot_front + p.path_margin, p.robot_rear
+        n = max(1, int(math.ceil(dist / 0.05)))
+        ds = dist / n
+        for i in range(n + 1):
+            if i > 0:
+                kk = self._pursuit_k(x, y, h)
+                hm = h + 0.5 * kk * ds
+                x, y, h = x + ds * math.cos(hm), y + ds * math.sin(hm), h + kk * ds
+            c, s = math.cos(h), math.sin(h)
+            car = [(x + a * c - b * s, y + a * s + b * c) for a, b in ((front, hw), (front, -hw), (-rear, -hw), (-rear, hw))]
+            for o in boxes:
+                if _rect_hits_box(car, o.xmin, o.x_end(p.obs_min_len), o.ymin, o.ymax):
+                    return ds * i, o
+        return INF, None
 
     # ---------- 바로 앞 충돌 판단 ----------
     def path_hit(self, obs, k, dist, fixed=False):
