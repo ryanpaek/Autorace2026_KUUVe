@@ -499,7 +499,7 @@ class AvoidPlanner:
         hw = self.p.robot_half_width + self.p.side_margin
         return not (o.ymax < c - hw or o.ymin > c + hw)
 
-    def free_ahead(self, lane, obs):
+    def free_ahead(self, lane, obs, skip_beside=False):
         """그 차선에서 앞범퍼 ~ 가장 가까운 장애물까지 거리 (없으면 INF, 옆에 붙어있으면 음수)"""
         p = self.p
         x = self.pose.x
@@ -509,6 +509,8 @@ class AvoidPlanner:
             if not self._in_corridor(o, lane):
                 continue
             if o.x_end(p.obs_min_len) < x - p.robot_rear:   # 이미 지나감
+                continue
+            if skip_beside and o.xmin < xf:                  # 옆(지나가는 중): 들어갈 수 있는지는 path_clear가 봄
                 continue
             d = min(d, o.xmin - xf)
         return d
@@ -558,7 +560,9 @@ class AvoidPlanner:
             if not self.path_clear(cur, lane, obs):
                 why[lane] = '지나갈 길 막힘(옆·앞 장애물)'
                 continue
-            f = self.free_ahead(lane, obs)
+            # 11/12: 옆에 붙어 지나가는 중인 장애물은 '앞'이 아님 (들어가도 되는지는 위 path_clear가 굴려 봄).
+            #   예전엔 옆 장애물 때문에 앞 거리가 음수로 나와 그 차로를 안 골랐다 -> 다음 장애물 앞에서 서고 후진
+            f = self.free_ahead(lane, obs, skip_beside=p.clear_rollout)
             if f < f_cur + p.better_margin:
                 why[lane] = f'앞 {min(f, 9.9):.2f}m (지금보다 {p.better_margin:.1f}m 더 비어야 함)'
                 continue
@@ -567,7 +571,7 @@ class AvoidPlanner:
         for lane in self.lanes:
             if lane == cur or not why.get(lane, '').startswith('갈 수 있음'):
                 continue
-            f = self.free_ahead(lane, obs)
+            f = self.free_ahead(lane, obs, skip_beside=p.clear_rollout)
             key = (min(f, 3.0), -abs(lane - cur), 1 if lane == self.exit_pref else 0)
             if best is None or key > best_key:
                 best, best_key = lane, key
