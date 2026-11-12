@@ -12,7 +12,9 @@ topics=(/scan /odom /wheel/odom /imu /limo_status /cmd_vel /limo/ack_cmd /lane/c
         # M7 3차선 회피 (limo_obstacle_avoid) + M8 라바콘 디버그 그림
         /obstacle/cmd_vel /obstacle/debug/compressed /avoid/state /avoid/active /avoid/done /avoid/enable /fork_direction
         # M7 차로 (늘) / M7 끝 차로 -> M2
-        /m7/lane /m7/exit_lane)
+        /m7/lane /m7/exit_lane
+        # M7 직전 코너 진단 (tools/curve_diag.py가 켜져 있을 때)
+        /diag/curve)
 if [ "${RAW:-1}" = "1" ]; then
   topics+=(/camera/color/image_raw)
 else
