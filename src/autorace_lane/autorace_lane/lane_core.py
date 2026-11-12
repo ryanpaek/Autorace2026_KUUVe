@@ -219,6 +219,7 @@ class LaneParams:
     jump_max_frames: int = 6          # 이만큼 연속으로 튀면 새 값을 받아들인다
     lost_hold_frames: int = 30        # 차선을 놓친 뒤 버티는 프레임 수 (30fps면 1초)
     lost_corner_frames: int = 120     # 11/12 밤: M7 직전 코너 미리보기가 있을 때 선을 놓쳐도 코너 곡률로 버티는 프레임 수
+    route_corner_weight: float = 0.6  # 11/12 밤: M7 직전 코너에서 선이 보여도 코너 곡률을 섞는 비율
     lost_decay: float = 0.95          # IMU가 없을 때 마지막 곡률의 프레임당 감쇠
     # 헤딩 유지 (IMU)
     yaw_kp: float = 1.5               # 헤딩 오차 1 rad당 요레이트 명령 (rad/s)
@@ -1551,7 +1552,12 @@ class LaneFollower:
                 kappa_raw = self.last_good_kappa * (p.lost_decay ** self.lost_frames)
         # 도면 곡률 미리 넣기
         k_ff = self._route_kappa(p.route_ff_preview_mm + speed * p.latency_comp_sec * 1000.0)
-        if k_ff is not None and (p.route_ff_weight > 0.0 or p.route_ff_weight_lost > 0.0):
+        if k_ff is not None and self.route_corner and source in ('lane', 'memory'):
+            # 11/12 밤 실차: M7 직전 코너(미션 노드가 IMU로 '아직 코너 중')에서 차선 노드가 선을 '보고' 있는데도 직진했다.
+            #   이 코너에서는 선이 잘 보여도 코너 곡률을 route_corner_weight 만큼 섞고, 도면과 다르다고 버리지 않는다
+            out.ff_kappa = k_ff
+            kappa_raw = kappa_raw + p.route_corner_weight * (k_ff - kappa_raw)
+        elif k_ff is not None and (p.route_ff_weight > 0.0 or p.route_ff_weight_lost > 0.0):
             out.ff_kappa = k_ff
             w = 0.0
             strong = out.status == 'BOTH' and not out.low_conf

@@ -312,3 +312,16 @@ def test_m7_corner_preview_keeps_turning_when_lost(cfg):
     f.route_corner = False                 # 코너가 아니면 예전대로 (오래 놓치면 정지)
     out = run(f, synth.blank(cfg), frames=40, yaw=0.0)
     assert out.source in ('hold', 'stop')
+
+
+def test_m7_corner_blends_corner_even_when_lines_seen(cfg):
+    """11/12 밤 실차: 코너에서 차선 노드가 선을 '보면서' 직진. m7_corner면 선이 보여도 코너 곡률을 섞는다 (도면 다르다고 안 버림)."""
+    f = LaneFollower(cfg, LaneParams(route_ff_weight_lost=0.8))
+    f.route_k = [-1.5625] * 14
+    f.route_step_mm = 100.0
+    f.route_corner = True
+    out = run(f, synth.straight_lane(cfg), frames=20, yaw=0.0)     # 선은 똑바로 보임
+    assert out.source == 'lane' and out.kappa < -0.6               # 그래도 오른쪽으로 꺾음
+    f.route_corner = False
+    out = run(f, synth.straight_lane(cfg), frames=20, yaw=0.0)
+    assert abs(out.kappa) < 0.3                                     # 코너가 아니면 예전대로 선을 따름
