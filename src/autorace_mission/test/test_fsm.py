@@ -438,3 +438,35 @@ def test_m8_corner_preview_after_m2():
     practice = MissionFSM({'start_state': 'M2_FORK'})
     practice._goto('M8_CONES', Inputs(t=0.0, dist_mm=0.0, yaw=0.0), 'manual')
     assert practice.m7_corner_k(0.0, 0.0) is None
+
+
+def _m8_after_fork(choice, ready):
+    fsm = MissionFSM({'start_state': 'M2_FORK', 'cones_source_ready': ready})
+    fsm.fork_choice = choice
+    fsm._goto('M8_CONES', Inputs(t=0.0, dist_mm=5000.0, yaw=0.0), f'fork {choice} done')
+    return fsm
+
+
+def test_m8_keeps_fork_line_until_both_lines_seen():
+    """11/12 밤 실차: M2 끝(합류 테이퍼)에서 normal로 바꾸자마자 선을 놓쳐 차선 무시.
+    M8 시작 뒤 양쪽 선이 3번 연속 보일 때까지(최대 400 mm) 갈림길 바깥선 한쪽 모드 유지"""
+    for ready in (False, True):
+        for choice, mode in (('A', 'left_only'), ('B', 'right_only')):
+            fsm = _m8_after_fork(choice, ready)
+            cmd = fsm.step(Inputs(t=0.1, dist_mm=5050.0, yaw=0.0, lane={'status': 'L'}))
+            assert cmd.lane['mode'] == mode
+            for i in range(3):
+                cmd = fsm.step(Inputs(t=0.2 + 0.1 * i, dist_mm=5100.0 + 10 * i, yaw=0.0, lane={'status': 'BOTH'}))
+            assert cmd.lane['mode'] == 'normal'
+            cmd = fsm.step(Inputs(t=0.6, dist_mm=5150.0, yaw=0.0, lane={'status': 'L'}))
+            assert cmd.lane['mode'] == 'normal'                      # 한 번 normal이면 계속
+
+
+def test_m8_fork_line_ends_by_distance():
+    fsm = _m8_after_fork('A', False)
+    assert fsm.step(Inputs(t=0.1, dist_mm=5300.0, yaw=0.0, lane={'status': 'NONE'})).lane['mode'] == 'left_only'
+    assert fsm.step(Inputs(t=0.2, dist_mm=5420.0, yaw=0.0, lane={'status': 'NONE'})).lane['mode'] == 'normal'
+    manual = MissionFSM({'start_state': 'M2_FORK'})
+    manual.fork_choice = 'A'
+    manual._goto('M8_CONES', Inputs(t=0.0, dist_mm=0.0, yaw=0.0), 'manual')
+    assert manual.step(Inputs(t=0.1, dist_mm=10.0, yaw=0.0, lane={'status': 'L'})).lane['mode'] == 'normal'

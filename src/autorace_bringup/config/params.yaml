@@ -64,6 +64,7 @@ mission_node:
     cones_len_mm: 4300.0                   # cones_source_ready=false일 때만 씀 (차선 주행 통과 거리)
     # M8 라바콘: obstacle 노드가 콘 사이 경로를 따라감. false로 바꾸면 예전처럼 차선 주행으로 통과
     cones_source_ready: true
+    m8_keep_fork_mm: 400.0                 # 11/12 밤: M2 끝 뒤 양쪽 선이 3번 연속 보일 때까지(최대 400 mm) 갈림길 바깥선 한쪽 모드 유지 (합류 테이퍼에서 선 놓침). 0=끔
     cones_enter_before_mm: 0.0             # 도면 예비: 시작선 이만큼 앞에서 라바콘 모드 (1순위는 카메라로 선 통과)
     cones_enter_cone_mm: 500.0             # 차로 안 콘이 이 안이면 조금 일찍
     cones_end_after_mm: 150.0              # 끝선 이만큼 지나면 무조건 복귀
