@@ -93,6 +93,12 @@ class AvoidParams:
     rechoose_dy: float = 0.12         # 차로를 옮기기 시작했어도 원래 차로 중심에서 이만큼 안이면, 새로 확정된
                                       #   장애물로 다른 차로가 더 비어 보일 때 목표를 바꿈 (켜자마자 고른 쪽이 다음 줄에서 막힘 방지)
     rechoose_sec: float = 0.6         # 위 다시 고르기는 차로를 고른 뒤 이 시간 안에 한 번만 (계속 바꾸면 왔다 갔다 함)
+    # 11/12: 옮기는 도중 가던 차로 앞이 막힌 걸 알면 멈추지 않고 그 다음 차로까지 이어서 한 번에 (예: 1차선 -> 2차선 가다 -> 3차선).
+    #   안전 조건: 다음 차로 앞이 cont_min_free 넘게 비고 지금 가던 차로보다 better_margin 더 비어야, 섬까지 cont_island_m 넘게,
+    #   지나갈 길(path_clear) 비어야, 차가 max_heading_deg 까지 안 틀어졌어야. 한 번 옮기는 동안 한 번만.
+    cont_change: bool = True
+    cont_min_free: float = 1.30       # 다음 차로 앞 최소 빈 거리 [m] (2칸 이동에 필요한 거리)
+    cont_island_m: float = 1.70       # 섬 앞 끝까지 이보다 가까우면 안 함 [m]
     rollback_need_sharp: bool = True  # 후진을 멈출 '틀 공간'을 크게 꺾는 기준(recover_lookahead)으로 잼
     hold_time: float = 0.8            # 차선 바꾼 뒤 최소 유지 시간 [s]
     stop_dist: float = 0.30           # 지금 조향대로 이만큼 더 가면 차체가 부딪힐 때만 정지(→ 후진). 옆 차로·옆에 붙은 장애물은 안 봄
@@ -273,6 +279,7 @@ class AvoidPlanner:
         self.align_dy = 0.0          # 누적 옆 보정 [m]
         self.align_th = 0.0          # 누적 방향 보정 [rad]
         self.exit_info = {}          # 출구 이동 판단 (status 로 내보냄)
+        self._cont_done = False      # 이번 옮기기에서 '이어서 한 번에'를 이미 했나
         self.lane_why = {}           # 마지막 차로 고르기에서 차로별 판단 (status·멈춤 로그로 내보냄, 11/12 진단용)
         self._late_logged = False
         self._given_up_for = None
@@ -799,6 +806,27 @@ class AvoidPlanner:
                                        f'(앞 {self.free_ahead(self.target, obs):.2f}m → {min(self.free_ahead(alt, obs), 9.9):.2f}m)'))
                 self.target = alt
                 self.rechosen = True
+
+        # ①'' 이어서 한 번에: 옮기는 도중(아직 목표 차로 밖) 목표 차로 앞이 막혔으면 그 다음 차로까지 계속
+        if p.cont_change and self.rb is None and self.rec is None and not self._cont_done:
+            dyt = self.center(self.target) - y
+            if abs(dyt) >= p.reach_tol:                       # 아직 옮기는 중
+                d = 1 if dyt > 0 else -1                      # 옮겨 가는 방향
+                nxt2 = self.target + d
+                f_tg = self.free_ahead(self.target, obs)
+                rem = p.section_length - (x + p.robot_front)
+                if (nxt2 in self.lanes and 0.0 <= f_tg < p.trigger_dist and rem > p.cont_island_m
+                        and d * self.pose.psi < math.radians(p.max_heading_deg)
+                        and self.path_clear(self.target, nxt2, obs)):
+                    f2 = self.free_ahead(nxt2, obs)
+                    if f2 > p.cont_min_free and f2 > f_tg + p.better_margin:
+                        self.events.append((x, f'옮기는 중 {lane_name(self.target)} 앞 {f_tg:.2f}m 막힘 -> 이어서 '
+                                               f'{lane_name(nxt2)}까지 한 번에 (앞 {min(f2, 9.9):.2f}m, 섬까지 {rem:.2f}m)'))
+                        self.target = nxt2
+                        self.last_switch = t
+                        self._cont_done = True
+            else:
+                self._cont_done = False                       # 목표 차로에 도착 -> 다음 옮기기 때 다시 쓸 수 있음
 
         # ②' 갈림길 방향을 알면 섬 앞 끝 전에 출구 차선으로 미리 옮김 (0/1/2차선)
         if p.fork_shift and self.exit_pref is not None and self.target != self.exit_pref \

@@ -262,3 +262,34 @@ def test_sharper_steering_after_reverse_until_new_lane():
     pl.pose.y = 0.52                                                # 새 차로 도착
     pl.step(10.0)
     assert pl.sharp is False
+
+
+def _mid_change(section=4.3, block_next=False, psi_deg=-20.0, **kw):
+    """1차선(+1)에서 2차선(0)으로 옮기는 도중(y 0.35), 2차선 0.7 m 앞에 장애물이 막 보임."""
+    from limo_obstacle_avoid.avoid_core import Obstacle
+    p = AvoidParams(section_length=section, **kw)
+    pl = AvoidPlanner(p)
+    pl.start(0.0, 0.0, 0.0, 0.0)
+    pl.pose.x, pl.pose.y, pl.pose.psi = 1.0, 0.35, math.radians(psi_deg)
+    pl.target, pl.last_switch = 0, 0.9
+    obs = [Obstacle(1.9, 2.22, -0.11, 0.11)]
+    if block_next:
+        obs.append(Obstacle(2.0, 2.32, -0.63, -0.41))
+    for o in obs:
+        o.hits = p.confirm_hits
+    pl.obs = obs
+    pl.step(1.0)
+    return pl
+
+
+def test_continue_to_next_lane_in_one_go():
+    pl = _mid_change()
+    assert pl.target == -1
+    assert any('이어서' in e for _, e in pl.events)
+
+
+def test_continue_needs_safety_conditions():
+    assert _mid_change(section=2.4).target != -1            # 섬까지 1.7 m 안
+    assert _mid_change(block_next=True).target != -1         # 다음 차로도 막힘
+    assert _mid_change(psi_deg=-45.0).target != -1           # 이미 옮기는 쪽으로 40° 넘게 틀어짐
+    assert _mid_change(cont_change=False).target != -1       # 끄면 예전대로
