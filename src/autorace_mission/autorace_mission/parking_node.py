@@ -34,7 +34,8 @@
 ├─② FOLLOW: 차선 따라가기, 왼쪽 차선과 8cm (target_offset_mm 50)
 │   ├─③ 라이다: 오른쪽 리모 두 대 짝 찾기 (사이 약 104cm) → 중점 = 목표 칸 가운데
 │   │   └─ 중점이 앞바퀴보다 32cm 앞에 오면 → PAUSE
-│   └─ (예비) 짝 못 찾고 첫 리모가 앞바퀴 옆 → EXTRA: 0.2m 더 → PAUSE
+│   └─ (예비, 기본 끔 single_fallback) 짝 못 찾고 리모만 한 물체가 앞바퀴 옆 → EXTRA: 0.2m 더 → PAUSE
+│      (11/12: 켜 두면 주차 표지판에 속아 일찍 꺾음 → 짝만 기다리고, 2.5m 가도 없으면 FAIL_NO_CAR)
 │
 ├─③ PAUSE: 1초 정지
 │
@@ -594,7 +595,16 @@ class ParkingV2:
                     self._enter('PAUSE', inp)
                     return self._out(0.0, 0.0)
                 return self._out(inp['lane_v'], None)
-            right = [(x, y) for x, y in inp['clusters'] if -p['side_far_mm'] <= y <= -80.0]
+            if not p['single_fallback']:
+                # 11/12: 전체 주행에서 주차 표지판(입구 오른쪽)을 리모로 보고 EXTRA -> 일찍 꺾어 1번 칸에 충돌.
+                # 대회는 칸 양옆에 리모가 늘 있어(규정: 최소 2대) 짝이 생긴다 -> 한 물체만 보고 꺾지 않는다.
+                if moved >= p['follow_max_mm']:
+                    return self._done('FAIL_NO_CAR', inp)
+                return self._out(inp['lane_v'], None)
+            # (켰을 때) 한 물체 예비 규칙: 리모만 한 크기 덩어리만 (표지판 기둥·사람 다리 제외)
+            src = inp.get('clusters_single')
+            src = inp['clusters'] if src is None else src
+            right = [(x, y) for x, y in src if -p['side_far_mm'] <= y <= -80.0]
             if any(x > p['abeam_tol_mm'] for x, _ in right):
                 self.seen_ahead = True
             hit = any(abs(x) <= p['abeam_tol_mm'] or (p['passed_ok'] and -400.0 < x < 0.0)
@@ -796,6 +806,8 @@ DEFAULTS = {
     # 사람 다리·라바콘(약 60~100)은 못 거름 -> 주차 구역 옆에 사람이 서 있지 않게
     'car_min_size_mm': 60.0,
     'side_far_mm': 1300.0,     # ③ 오른쪽 리모 찾는 거리 (앞줄 약 0.4m, 뒷줄 약 1.0m)
+    'single_fallback': False,  # 짝 없이 오른쪽 물체 하나만 보고 꺾기 (V1 방식). 11/12: 표지판에 속아 1번 칸 충돌 -> 기본 끔
+    'single_min_size_mm': 150.0,  # 켰을 때 이보다 작은 덩어리는 무시 (리모 옆면 220mm)
     'extra_mm': 200.0,         # (추가) 리모 옆 확인 후 더 갈 거리. 0 = 캡틴 원래 계획 (시뮬레이션: 0이면 0점)
     'brake_mm': 23.0,          # 0.18 m/s 제동 거리 (calib 4번)
     'pause_sec': 1.0,          # ③ 캡틴 값
@@ -953,7 +965,7 @@ def main(args=None):
             if active and g('enabled'):
                 if self.logic is None:
                     self.logic = ParkingV2({k: g(k) for k in DEFAULTS})
-                clusters, blocked, points, clusters_pair, clusters_box = [], False, [], [], []
+                clusters, blocked, points, clusters_pair, clusters_box, clusters_single = [], False, [], [], [], []
                 if self.scan is not None:
                     s = self.scan
                     clusters = scan_clusters(s.ranges, s.angle_min, s.angle_increment, s.range_min,
@@ -968,6 +980,10 @@ def main(args=None):
                                                   s.range_max, g('front_axle_from_lidar_mm'), g('laser_yaw'),
                                                   max_dist_mm=max(1500.0, g('side_far_mm') + 200.0), x_mode='extent',
                                                   min_size_mm=g('car_min_size_mm'))
+                    clusters_single = scan_clusters(s.ranges, s.angle_min, s.angle_increment, s.range_min,
+                                                    s.range_max, g('front_axle_from_lidar_mm'), g('laser_yaw'),
+                                                    max_dist_mm=max(1500.0, g('side_far_mm') + 200.0),
+                                                    min_size_mm=g('single_min_size_mm'))
                     clusters_box = scan_clusters(s.ranges, s.angle_min, s.angle_increment, s.range_min,
                                                  s.range_max, g('front_axle_from_lidar_mm'), g('laser_yaw'),
                                                  max_dist_mm=1500.0, x_mode='box')
@@ -975,7 +991,7 @@ def main(args=None):
                     't': time.monotonic(), 'dist_mm': self.dist_mm, 'yaw': self.yaw,
                     'lane_v': self.lane_v, 'lane_w': self.lane_w, 'stoplines_mm': self.stoplines,
                     'end_lines_mm': self.end_lines, 'armed': bool(self.mstate.get('parking_armed', True)),
-                    'clusters': clusters, 'blocked': blocked, 'points': points, 'clusters_pair': clusters_pair,
+                    'clusters': clusters, 'blocked': blocked, 'points': points, 'clusters_pair': clusters_pair, 'clusters_single': clusters_single,
                     'clusters_box': clusters_box})
                 tw.linear.x = float(v)
                 tw.angular.z = float(self.lane_w if k is None else v * k)

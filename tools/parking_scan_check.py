@@ -34,6 +34,7 @@ from sensor_msgs.msg import LaserScan
 from autorace_mission.parking_node import find_pair, scan_clusters
 
 FRONT_AXLE_FROM_LIDAR_MM = float(sys.argv[1]) if len(sys.argv) > 1 else -47.0
+CAR_MIN_SIZE_MM = float(sys.argv[2]) if len(sys.argv) > 2 else 150.0   # params car_min_size_mm 과 같게
 
 
 class ScanCheck(Node):
@@ -52,12 +53,17 @@ class ScanCheck(Node):
         self.last = now
         cl = scan_clusters(s.ranges, s.angle_min, s.angle_increment, s.range_min, s.range_max,
                            FRONT_AXLE_FROM_LIDAR_MM, 0.0, max_dist_mm=1500.0)
+        # 짝 찾기는 노드와 똑같이: 양 끝 중점 + 작은 덩어리(표지판 기둥 등) 버림 (params car_min_size_mm)
+        big = scan_clusters(s.ranges, s.angle_min, s.angle_increment, s.range_min, s.range_max,
+                            FRONT_AXLE_FROM_LIDAR_MM, 0.0, max_dist_mm=1500.0, x_mode='extent',
+                            min_size_mm=CAR_MIN_SIZE_MM)
         print('--------------------------------------------------')
-        print(f'덩어리 {len(cl)}개 (앞바퀴 기준 mm, 앞 +, 왼 +):')
+        print(f'덩어리 {len(cl)}개 (앞바퀴 기준 mm, 앞 +, 왼 +). "작음" = 짝 찾기에서 버림 ({CAR_MIN_SIZE_MM:.0f}mm 미만):')
         for x, y in sorted(cl, key=lambda c: c[0]):
             side = '오른쪽' if y < 0 else '왼쪽'
-            print(f'   앞 {x:7.0f}  옆 {y:7.0f}  ({side} {abs(y):.0f}mm)')
-        pair = find_pair(cl, 1300.0, 1040.0, 150.0)
+            kept = any(abs(x - bx) < 150.0 and abs(y - by) < 150.0 for bx, by in big)
+            print(f'   앞 {x:7.0f}  옆 {y:7.0f}  ({side} {abs(y):.0f}mm){"" if kept else "  <- 작음"}')
+        pair = find_pair(big, 1300.0, 1040.0, 150.0)
         if pair is None:
             print('짝: 없음')
         else:

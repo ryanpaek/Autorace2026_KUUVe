@@ -348,3 +348,35 @@ def test_pair_ignores_small_objects():
     big = pn.scan_clusters(rng, amin, ainc, 0.05, 8.0, 0.0, 0.0, min_size_mm=pn.DEFAULTS['car_min_size_mm'])
     assert len(small) == 2 and len(big) == 1
     assert big[0][0] > 700.0
+
+
+def test_sign_post_does_not_trigger_early_turn():
+    """11/12 실차: 입구 오른쪽 주차 표지판이 옆을 지나가도 EXTRA(일찍 꺾기)로 가지 않는다."""
+    logic = pn.ParkingV2(dict(pn.DEFAULTS))
+    base = {'yaw': 0.0, 'lane_v': 0.2, 'lane_w': 0.0, 'end_lines_mm': [], 'blocked': False, 'armed': True}
+    logic.step({**base, 't': 0.0, 'dist_mm': 0.0, 'stoplines_mm': [], 'clusters': []})
+    _, _, info = logic.step({**base, 't': 0.1, 'dist_mm': 400.0, 'stoplines_mm': [200.0], 'clusters': []})
+    assert info['phase'] == 'FOLLOW'
+    phases = set()
+    for i in range(40):                       # 표지판: 앞 300mm -> 뒤로 지나감 (오른쪽 400mm)
+        x = 300.0 - i * 20.0
+        _, _, info = logic.step({**base, 't': 0.2 + i * 0.1, 'dist_mm': 400.0 + i * 20.0, 'stoplines_mm': [],
+                                 'clusters': [(x, -400.0)], 'clusters_pair': [], 'clusters_single': []})
+        phases.add(info['phase'])
+    assert phases == {'FOLLOW'}
+
+
+def test_single_fallback_ignores_small_objects_when_enabled():
+    """예비 규칙을 켜도 리모보다 작은 덩어리(clusters_single에 없음)로는 꺾지 않는다."""
+    p = dict(pn.DEFAULTS); p['single_fallback'] = True
+    logic = pn.ParkingV2(p)
+    base = {'yaw': 0.0, 'lane_v': 0.2, 'lane_w': 0.0, 'end_lines_mm': [], 'blocked': False, 'armed': True}
+    logic.step({**base, 't': 0.0, 'dist_mm': 0.0, 'stoplines_mm': [], 'clusters': []})
+    logic.step({**base, 't': 0.1, 'dist_mm': 400.0, 'stoplines_mm': [200.0], 'clusters': []})
+    phases = set()
+    for i in range(40):
+        x = 300.0 - i * 20.0
+        _, _, info = logic.step({**base, 't': 0.2 + i * 0.1, 'dist_mm': 400.0 + i * 20.0, 'stoplines_mm': [],
+                                 'clusters': [(x, -400.0)], 'clusters_pair': [], 'clusters_single': []})
+        phases.add(info['phase'])
+    assert 'EXTRA' not in phases
