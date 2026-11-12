@@ -223,6 +223,16 @@ class LaneParams:
     # 11/12 밤 실차 요청: 미리 아는 코너(M7 직전, M2 뒤 = 미션이 코너 미리보기를 줄 때)에서는 안쪽 선 기준.
     #   코너에서 바깥 선은 화면(BEV) 밖으로 나가거나 다른 차로 선과 헷갈리고, 안쪽 선은 차 가까이 계속 보인다.
     #   미리보기 앞 corner_inner_ahead_mm 안에 코너 곡률이 있으면 양쪽이 보여도 안쪽 선 하나 + 반폭으로 중앙선을 만든다
+    # 11/12 밤 실차 요청: 선을 오래 놓치면 서서 끝내지 말고 찾아본다 (미션이 M7 차선 구간·M2·M2 뒤에서만 켬).
+    #   놓친 직후(lost_hold_frames까지): hold_axis_deg(미션이 준 직선 방향)가 있으면 그 방향으로 조향을 서서히 풂
+    #     (합류 사선에서 놓치면 예전엔 사선 방향을 유지해 반대쪽 선을 뚫고 나감)
+    #   그 뒤: 기준 방향에서 '직전 조향의 반대쪽'으로 lost_search_deg 틀어 lost_search_mm, 다시 반대쪽으로 2배 거리, 그래도 없으면 정지.
+    #   선이 다시 보이면 언제든 바로 차선 주행 (정지 중에도 계속 인식)
+    lost_search: bool = False
+    lost_search_deg: float = 30.0
+    lost_search_mm: float = 350.0
+    lost_search_speed: float = 0.6     # 찾는 동안 속도 비율
+    hold_axis_deg: float = 999.0       # 놓쳤을 때 붙잡을 직선 방향 (IMU yaw, deg). 999 = 없음 (마지막 차선 방향)
     corner_inner_line: bool = True
     corner_inner_ahead_mm: float = 600.0
     lost_decay: float = 0.95          # IMU가 없을 때 마지막 곡률의 프레임당 감쇠
@@ -1555,11 +1565,17 @@ class LaneFollower:
                 #   방향 유지(직진) 대신 코너 곡률로 계속 돈다
                 source, kappa_raw = 'route', k_corner
             elif self.lost_frames > p.lost_hold_frames:
-                source, kappa_raw = 'stop', 0.0
-                out.speed_scale = 0.0
-            elif yaw is not None and self.hold_yaw_ref is not None:
+                sk = self._lost_search(yaw, dist_mm, speed) if p.lost_search else None
+                if sk is not None:
+                    source, kappa_raw = 'search', sk
+                    out.speed_scale = p.lost_search_speed
+                else:
+                    source, kappa_raw = 'stop', 0.0
+                    out.speed_scale = 0.0
+            elif yaw is not None and (self.hold_yaw_ref is not None or abs(p.hold_axis_deg) <= 360.0):
                 source = 'hold'
-                kappa_raw = self._heading_kappa(yaw, self.hold_yaw_ref, speed)
+                ref = math.radians(p.hold_axis_deg) if abs(p.hold_axis_deg) <= 360.0 else self.hold_yaw_ref
+                kappa_raw = self._heading_kappa(yaw, ref, speed)
             else:
                 source = 'hold'
                 kappa_raw = self.last_good_kappa * (p.lost_decay ** self.lost_frames)
@@ -1569,7 +1585,11 @@ class LaneFollower:
             # 11/12 밤 실차: M7 직전 코너(미션 노드가 IMU로 '아직 코너 중')에서 차선 노드가 선을 '보고' 있는데도 직진했다.
             #   이 코너에서는 선이 잘 보여도 코너 곡률을 route_corner_weight 만큼 섞고, 도면과 다르다고 버리지 않는다
             out.ff_kappa = k_ff
+            k_lane = kappa_raw
             kappa_raw = kappa_raw + p.route_corner_weight * (k_ff - kappa_raw)
+            # 11/12 밤: 코너에서 바깥으로 밀려 선을 밟고 놓침 -> 차선이 코너 방향으로 더 크게 꺾으라고 하면 그 값을 그대로 (적어도 코너 곡률, 필요하면 더)
+            if k_lane * k_ff > 0 and abs(k_lane) > abs(kappa_raw):
+                kappa_raw = k_lane
         elif k_ff is not None and (p.route_ff_weight > 0.0 or p.route_ff_weight_lost > 0.0):
             out.ff_kappa = k_ff
             w = 0.0
@@ -1736,6 +1756,34 @@ class LaneFollower:
         ds = np.arange(len(ks)) * self.route_step_mm
         q = np.linspace(d_mm - half_win_mm, d_mm + half_win_mm, 7)
         return float(np.mean(np.interp(q, ds, ks)))
+
+    def _lost_search(self, yaw, dist_mm, speed) -> Optional[float]:
+        """선을 오래 놓쳤을 때 찾기 조향 (lost_search 설명). 다 찾아봤으면 None (-> 정지)."""
+        p = self.p
+        if yaw is None:
+            return None
+        sr = getattr(self, 'search', None)
+        if sr is None or sr['frame'] != self.lost_frames - 1:
+            ref = (math.radians(p.hold_axis_deg) if abs(p.hold_axis_deg) <= 360.0
+                   else self.hold_yaw_ref if self.hold_yaw_ref is not None else yaw)
+            if abs(self.last_good_kappa) > 0.15:
+                first = -1.0 if self.last_good_kappa > 0 else 1.0      # 직전 조향(왼쪽 +)의 반대쪽
+            else:
+                first = 1.0 if self.mode == 'left_only' else -1.0       # 따라가던 선 쪽
+            sr = self.search = {'ref': ref, 'first': first, 'd0': dist_mm, 'n': 0, 'frame': self.lost_frames}
+        sr['frame'] = self.lost_frames
+        sr['n'] += 1
+        if dist_mm is not None and sr['d0'] is not None:
+            d = dist_mm - sr['d0']
+        else:
+            d = sr['n'] * max(abs(speed), 0.05) * p.lost_search_speed * 70.0   # 프레임당 약 70 ms
+        if d < p.lost_search_mm:
+            side = sr['first']
+        elif d < 3.0 * p.lost_search_mm:
+            side = -sr['first']
+        else:
+            return None
+        return self._heading_kappa(yaw, sr['ref'] + side * math.radians(p.lost_search_deg), speed)
 
     def _heading_kappa(self, yaw: float, yaw_ref: float, speed: float) -> float:
         """yaw_ref를 향하도록 하는 곡률 (왼쪽 +). omega = -kp*err, kappa = omega/v."""

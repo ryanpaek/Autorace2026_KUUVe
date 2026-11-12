@@ -357,3 +357,47 @@ def test_inner_line_only_near_corner(cfg):
     f.route_corner = True
     f.p.corner_inner_line = False
     assert run(f, img, frames=5, yaw=0.0).status == 'BOTH'
+
+
+def test_lost_search_instead_of_stop(cfg):
+    """11/12 밤: 선을 오래 놓치면 서서 끝내지 않고(lost_search) 직전 조향 반대쪽 30° -> 반대쪽 -> 그래도 없으면 정지.
+    선이 다시 보이면 바로 차선 주행"""
+    import math as _m
+    f = LaneFollower(cfg, LaneParams(lost_search=True))
+    run(f, synth.straight_lane(cfg), yaw=0.0)
+    f.last_good_kappa = 0.8                      # 직전에 왼쪽으로 꺾고 있었음
+    out = run(f, synth.blank(cfg), frames=31, yaw=0.0)
+    assert out.source == 'search' and out.speed_scale > 0.0
+    assert out.kappa < 0                          # 반대쪽(오른쪽)으로 찾음
+    out = run(f, synth.blank(cfg), frames=1, yaw=_m.radians(-30.0))
+    assert out.source == 'search'
+    f.search['d0'] = None                         # 거리 정보 없이 프레임으로 진행
+    out = run(f, synth.blank(cfg), frames=400, yaw=0.0)
+    assert out.source == 'stop' and out.speed_scale == 0.0      # 다 찾아봐도 없으면 정지
+    out = run(f, synth.straight_lane(cfg), frames=3, yaw=0.0)
+    assert out.source == 'lane' and out.speed_scale > 0.0       # 다시 보이면 바로 감
+    off = LaneFollower(cfg, LaneParams())
+    run(off, synth.straight_lane(cfg), yaw=0.0)
+    assert run(off, synth.blank(cfg), frames=40, yaw=0.0).source == 'stop'   # 끄면 예전대로
+
+
+def test_hold_unwinds_to_axis(cfg):
+    """합류 사선에서 선을 놓치면 사선 방향을 유지하지 않고 미션이 준 직선 방향(hold_axis_deg)으로 조향을 풂"""
+    import math as _m
+    f = LaneFollower(cfg, LaneParams(hold_axis_deg=0.0))
+    run(f, synth.straight_lane(cfg), yaw=_m.radians(40.0))      # 차가 왼쪽 40°로 틀어진 채 선을 봄 -> 예전 hold는 이 방향 유지
+    out = run(f, synth.blank(cfg), frames=3, yaw=_m.radians(40.0))
+    assert out.source == 'hold' and out.kappa < -0.3             # 직선 방향(0°)으로 되돌림 = 오른쪽
+
+
+def test_corner_takes_lane_kappa_when_it_asks_for_more(cfg):
+    """코너에서 차선이 코너 방향으로 더 크게 꺾으라고 하면(바깥으로 밀림) 섞지 않고 그 값을 씀"""
+    f = LaneFollower(cfg, LaneParams())
+    f.route_k = [-0.5] * 14
+    f.route_step_mm = 100.0
+    f.route_corner = True
+    img = synth.arc_lane(cfg, 500.0, turn='right')
+    out = run(f, img, frames=20, yaw=0.0)
+    g = LaneFollower(cfg, LaneParams(corner_inner_line=False))
+    plain = run(g, img, frames=20, yaw=0.0)
+    assert out.kappa < -0.9 and out.kappa <= plain.kappa * 0.6   # 0.5만 섞였다면 약 -0.8 근처. 차선 요구가 살아 있음
