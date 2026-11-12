@@ -53,6 +53,13 @@
     roi_front: 2.5
     roi_back: 0.6
     obs_max_center_y: 0.67   # 11/12 밤: 덩어리 중심이 이보다 밖이면 트랙 밖 물체(노이즈)로 버림 (바깥 차로 LIMO 중심 0.52 + 15 cm)
+    merge_max_w: 0.30        # 11/12 밤 실차: 같은 장애물을 합칠 때 폭이 0.30 m 넘게 커지면 최근 관측 중심으로 줄임
+    merge_max_len: 0.70      #   앞뒤는 안 줄임 (0.45로 줄이면 시뮬레이션 드리프트 조건 40 -> 33). 예전: 폭이 0.45 m까지 커져 옆 차로 침범 -> 정지
+    # 11/12 밤: 막혀서 서게 되면 이번 라이다 한 바퀴로 똑바로 0.3 m 앞이 비었는지 보고, 비었으면 0.15 m/s로 0.3 m 전진 뒤 다시 판단 (최대 6번)
+    creep: true
+    creep_m: 0.30
+    creep_speed: 0.15
+    creep_max: 6
     roi_side_extra: 0.10
     cluster_gap: 0.12
     cluster_min_pts: 3

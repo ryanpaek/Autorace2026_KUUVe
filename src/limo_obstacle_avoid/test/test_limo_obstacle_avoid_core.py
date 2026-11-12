@@ -318,3 +318,49 @@ def test_side_wait_off_when_obstacle_is_ahead_not_beside():
     pl.obs = [_confirmed(Obstacle(0.9, 1.23, 0.42, 0.62))]
     pl.step(10.0)
     assert not any('직진 뒤' in e for _, e in pl.events)
+
+
+def test_merge_keeps_box_limo_sized():
+    """11/12 밤 실차: 같은 LIMO를 위치가 몇 cm씩 흔들린 채 여러 번 보면 상자가 합집합으로 0.45 m까지 커지고,
+    넘으면 따로 새 장애물(겹친 상자 3개). 이제 0.30 m 넘으면 최근 관측 중심으로 줄임 -> 하나, 0.30 m 이하"""
+    pl = _pl_center()
+    for i in range(12):
+        dy = 0.02 * i                                      # 위치 추정이 조금씩 밀림 (총 22 cm)
+        pl._merge([(1.0, 1.33, -0.11 + dy, 0.11 + dy)])
+    real = [o for o in pl.obs if not o.virtual]
+    assert len(real) == 1
+    o = real[0]
+    assert o.ymax - o.ymin <= 0.30 + 1e-9
+    assert o.ymin <= 0.11 and o.ymax >= 0.33 - 1e-9       # 최근 관측은 안에
+
+
+def _stuck_beside(raw_ymax):
+    """실차 로그 재현: 1차로(+1)에 있는데 2차로 LIMO 상자가 0.44까지 커져 옆에서 막힘"""
+    pl = _pl_center()
+    pl.pose.x, pl.pose.y = 1.83, 0.52
+    pl.target = 1
+    pl.last_switch = 0.0
+    g = Obstacle(1.84, 2.17, -0.01, 0.44)
+    g.hits = 20
+    pl.obs = [g]
+    pl.last_clusters = [(1.84, 2.17, -0.11, raw_ymax)]
+    return pl
+
+
+def test_creep_forward_when_only_map_blocks():
+    """지도 상자 때문에 막혔지만 이번 라이다로는 똑바로 0.3 m 앞이 비면 천천히 전진 (예전: 6초 넘게 정지)"""
+    pl = _stuck_beside(0.11)
+    v, w = pl.step(10.0)
+    assert v > 0 and w == 0.0
+    assert any('천천히 전진' in e for _, e in pl.events)
+    pl.p.creep = False
+    pl2 = _stuck_beside(0.11)
+    pl2.p.creep = False
+    assert pl2.step(10.0)[0] == 0.0                         # 끄면 예전처럼 정지
+
+
+def test_no_creep_when_lidar_also_blocks():
+    """이번 라이다로도 앞이 막혀 있으면(진짜 장애물) 전진 안 함"""
+    pl = _stuck_beside(0.44)
+    v, _ = pl.step(10.0)
+    assert v == 0.0
