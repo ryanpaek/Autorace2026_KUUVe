@@ -11,7 +11,7 @@
  2    M7 연결 단계 (/obstacle/state)   running(회피 중)·done       idle(대기)·armed(켬 보냄, 회피 노드 아직)
  3    회피 노드가 실제로 도나          /avoid/active true          false
  4    운전 주체 (FSM source)           obstacle(회피)              lane(차선)·stop
- 5    코너 지킴 (IMU)                  done                        wait숫자°(도는 중)
+ 5    코너 지킴 (IMU)                  done                        wait숫자°(도는 중). '+보완' = 미션이 코너 곡률을 차선 노드에 넣는 중 (M7 직전·M2 뒤 코너)
  6    앞 장애물 (라이다, 켜기 판단)     값(mm). 1300 안이면 켤 조건
  7    차선 양쪽 선                     BOTH                        L/R(한쪽)·NONE
  8    차선 노드가 선 보고 조향          lane/memory                 hold(놓침)·route(코너 곡률)·stop
@@ -51,7 +51,7 @@ def cols(m, ob, avoid, ln, m7lane):
         ('3', 'O' if avoid else 'X', 'on' if avoid else 'off'),
         ('4', 'O' if src == 'obstacle' else 'X', str(src)),
         ('5', '-' if corner is None else ('O' if corner == 'done' else 'X'),
-         '-' if corner is None else str(corner)),
+         ('-' if corner is None else str(corner)) + ('+보완' if m.get('corner_preview') else '')),
         ('6', '-', '-' if front is None else f'{front}mm'),
         ('7', 'O' if lstat == 'BOTH' else 'X', str(lstat)),
         ('8', 'O' if lsrc in ('lane', 'memory') else 'X', str(lsrc)),
