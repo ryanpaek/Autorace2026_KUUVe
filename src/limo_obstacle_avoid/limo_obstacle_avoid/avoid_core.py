@@ -160,6 +160,7 @@ class AvoidParams:
     lane_id_need: int = 5
     # 차로 안에서 똑바로 갈 때 조향 = (1-a) x 회피 pure pursuit + a x 차선 노드 곡률 (양쪽 선 보임 + 같은 차로일 때만)
     lane_keep_blend: float = 1.0      # 11/10 오후 0.5 -> 1.0: 차로 안 직진은 팀 차선 주행과 완전히 같은 조향 (v x kappa)
+    lane_keep_blend_single: float = 0.7   # 11/12 밤: 한쪽 선(L/R)만 보일 때 차선 노드 조향 비율 (예전 0 = 안 섞음)
     lane_fresh_sec: float = 0.3
     lane_fix_gate: float = 0.15       # 지금 추정과 이만큼 넘게 다르면 다른 차로를 본 것 → 안 씀 [m]
     lane_fix_max_deg: float = 10.0    # 차선 방향이 이보다 틀어져 보이면 안 씀 (차로 변경 중·3차선 입구 사선)
@@ -1054,10 +1055,12 @@ class AvoidPlanner:
         ln = self.lane_last
         self.blend_used = False
         if (p.lane_keep_blend > 0 and in_lane and ln and t is not None and self.lane_t is not None
-                and t - self.lane_t <= p.lane_fresh_sec and ln.get('status') == 'BOTH' and not ln.get('low_conf')
+                and t - self.lane_t <= p.lane_fresh_sec and ln.get('status') in ('BOTH', 'L', 'R')
+                and not ln.get('low_conf')
                 and ln.get('kappa') is not None and self.target == self.nearest_lane(y)
                 and (self.lane_id is None or self.lane_id == self.target)):
-            a = p.lane_keep_blend
+            # 11/12 밤: 차로 안에서는 차선 인식 우선. 한쪽 선만 보여도 lane_keep_blend_single 만큼 차선 노드 조향
+            a = p.lane_keep_blend if ln.get('status') == 'BOTH' else p.lane_keep_blend_single
             k = max(-kmax, min(kmax, (1.0 - a) * k + a * float(ln['kappa'])))
             self.blend_used = True
         return v * k

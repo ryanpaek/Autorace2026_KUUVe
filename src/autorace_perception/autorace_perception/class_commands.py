@@ -72,6 +72,7 @@ class ClassCommandRouter:
         self.min_heights = dict.fromkeys(V3_CLASSES, 0.0)
         # 미션별 투표 기준 (11/10): 0이면 vote_need를 쓴다. 갈림길·신호등은 엄하게, 서행·주차는 느슨하게 둘 수 있다
         self.mode_need = dict.fromkeys(MODE_CLASSES, 0)
+        self.early_modes = set()      # 창이 다 차기 전에도 need번이면 인정하는 미션 (11/12 밤: 갈림길)
         self._session = uuid.uuid4().hex
         self._request_counter = 0
         self._requests = {}
@@ -163,8 +164,9 @@ class ClassCommandRouter:
         self._evidence.update(best)
         counts = {cls: sum(cls in sample for sample in self._history) for cls in V3_CLASSES}
         need = self.need_for(self.mode)
-        confirmed = {cls for cls in V3_CLASSES
-                     if len(self._history) == self.vote_window and counts[cls] >= need}
+        # 11/12 밤: 갈림길 표지(M2·M7)는 창이 다 차기를(5Hz에서 2초) 기다리지 않고 need번 보이는 즉시 인정 (early_modes)
+        ready = len(self._history) == self.vote_window or self.mode in self.early_modes
+        confirmed = {cls for cls in V3_CLASSES if ready and counts[cls] >= need}
         stop_class = 'red' if 'red' in confirmed else (
             'yellow' if 'yellow' in confirmed and self.yellow_action == 'pause' else None)
         if stop_class is not None:
