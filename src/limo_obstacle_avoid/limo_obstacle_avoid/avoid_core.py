@@ -39,6 +39,14 @@ def parse_exit(s):
     return None
 
 
+def _with_lookahead(p, ld):
+    """shift_distance 계산용: lookahead만 바꾼 얕은 복사."""
+    import copy
+    q = copy.copy(p)
+    q.lookahead = ld
+    return q
+
+
 # ──────────────────────────────────────────────────────────────
 # 파라미터 (config/avoid_params.yaml 에서 덮어씀)
 # ──────────────────────────────────────────────────────────────
@@ -85,21 +93,22 @@ class AvoidParams:
     rechoose_dy: float = 0.12         # 차로를 옮기기 시작했어도 원래 차로 중심에서 이만큼 안이면, 새로 확정된
                                       #   장애물로 다른 차로가 더 비어 보일 때 목표를 바꿈 (켜자마자 고른 쪽이 다음 줄에서 막힘 방지)
     rechoose_sec: float = 0.6         # 위 다시 고르기는 차로를 고른 뒤 이 시간 안에 한 번만 (계속 바꾸면 왔다 갔다 함)
+    rollback_need_sharp: bool = True  # 후진을 멈출 '틀 공간'을 크게 꺾는 기준(recover_lookahead)으로 잼
     hold_time: float = 0.8            # 차선 바꾼 뒤 최소 유지 시간 [s]
     stop_dist: float = 0.30           # 지금 조향대로 이만큼 더 가면 차체가 부딪힐 때만 정지(→ 후진). 옆 차로·옆에 붙은 장애물은 안 봄
     # 11/12: 막혔을 때 바로 서서 후진하지 말고 먼저 조향을 끝까지 꺾어 빠져 본다. 끝까지 꺾은 길로도
     #   squeeze_min_dist 안에서 부딪히면(장애물이 0.2 m까지 붙음) 그때만 서고 예전처럼 후진·탈출
     squeeze: bool = True
     squeeze_min_dist: float = 0.20    # 끝까지 꺾은 길로 이만큼 더 가도 안 부딪혀야 꺾어서 감 [m]
-    squeeze_speed: float = 0.12       # 끝까지 꺾어 빠질 때 속도 [m/s]
+    squeeze_speed: float = 0.30   # 끝까지 꺾어 빠질 때 속도. 11/12 0.12 -> 0.30
     path_margin: float = 0.02         # 위 판단에서 차체 둘레 여유 [m]
     path_rollout: bool = True         # 위 판단의 길: 목표 차로로 가다 똑바로 서는 실제 조향을 굴려 봄 (false: 지금 곡률 유지)
     emerg_lane_band: bool = True      # 범퍼 앞 비상: 지금 차로~가려는 차로 안(도면 차로 경계)의 점만 셈. 그 밖 차로 장애물 무시
     emerg_min_pts: int = 2            # 비상정지 박스 안에 점이 이만큼 있어야 비상 (라이다 점 하나 튀어서 서는 것 방지)
     # ── 제어 (pure pursuit) ──
-    v_cruise: float = 0.25            # 차선 안에서 속도
-    v_change: float = 0.20            # 차선 변경 중 속도
-    lookahead: float = 0.40           # pure pursuit 전방주시거리 (11/10 0.50 -> 0.40: 시뮬레이션 장애물 최소 간격 7.7 -> 12cm 이상)
+    v_cruise: float = 0.30   # 차선 안 속도. 11/12 0.25 -> 0.30 (팀 base_speed, 규정 권장 0.3~0.4의 아래쪽)
+    v_change: float = 0.30   # 차선 변경 중 속도. 11/12 0.20 -> 0.30
+    lookahead: float = 0.35   # pure pursuit 전방주시. 11/12 0.40 -> 0.35: 더 크게 꺾어 확 피함 (0.30은 속도 0.3과 같이 쓰면 코너 끝에서 켤 때 이탈 1/30)
     min_turn_radius: float = 0.53     # LIMO 아커만 최소 회전반경 실측값 (이보다 작게 두면 못 도는 경로를 계획)
     max_heading_deg: float = 40.0     # 이 이상 비틀어지면 더 꺾지 않음
     reach_tol: float = 0.08           # 차선 중심에서 이 안이면 '도착'
@@ -143,8 +152,8 @@ class AvoidParams:
     # ── 멈춤 탈출: 막혀서 서 있으면 상황이 안 바뀌어 계속 선다 → 조금 후진하며 크게 꺾어 다시 잡음 ──
     recover: bool = True
     recover_after: float = 0.4        # 이만큼 계속 막혀 있으면 탈출 시작 [s] (0.8 -> 0.4: 서 있는 시간 줄임)
-    recover_dist: float = 0.25        # 후진 거리 [m] (방금 지나온 길이라 비어 있음)
-    recover_speed: float = 0.10       # 후진 속도 [m/s]
+    recover_dist: float = 0.40   # 탈출 후진 거리 [m]. 11/12 0.25 -> 0.40
+    recover_speed: float = 0.30   # 후진 속도 [m/s]. 11/12 0.10 -> 0.30
     recover_time: float = 4.0         # 이 시간 안에 못 끝내도 멈추고 다시 계획 [s]
     recover_max: int = 3              # trail 방식 횟수
     recover_swing_max: int = 6        # trail을 다 쓰고도 막히면: 후진하며 최대 조향으로 머리를 빈 쪽으로 돌리기 횟수 (0이면 예전처럼 정지)
@@ -152,8 +161,8 @@ class AvoidParams:
     recover_mode: str = 'trail'       # 'trail' | 'swing'(예전: 25cm 후진하며 크게 꺾기)
     trail_step: float = 0.05          # 지나온 길 점 간격 [m]
     rollback_lookahead: float = 0.30  # 후진할 때 따라갈 뒤쪽 점 거리 [m]
-    recover_lookahead: float = 0.25   # 후진한 뒤 다음 차로에 들어갈 때까지 전방 주시 거리 (보통 lookahead보다 짧게 -> 더 크게 꺾음)
-    rollback_max_dist: float = 0.30   # 한 번 되돌아갈 최대 거리 [m] (11/10 1.5 -> 0.3: 크게 물러나지 않음)
+    recover_lookahead: float = 0.20   # 후진 뒤 다음 차로까지 전방 주시. 11/12 0.25 -> 0.20 (최소 회전반경까지 꺾음)
+    rollback_max_dist: float = 0.40   # 한 번 되돌아갈 최대 거리 [m]. 11/12 0.3 -> 0.4
     rollback_time: float = 15.0       # 한 번 되돌아가기 최대 시간 [s]
 
 
@@ -652,7 +661,9 @@ class AvoidPlanner:
             nxt = cur                                  # 지금 차로 앞이 충분히 비었으면 그대로
         if nxt is not None and nxt != cur:
             # 옆 차로로 틀 공간이 생길 때까지는 더 물러난다 (차체가 지금 차로 장애물 옆을 벗어나는 데 필요한 앞 거리)
-            need = shift_distance(p, nxt - cur)[0] + 0.05
+            # 후진 뒤에는 짧은 전방 주시(recover_lookahead)로 크게 꺾으므로 그 기준으로 필요한 거리를 잼 (11/12)
+            q = _with_lookahead(p, p.recover_lookahead) if p.rollback_need_sharp else p
+            need = shift_distance(q, nxt - cur)[0] + 0.05
             if self.free_ahead(cur, obs) < need:
                 nxt = None
         if nxt is not None and rb['dist'] >= 0.05:
