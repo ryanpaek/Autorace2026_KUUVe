@@ -85,6 +85,13 @@ DEFAULT_PARAMS = {
     'cones_approach_mm': 1550.0,     # 경로 지도 없을 때: M2 끝 -> 라바콘 모드 (도면 1854 - 300)
     # 11/11 코너 지킴: M2 끝 -> 좌하단 코너(90°) -> 시작선(코너 끝 + 240 mm). 도면 위치가 앞서거나 코너에서 콘이 보이면
     #   코너 안에서 라바콘 모드로 들어가 콘 쪽으로 곧장 감(지름길). 카메라로 시작선을 넘은 것 말고는 IMU로 코너를 다 돈 뒤에만
+    # 11/12 밤: M7 직전 코너(횡단보도 끝 -> 직선 390 mm -> R640 오른쪽 90°)를 IMU로 지킨다. 횡단보도에서 넘어와 M7이 되면
+    #   코너를 다 돌 때까지(IMU m7_corner_done_deg) 차선 노드에 이 코너 곡률을 '도면 곡률'로 넣는다 -> 차선을 놓쳐도(hold)
+    #   직진하지 않고 계속 돈다 (차선이 잘 보이면 차선 우선, 놓치거나 한쪽만이면 섞음). 도면 위치를 잃어도 동작. 0 = 끔
+    'm7_corner_r_mm': 640.0,
+    'm7_corner_dir': -1.0,           # 오른쪽 코너 = 곡률 음수
+    'm7_corner_start_mm': 330.0,     # M7 진입(횡단보도 끝 + 약 6 cm) -> 코너 시작
+    'm7_corner_done_deg': 85.0,      # IMU로 이만큼 돌면 끝 (0이면 이 기능 끔)
     'm8_corner_turn_deg': 75.0,      # 0 = 안 씀
     'm8_corner_straight_deg': 4.0,
     'm8_corner_window_mm': 150.0,
@@ -243,6 +250,7 @@ class MissionFSM:
             self.p.update(params)
         self.votes: Dict[str, Vote] = {}
         self.fork_choice: Optional[str] = None      # 'A' | 'B'
+        self.m7c = None                              # (진입 yaw, 진입 거리): M7 직전 코너 IMU 지킴
         self.fork_adj_mm = 0.0                       # M2 끝 거리 보정 (섬 앞 끝까지 남은 거리)
         self.state = ''
         self.sub = ''
@@ -275,6 +283,10 @@ class MissionFSM:
         self.log.append(f'{self.state or "-"} -> {state} {why}'.strip())
         self.state = state
         self.enter_t, self.enter_dist = inp.t, inp.dist_mm
+        if state == 'M7_OBSTACLE':
+            # 횡단보도에서 넘어올 때만 (연습으로 set_state M7이면 이미 코너 뒤 직선에 놓음)
+            use = self.p.get('m7_corner_done_deg', 85.0) > 0 and why not in ('manual', 'init') and inp.yaw is not None
+            self.m7c = (inp.yaw, inp.dist_mm) if use else None
         if state == 'M8_CONES':
             # 앞 미션(M2)에서 넘어올 때만 코너 지킴. 연습으로 바로 M8(set_state)이면 이미 코너 뒤에 놓음
             use = self.p.get('m8_corner_turn_deg', 75.0) > 0 and why not in ('manual', 'init')
@@ -287,6 +299,29 @@ class MissionFSM:
         self.bump_at = None
         self.cones_seen, self.cones_gone_t = False, None
         self._anchored = set()
+
+    def m7_corner_k(self, dist_mm: float, yaw: Optional[float], step_mm: float = 100.0, n: int = 14):
+        """M7 직전 코너 곡률 미리보기 (앞바퀴에서 0, step, 2step ... 앞, 1/m, 왼쪽 +). 코너가 아니면 None.
+        아직 안 돌기 시작했으면(5° 미만) 진입 거리로 코너 시작을 잡고, 돌기 시작했으면 IMU로 남은 각만큼."""
+        c = getattr(self, 'm7c', None)
+        if c is None or self.state != 'M7_OBSTACLE' or yaw is None:
+            return None
+        yaw0, d0 = c
+        p = self.p
+        r = p['m7_corner_r_mm']
+        turned = abs(math.atan2(math.sin(yaw - yaw0), math.cos(yaw - yaw0)))
+        since = dist_mm - d0
+        arc = r * math.pi / 2.0
+        if turned >= math.radians(p['m7_corner_done_deg']) or since > p['m7_corner_start_mm'] + arc + 800.0:
+            self.m7c = None                              # 다 돎 (또는 너무 지나 IMU를 못 믿음) -> 끝
+            self.log.append(f'M7 corner preview off (turned {math.degrees(turned):.0f} deg, {since:.0f}mm)')
+            return None
+        if turned < math.radians(5.0):
+            start, end = p['m7_corner_start_mm'] - since, p['m7_corner_start_mm'] - since + arc
+        else:
+            start, end = -1.0, r * (math.pi / 2.0 - turned)
+        k = p['m7_corner_dir'] * 1000.0 / r
+        return [round(k, 4) if start <= i * step_mm < end else 0.0 for i in range(n)]
 
     def _anchor(self, name: Optional[str], approach: Optional['StopApproach'], rem: Optional[float]) -> None:
         """카메라로 본 선일 때만, 상태마다 선 하나당 한 번 위치 다시 잡기를 요청."""

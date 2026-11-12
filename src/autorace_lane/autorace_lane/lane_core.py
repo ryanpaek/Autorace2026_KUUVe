@@ -218,6 +218,7 @@ class LaneParams:
     jump_max_mm: float = 120.0        # 목표점 횡위치가 한 프레임에 이보다 튀면 버린다
     jump_max_frames: int = 6          # 이만큼 연속으로 튀면 새 값을 받아들인다
     lost_hold_frames: int = 30        # 차선을 놓친 뒤 버티는 프레임 수 (30fps면 1초)
+    lost_corner_frames: int = 120     # 11/12 밤: M7 직전 코너 미리보기가 있을 때 선을 놓쳐도 코너 곡률로 버티는 프레임 수
     lost_decay: float = 0.95          # IMU가 없을 때 마지막 곡률의 프레임당 감쇠
     # 헤딩 유지 (IMU)
     yaw_kp: float = 1.5               # 헤딩 오차 1 rad당 요레이트 명령 (rad/s)
@@ -1317,6 +1318,7 @@ class LaneFollower:
         # 도면 곡률 미리보기: 앞바퀴에서 0, step, 2*step ... mm 앞의 곡률 (왼쪽 +, 1/m).
         # 노드가 매 프레임 넣는다 (오래되면 None).
         self.route_k: Optional[List[float]] = None
+        self.route_corner: bool = False      # 미리보기가 M7 직전 코너(IMU)에서 온 것인가
         self.route_step_mm: float = 100.0
         self.route_pts: Optional[List[Tuple[float, float]]] = None   # 도면 중심선 (차 기준, 복귀용)
         self.reset()
@@ -1532,7 +1534,13 @@ class LaneFollower:
         elif kappa_raw is None:
             # 차선을 놓침
             self.lost_frames += 1
-            if self.lost_frames > p.lost_hold_frames:
+            k_corner = (self._route_kappa(p.route_ff_preview_mm + speed * p.latency_comp_sec * 1000.0)
+                        if self.route_corner and self.route_k else None)
+            if k_corner is not None and self.lost_frames <= p.lost_corner_frames:
+                # 11/12 밤: M7 직전 코너(미션 노드가 IMU로 '아직 코너 중'이라고 보냄)에서 선을 놓치면
+                #   방향 유지(직진) 대신 코너 곡률로 계속 돈다
+                source, kappa_raw = 'route', k_corner
+            elif self.lost_frames > p.lost_hold_frames:
                 source, kappa_raw = 'stop', 0.0
                 out.speed_scale = 0.0
             elif yaw is not None and self.hold_yaw_ref is not None:
