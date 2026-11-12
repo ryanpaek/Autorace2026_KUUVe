@@ -322,9 +322,9 @@ def run_front(link, s_from, s_to, front_of_s, step=20.0):
 
 def test_obstacle_trigger_enables_when_front_within_threshold():
     link = obstacle_link()
-    assert link.p.trigger_front_mm == 1300.0                # 11/12 1000 -> 1300
-    obs = 13589.0 + 1500.0                                   # 가운데 차로 장애물: 시작선 + 1.5 m
-    en = run_front(link, 11905.0, 15000.0, lambda s: obs - s if obs - s < 2000 else None)
+    assert link.p.trigger_front_mm == 1800.0                # 11/12 1000 -> 1300 -> 밤 1800
+    obs = 13589.0 + 2000.0                                   # 가운데 차로 장애물: 시작선 + 2.0 m (1.8 m 앞이 코너 끝 문턱 뒤가 되게)
+    en = run_front(link, 11905.0, 15000.0, lambda s: obs - s if obs - s < 2500 else None)
     assert en and en[0][0] == pytest.approx(obs - link.p.trigger_front_mm, abs=20)   # 기준 거리 앞에서
     assert link.state()['m7_trigger'] == 'obstacle'
     assert en[0][1] == pytest.approx((17973.0 - en[0][0]) / 1000.0, abs=0.03)   # section = 지금 위치 ~ 섬
@@ -427,7 +427,7 @@ def test_obstacle_trigger_700_if_configured():
     """제안값 0.7 m로 바꾸면 그 거리에서 켠다 (params.yaml m7_trigger_front_mm)."""
     link = obstacle_link(trigger_front_mm=700.0)
     obs = 13589.0 + 1500.0
-    en = run_front(link, 11905.0, 15000.0, lambda s: obs - s if obs - s < 2000 else None)
+    en = run_front(link, 11905.0, 15000.0, lambda s: obs - s if obs - s < 2500 else None)
     assert en and en[0][0] == pytest.approx(obs - 700.0, abs=20)
 
 

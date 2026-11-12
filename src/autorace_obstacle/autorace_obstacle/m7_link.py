@@ -66,7 +66,7 @@ class M7LinkParams:
     release_grace_sec: float = 0.3      # 정상 종료는 active false 직후 done이 온다 -> 이만큼 지나도 안 오면 '멈춤'으로 기록
     # 켜기 방식 (모듈 설명 6)
     enable_mode: str = 'line'           # 'line' | 'obstacle'
-    trigger_front_mm: float = 1300.0    # 11/12 1000 -> 1300. obstacle: 라이다 -> 앞 차로 장애물이 이 안이면 켬. 시뮬레이션: 0.7 m는 7조건 중 3만 성공(멈춤·이탈), 0.9 m 이상 멈춤 없음
+    trigger_front_mm: float = 1800.0    # 11/12 1000 -> 1300 -> 밤 1800 (멀리서 미리). obstacle: 라이다 -> 앞 차로 장애물이 이 안이면 켬. 시뮬레이션: 0.7 m는 7조건 중 3만 성공(멈춤·이탈), 0.9 m 이상 멈춤 없음
     trigger_half_width_mm: float = 200.0  # 앞 차로로 보는 좌우 폭(차 중심 ±). 옆 차로 LIMO(중심 ±520, 가장자리 ±410)는 안 들어옴
     trigger_gate_mm: float = -250.0     # obstacle: 시작선 기준 이 위치부터 감시 결과로 켬 (코너 끝 = 시작선 -288 mm)
     trigger_gate_early_mm: float = 300.0  # 카메라로 직선이 확인되면 문턱보다 이만큼 일찍부터 (도면 위치 늦음 대비, 0 = 안 씀)

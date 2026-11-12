@@ -220,6 +220,11 @@ class LaneParams:
     lost_hold_frames: int = 30        # 차선을 놓친 뒤 버티는 프레임 수 (30fps면 1초)
     lost_corner_frames: int = 120     # 11/12 밤: M7 직전 코너 미리보기가 있을 때 선을 놓쳐도 코너 곡률로 버티는 프레임 수
     route_corner_weight: float = 0.8  # 11/12 밤: M7 직전 코너에서 선이 보여도 코너 곡률을 섞는 비율 (실차 60~70도 뒤 직진 -> 0.6에서 0.8)
+    # 11/12 밤 실차 요청: 미리 아는 코너(M7 직전, M2 뒤 = 미션이 코너 미리보기를 줄 때)에서는 안쪽 선 기준.
+    #   코너에서 바깥 선은 화면(BEV) 밖으로 나가거나 다른 차로 선과 헷갈리고, 안쪽 선은 차 가까이 계속 보인다.
+    #   미리보기 앞 corner_inner_ahead_mm 안에 코너 곡률이 있으면 양쪽이 보여도 안쪽 선 하나 + 반폭으로 중앙선을 만든다
+    corner_inner_line: bool = True
+    corner_inner_ahead_mm: float = 600.0
     lost_decay: float = 0.95          # IMU가 없을 때 마지막 곡률의 프레임당 감쇠
     # 헤딩 유지 (IMU)
     yaw_kp: float = 1.5               # 헤딩 오차 1 rad당 요레이트 명령 (rad/s)
@@ -341,6 +346,7 @@ class LaneOutput:
         cl = self.debug.get('centerline')
         d['model'] = ('circle' if cl.circle is not None else 'poly') if cl is not None else None
         d['circle_r_mm'] = round(cl.circle[2]) if cl is not None and cl.circle is not None else None
+        d['inner'] = self.debug.get('inner')      # 코너 안쪽 선 기준이면 'L'/'R'
         return d
 
 
@@ -1396,6 +1402,13 @@ class LaneFollower:
         n_lab, lab_full = cv2.connectedComponents((bev_lane > 0).astype(np.uint8), connectivity=8)
         if det.status in ('L', 'R') and self.mode not in ('left_only', 'right_only'):
             self._keep_side_by_overlap(det, lab_full)
+        inner = self.corner_inner_side()
+        out.debug['inner'] = inner
+        if inner is not None and det.status == 'BOTH':
+            if inner == 'R':
+                det.left_x0, det.status = None, 'R'
+            else:
+                det.right_x0, det.status = None, 'L'
         out.status = det.status
 
         left = track_line(bev_lane, det.left_x0, cfg, p) if det.left_x0 is not None else None
@@ -1652,6 +1665,17 @@ class LaneFollower:
         if side != det.status:
             det.left_x0, det.right_x0 = (x0, None) if side == 'L' else (None, x0)
             det.status = side
+
+    def corner_inner_side(self) -> Optional[str]:
+        """미리 아는 코너 안(또는 바로 앞)이면 안쪽 선 쪽 'L'/'R', 아니면 None (corner_inner_line 설명)"""
+        p = self.p
+        if not (p.corner_inner_line and self.route_corner and self.route_k and self.mode == 'normal'):
+            return None
+        n = int(p.corner_inner_ahead_mm / max(self.route_step_mm, 1.0)) + 1
+        for k in self.route_k[:n]:
+            if abs(k) > 0.1:
+                return 'L' if k > 0 else 'R'
+        return None
 
     def _inner_arc(self, side: str, pix, pose, dist_mm: float):
         """이 선이 자기 쪽으로 휘는 원이면 (중심 세계좌표, 반경, 거리, yaw). 아니면 None."""
