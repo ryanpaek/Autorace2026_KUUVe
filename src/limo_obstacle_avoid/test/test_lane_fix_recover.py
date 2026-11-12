@@ -1,5 +1,7 @@
 """11/09: 카메라 차선 보정(lane_fix)과 멈춤 탈출(recover) 시험 (ROS 없이)."""
 import math
+
+import pytest
 import os
 import sys
 
@@ -293,3 +295,17 @@ def test_continue_needs_safety_conditions():
     assert _mid_change(block_next=True).target != -1         # 다음 차로도 막힘
     assert _mid_change(psi_deg=-45.0).target != -1           # 이미 옮기는 쪽으로 40° 넘게 틀어짐
     assert _mid_change(cont_change=False).target != -1       # 끄면 예전대로
+
+
+def test_lane_fix_half_while_changing_and_up_to_20deg():
+    """11/12: 옮기는 중(목표 차로 중심 밖)이어도 양쪽 선이 보이면 반만 반영. 20° 넘으면 안 씀."""
+    a = running(y0=0.0)
+    a.lane_fix(lane(-60.0), 0.0)                  # 같은 차로, 똑바로 -> 전부
+    b = running(y0=0.0)
+    b.target = 1                                  # 1차선으로 옮기는 중
+    b.lane_fix(lane(-60.0), 0.0)
+    assert b.pose.y == pytest.approx(0.5 * a.pose.y, rel=0.05) and b.pose.y > 0
+    c = running(y0=0.0)
+    assert c.lane_fix(lane(95.0, h_deg=15.0), 0.0)         # 15° (차 옆 위치 약 +5 cm): 반만
+    d = running(y0=0.0)
+    assert not d.lane_fix(lane(-60.0, h_deg=25.0), 0.0)    # 25°: 안 씀
