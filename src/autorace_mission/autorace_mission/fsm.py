@@ -92,6 +92,7 @@ DEFAULT_PARAMS = {
     'm7_corner_dir': -1.0,           # 오른쪽 코너 = 곡률 음수
     'm7_corner_start_mm': 330.0,     # M7 진입(횡단보도 끝 + 약 6 cm) -> 코너 시작
     'm7_corner_done_deg': 85.0,      # IMU로 이만큼 돌면 끝 (0이면 이 기능 끔)
+    'm7_corner_plain_lane': True,    # 코너 동안은 3차선 설정 대신 보통 차선 설정 (흰 선을 차선으로 보지 않음)
     'm8_corner_turn_deg': 75.0,      # 0 = 안 씀
     'm8_corner_straight_deg': 4.0,
     'm8_corner_window_mm': 150.0,
@@ -558,6 +559,10 @@ class MissionFSM:
             # 회피 노드가 도중에 멈춤: 차선 주행으로 넘기면 정차 LIMO 사이를 직진한다 -> 정지
             return Command('stop', self._lane(0.0), note='M7_OBSTACLE/hold (avoid node lost)')
         src = 'obstacle' if inp.obstacle.get('m7_active') else 'lane'
+        if src == 'lane' and self.m7c is not None and self.p.get('m7_corner_plain_lane', True):
+            # 11/12 밤 실차: 횡단보도 끝 코너는 아직 1차로인데 3차선 설정(흰 선도 차선, 폭 520)으로 바꾸자마자 차선 노드가
+            #   직선(흰 선)을 따라 코너를 직진했다(IMU 3°만 돎). 코너를 IMU로 다 돌 때까지는 보통 차선 설정 그대로
+            return Command('lane', self._lane(self.p['m7_speed']), note='M7_OBSTACLE/corner (plain lane)')
         return Command(src, self._lane(self.p['m7_speed'],
                                        lane_width_mm=self.p['three_lane_width_mm'],
                                        lane_color=self.p['three_lane_color']))

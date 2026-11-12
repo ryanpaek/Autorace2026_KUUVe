@@ -412,3 +412,15 @@ def test_m7_corner_preview_from_crosswalk_only():
     manual = MissionFSM({'start_state': 'M3_PEDESTRIAN'})
     manual._goto('M7_OBSTACLE', inp, 'manual')
     assert manual.m7_corner_k(1000.0, 0.0) is None
+
+
+def test_m7_corner_uses_plain_lane_config_until_turned():
+    """11/12 밤 실차: 코너 동안은 3차선 설정(흰 선도 차선, 폭 520) 대신 보통 차선 설정. 다 돌면 3차선 설정."""
+    import math as _m
+    fsm = MissionFSM({'start_state': 'M3_PEDESTRIAN', 'm7_external_avoid': True})
+    fsm._goto('M7_OBSTACLE', Inputs(t=0.0, dist_mm=0.0, yaw=0.0), 'left crosswalk')
+    cmd = fsm.step(Inputs(t=0.1, dist_mm=50.0, yaw=0.0, obstacle={}))
+    assert 'lane_color' not in cmd.lane and 'lane_width_mm' not in cmd.lane
+    fsm.m7_corner_k(1500.0, _m.radians(-88.0))                   # 다 돎 -> 미리보기 끝
+    cmd = fsm.step(Inputs(t=0.2, dist_mm=1500.0, yaw=_m.radians(-88.0), obstacle={}))
+    assert cmd.lane.get('lane_color') == 'both' and cmd.lane.get('lane_width_mm') == 520.0
