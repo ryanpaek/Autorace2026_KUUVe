@@ -108,6 +108,10 @@ class AvoidParams:
     cont_change: bool = True
     cont_min_free: float = 1.30       # 다음 차로 앞 최소 빈 거리 [m] (2칸 이동에 필요한 거리)
     cont_island_m: float = 1.70       # 섬 앞 끝까지 이보다 가까우면 안 함 [m]
+    center_before_island: bool = True  # 11/12 밤: 표지를 모르면 섬 앞에서 가능하면 2차로로 모아 표지를 보게 함
+    center_from_m: float = 2.6        #   섬 앞 끝까지 이 거리 안에서
+    center_until_m: float = 1.6       #   이 거리까지 (그보다 가까우면 2차로로 들어가지 않음: 1차로 옮겨 나갈 거리 1.1 m + 여유)
+    center_leave_m: float = 0.95      #   가운데에서 표지를 기다리다 끝내 모르면 섬 앞 이 거리에서 옆 차로로 (1차로 옮겨 나갈 최소 0.84 m + 여유)
     rollback_need_sharp: bool = True  # 후진을 멈출 '틀 공간'을 크게 꺾는 기준(recover_lookahead)으로 잼
     hold_time: float = 0.4   # 차선 바꾼 뒤 최소 유지 시간 [s]. 11/12 0.8 -> 0.4 (옮기는 중에도 다음 판단을 빨리)
     flip_block_sec: float = 1.5       # 11/12 밤: 방금 떠난 차로로 이 시간 안에는 안 돌아감 (실차 -1 <-> 0 왔다갔다)
@@ -819,7 +823,13 @@ class AvoidPlanner:
         f_cur = self.free_ahead(cur, obs)
 
         # ① 내 차선 앞이 막혔나? → ② 갈 차선 고르기
-        if f_cur < p.trigger_dist and t - self.last_switch >= p.hold_time:
+        # 가운데 차로에서 표지를 기다리는 중: 앞을 막는 게 섬뿐이면 center_leave_m 까지는 안 비킴 (표지를 알면 ②'가 1차로만 옮김)
+        wait_sign = False
+        if p.center_before_island and self.exit_pref is None and cur == 0:
+            real = [o for o in obs if not o.virtual]
+            rem = p.section_length - (x + p.robot_front)
+            wait_sign = rem > p.center_leave_m and self.free_ahead(0, real) >= p.trigger_dist
+        if f_cur < p.trigger_dist and t - self.last_switch >= p.hold_time and not wait_sign:
             nxt = self.choose(cur, obs)
             if nxt is None and self.exit_pref is not None:
                 obs2 = self.obstacles(False)            # 출구 선호 때문에 막혔으면 선호 포기
@@ -902,6 +912,22 @@ class AvoidPlanner:
                                         f'({lane_name(self.target)} 유지)'))
         elif self.exit_pref is not None and self.target == self.exit_pref:
             self.exit_info = {'need_lanes': 0, 'plan': 'keep'}
+
+        # ②'' 11/12 밤 실차: 1·3차로에서 섬 앞 갈림길 표지(섬 앞 끝 가운데)를 잘 못 봄 -> 표지를 아직 모르면 섬 앞
+        #   center_from_m ~ center_until_m 사이에서는 가능하면 2차로(가운데)로 모아 표지를 보게 한다.
+        #   2차로 앞이 섬까지 비고 지나갈 길이 비었을 때만 (특별한 경우 = 장애물이 있으면 그대로).
+        #   표지를 알게 되면 위 ②'가 1차로만 옮기면 되고, 끝까지 모르면 섬(가상 장애물) 때문에 ①에서 옆 차로를 고른다.
+        if (p.center_before_island and self.exit_pref is None and self.target != 0 and 0 in self.lanes
+                and t - self.last_switch >= p.hold_time and self.rb is None and self.rec is None):
+            rem = p.section_length - (x + p.robot_front)
+            if p.center_until_m < rem <= p.center_from_m and self.nearest_lane(y) == self.target:
+                f0 = self.free_ahead(0, obs, skip_beside=False)   # 옆에서 지나가는 중인 것도 없어야 (가운데가 정말 빔)
+                if f0 >= rem - 0.05 and self.path_clear(self.target, 0, obs):
+                    self.events.append((x, f'섬 앞 {rem:.2f}m: 표지를 보려고 가운데 차로로 ({lane_name(self.target)} → 2차선)'))
+                    self.flip_from = self.target
+                    self.target = 0
+                    self.last_switch = t
+                    self.rechosen = True             # 다시 고르기가 '앞이 더 빈 옆 차로'로 되돌리지 않게 (섬 때문에 가운데는 늘 짧음)
 
         # ③ 속도
         in_lane = abs(y - self.center(self.target)) < p.reach_tol

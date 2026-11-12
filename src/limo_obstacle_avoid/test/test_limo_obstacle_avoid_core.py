@@ -154,7 +154,11 @@ def test_two_lane_exit_in_simulation():
     lay = [(0.9, 0), (0.9, -1), (1.9, 0)]
     r = fork_sim.run(lay, AvoidParams(), 4.38, 'B', None)
     assert r['ok'] and not r['collided'], r
-    r = fork_sim.run(lay, AvoidParams(), 4.38, 'B', 1.0)            # 섬 1m 전에야 앎 → 불가, 충돌·멈춤 없이 통과
+    r = fork_sim.run(lay, AvoidParams(), 4.38, 'B', 1.0)            # 섬 1m 전에야 앎: 11/12 밤부터 가운데에서 기다려 1차로만 옮김 -> B
+    assert r['ok'] and r['right_side'] and not r['collided'], r
+    p = AvoidParams()
+    p.center_before_island = False                                  # 예전(옆 차로에서 기다림)이면 불가, 충돌·멈춤 없이 통과
+    r = fork_sim.run(lay, p, 4.38, 'B', 1.0)
     assert not r['right_side'] and not r['collided'] and r['done']
 
 
