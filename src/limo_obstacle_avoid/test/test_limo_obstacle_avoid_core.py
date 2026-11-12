@@ -175,3 +175,98 @@ def test_side_wall_is_not_an_obstacle():
     real = [o for o in pl.obs if not o.virtual]
     assert len(real) == 1 and abs(0.5 * (real[0].ymin + real[0].ymax)) < 0.15
     assert pl.free_ahead(1, pl.obstacles()) > 2.0                 # 왼쪽 차로는 비어 있음
+
+
+# ── 11/12 밤: 가운데 우선 + 두 차로 한 번에 줄임 + 가짜 장애물 지우기 ──
+def _pl_center():
+    p = AvoidParams()
+    p.use_island = False
+    pl = AvoidPlanner(p)
+    pl.start(0.0, 0.0, 0.0, 0.0)
+    return pl
+
+
+def test_choose_prefers_one_lane_move_to_center():
+    """1차로에서 막힘: 가운데 앞 1.6 m, 3차로 앞 3 m -> 예전엔 3차로(두 칸), 이제 가운데(한 칸)"""
+    pl = _pl_center()
+    pl.pose.y = 0.52
+    pl.target = 1
+    obs = [Obstacle(1.1, 1.43, 0.42, 0.62), Obstacle(1.8, 2.13, -0.1, 0.1)]
+    assert pl.choose(1, obs) == 0
+
+
+def test_returns_to_center_after_passing():
+    """3차로에 있고 가운데 앞이 비면 가운데로 돌아옴"""
+    pl = _pl_center()
+    pl.pose.y = -0.52
+    pl.target = -1
+    pl.last_switch = -10.0
+    pl.step(5.0)
+    assert pl.target == 0
+
+
+def test_no_return_to_center_near_island():
+    """섬 앞 2.6 m 안에서는 가운데로 안 돌아옴 (출구·표지 판단 구간)"""
+    pl = _pl_center()
+    pl.pose.y = -0.52
+    pl.pose.x = pl.p.section_length - 2.0
+    pl.exit_pref = -1                           # 출구를 알면 (모르면 표지 보려고 가운데로 모으는 기존 동작)
+    pl.target = -1
+    pl.last_switch = -10.0
+    pl.step(5.0)
+    assert pl.target == -1
+
+
+def _scan_through(dist_far):
+    """정면 ±10° 빔이 dist_far 에서 반사 (그 앞 1.0 m 에는 아무것도 없음)"""
+    from limo_obstacle_avoid.avoid_core import scan_to_base
+    import math as _m
+    p = AvoidParams()
+    n = 21
+    a0 = _m.radians(-10)
+    ai = _m.radians(1)
+    return scan_to_base([dist_far] * n, a0, ai, p)
+
+
+def test_forget_ghost_when_beams_pass_through():
+    """가운데 1.0 m 앞에 확정된 장애물이 있었는데 빔이 그 너머 2.5 m 에서 반사 -> 몇 스캔 뒤 지움"""
+    pl = _pl_center()
+    g = Obstacle(1.0, 1.33, -0.11, 0.11)
+    g.hits = 5
+    pl.obs = [g]
+    for _ in range(pl.p.forget_scans):
+        pl.update_scan(_scan_through(2.5))
+    assert pl.obs == []
+
+
+def test_forget_also_with_no_return():
+    """반사 없음(inf)도 뚫고 지나간 것으로 봄"""
+    pl = _pl_center()
+    g = Obstacle(1.0, 1.33, -0.11, 0.11)
+    g.hits = 5
+    pl.obs = [g]
+    for _ in range(pl.p.forget_scans):
+        pl.update_scan(_scan_through(float('inf')))
+    assert pl.obs == []
+
+
+def test_keep_obstacle_that_is_still_seen():
+    """빔이 장애물 앞면에서 반사되면 안 지움"""
+    pl = _pl_center()
+    g = Obstacle(1.0, 1.33, -0.11, 0.11)
+    g.hits = 5
+    pl.obs = [g]
+    for _ in range(10):
+        pl.update_scan(_scan_through(0.92))     # 라이다(0.10) + 0.92 = 1.02 -> 앞면
+    assert len(pl.obs) == 1
+
+
+def test_keep_obstacle_hidden_behind_nearer_one():
+    """앞에 다른 물체가 가려서 빔이 못 가면 안 지움 (가려진 것은 판단 안 함)"""
+    pl = _pl_center()
+    g = Obstacle(1.6, 1.93, -0.11, 0.11)
+    g.hits = 5
+    pl.obs = [g]
+    for _ in range(10):
+        pl.update_scan(_scan_through(0.6))
+    assert any(abs(o.xmin - 1.6) < 0.01 for o in pl.obs)

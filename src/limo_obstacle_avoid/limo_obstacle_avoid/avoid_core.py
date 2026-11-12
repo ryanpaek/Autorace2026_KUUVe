@@ -87,6 +87,16 @@ class AvoidParams:
     min_obs_size: float = 0.08        # 덩어리 가로·세로 중 긴 쪽이 이보다 작으면 버림 (기둥·다리. 리모 면 0.22)
     obs_min_len: float = 0.33         # 앞면만 보여도 이 길이만큼 차가 있다고 가정 (LIMO 길이)
     confirm_hits: int = 3             # 이 횟수 이상 보여야 진짜 장애물로 인정
+    # 11/12 밤: 지도에 한 번 들어온 장애물은 지워지지 않았다 -> 사람 다리·손·튄 점·위치가 어긋난 채 찍힌 가짜가
+    #   차로를 영원히 막아 '멈춤 엔딩'. 장애물이 있어야 할 앞면을 라이다 빔이 forget_rays개 이상 뚫고 지나가고
+    #   (그 너머에서 반사) 그 스캔에 덩어리로도 안 보이면 miss+1, forget_scans번 연속이면 지운다.
+    #   앞쪽 forget_min_x ~ forget_max_x 안의 것만 (옆·뒤는 빔이 비스듬해 판단 안 함)
+    forget: bool = True
+    forget_scans: int = 4
+    forget_rays: int = 3
+    forget_pass: float = 0.15         # 앞면보다 이만큼 더 멀리서 반사돼야 '뚫고 지나감' [m]
+    forget_min_x: float = 0.25        # 차 기준 앞 이 거리부터 [m] (base_link 기준)
+    forget_max_x: float = 2.2
     # ── 판단 ──
     trigger_dist: float = 1.3   # 내 차선 앞 장애물이 (앞범퍼 기준) 이 안이면 차선 변경. 11/12 1.0 -> 1.3 (더 일찍)
     change_len: float = 1.0           # 차선 1칸 옮기는 데 필요한 앞쪽 여유
@@ -107,8 +117,17 @@ class AvoidParams:
     #   안전 조건: 다음 차로 앞이 cont_min_free 넘게 비고 지금 가던 차로보다 better_margin 더 비어야, 섬까지 cont_island_m 넘게,
     #   지나갈 길(path_clear) 비어야, 차가 max_heading_deg 까지 안 틀어졌어야. 한 번 옮기는 동안 한 번만.
     cont_change: bool = True
-    cont_min_free: float = 1.30       # 다음 차로 앞 최소 빈 거리 [m] (2칸 이동에 필요한 거리)
-    cont_island_m: float = 1.70       # 섬 앞 끝까지 이보다 가까우면 안 함 [m]
+    cont_min_free: float = 1.80       # 다음 차로 앞 최소 빈 거리 [m]. 11/12 밤 1.3 -> 1.8 (두 차로 한 번에는 정말 필요할 때만)
+    cont_island_m: float = 2.00       # 섬 앞 끝까지 이보다 가까우면 안 함 [m]. 11/12 밤 1.7 -> 2.0
+    # 11/12 밤 실차 요청: 두 차로를 한 번에 건너는 일을 줄이고 가능하면 2차로(가운데)로 달림.
+    #   고르기 점수 = 앞 빈 거리(최대 3 m) - two_lane_penalty x (두 칸이면 1) + center_bonus x (가운데면 1)
+    two_lane_penalty: float = 1.2
+    center_bonus: float = 0.3
+    #   옆 차로(1·3)에서 장애물을 지난 뒤 가운데 앞이 center_return_free 넘게 비고(옆에 지나가는 것도 없음) 갈 길이 비면
+    #   가운데로 돌아옴. 섬 앞 center_from_m 안(출구·표지 판단 구간)에서는 안 함. 차로를 바꾼 뒤 center_return_sec 지나서만
+    center_return: bool = True
+    center_return_free: float = 1.6
+    center_return_sec: float = 1.0
     center_before_island: bool = True  # 11/12 밤: 표지를 모르면 섬 앞에서 가능하면 2차로로 모아 표지를 보게 함
     center_from_m: float = 2.6        #   섬 앞 끝까지 이 거리 안에서
     center_until_m: float = 1.6       #   이 거리까지 (그보다 가까우면 2차로로 들어가지 않음: 1차로 옮겨 나갈 거리 1.1 m + 여유)
@@ -226,19 +245,28 @@ class LocalPose:
 # ──────────────────────────────────────────────────────────────
 # 2) 라이다 → 로봇 좌표 점
 # ──────────────────────────────────────────────────────────────
+class ScanPts(list):
+    """scan_to_base 결과. list 그대로 + .far = 반사 없음(inf·0·range_max 넘음) 빔들의 라이다 기준 방향 [rad]"""
+    far = ()
+
+
 def scan_to_base(ranges, angle_min, angle_inc, p):
     """LaserScan ranges → [(x, y) 또는 None, ...]  (base_link 기준, 순서 유지)"""
     off = math.radians(p.scan_yaw_offset_deg)
-    out = []
+    out = ScanPts()
+    far = []
     for i, r in enumerate(ranges):
-        if not (p.range_min <= r <= p.range_max):      # nan / inf 도 여기서 걸러짐
-            out.append(None)
-            continue
         a = angle_min + i * angle_inc
         if p.scan_flip:
             a = -a
         a += off
+        if not (p.range_min <= r <= p.range_max):      # nan / inf 도 여기서 걸러짐
+            out.append(None)
+            if not (r == r) or r == 0.0 or r > p.range_max:   # 반사 없음 (빔이 끝까지 감). nan 포함
+                far.append(math.atan2(math.sin(a), math.cos(a)))
+            continue
         out.append((p.lidar_x + r * math.cos(a), r * math.sin(a)))
+    out.far = far
     return out
 
 
@@ -249,6 +277,8 @@ class Obstacle:
         self.hits = 1
         self.virtual = virtual
         self.tag = tag
+        self.miss = 0          # 있어야 할 자리를 라이다가 뚫고 지나간 연속 횟수 (forget)
+        self.seen = False      # 이번 스캔에서 덩어리와 합쳐졌나
 
     def x_end(self, min_len):
         """뒤쪽 끝.  앞면만 봤어도 차 길이만큼은 있다고 가정"""
@@ -403,9 +433,66 @@ class AvoidPlanner:
 
         self.emergency = emerg_n >= max(1, p.emerg_min_pts)
         self.last_clusters = clusters
+        for o in self.obs:
+            o.seen = False
         self._merge(clusters)
+        if p.forget:
+            self._forget(pts_base)
         self._align()
         return clusters
+
+    def _forget(self, pts_base):
+        """있어야 할 앞면을 빔이 뚫고 지나가면(그 너머에서 반사) 그 장애물은 없는 것 -> 몇 번 연속이면 지움"""
+        p = self.p
+        P = self.pose
+        c, s = math.cos(P.psi), math.sin(P.psi)
+        lx, ly = P.x + p.lidar_x * c, P.y + p.lidar_x * s
+        rays = []
+        for pt in pts_base:
+            if pt is None:
+                continue
+            bx, by = pt[0] - p.lidar_x, pt[1]
+            rays.append((math.atan2(by, bx), math.hypot(bx, by)))
+        rays.extend((a, INF) for a in getattr(pts_base, 'far', ()))
+        if not rays:
+            return
+        keep = []
+        for o in self.obs:
+            if o.virtual or o.seen:
+                o.miss = 0 if o.seen else o.miss
+                keep.append(o)
+                continue
+            # 앞면 양 끝을 라이다 기준 (방향, 거리)로
+            ends = []
+            for yy in (o.ymin, o.ymax):
+                dx, dy = o.xmin - lx, yy - ly
+                fx, fy = dx * c + dy * s, -dx * s + dy * c
+                ends.append((math.atan2(fy, fx), math.hypot(fx, fy), fx))
+            fx_min = min(e[2] for e in ends)
+            if not (p.forget_min_x <= fx_min + p.lidar_x <= p.forget_max_x):
+                keep.append(o)
+                continue
+            a0, a1 = sorted(e[0] for e in ends)
+            pad = 0.25 * (a1 - a0)                    # 가장자리 빔은 빼고 가운데만
+            a0, a1 = a0 + pad, a1 - pad
+            near = min(e[1] for e in ends)
+            far = max(e[1] for e in ends)
+            n_pass = n_hit = 0
+            for a, r in rays:
+                if a0 <= a <= a1:
+                    if r > far + p.forget_pass:
+                        n_pass += 1
+                    elif r > near - 0.10:
+                        n_hit += 1
+            if n_pass >= p.forget_rays and n_hit == 0:
+                o.miss += 1
+            elif n_hit > 0:
+                o.miss = 0
+            if o.miss >= p.forget_scans:
+                self.events.append((self.pose.x, f'장애물 지움 (x {o.xmin:.2f}, y {0.5 * (o.ymin + o.ymax):+.2f}: 빔이 뚫고 지나감)'))
+                continue
+            keep.append(o)
+        self.obs = keep
 
     # ---------- 정렬 보정 ----------
     def _align(self):
@@ -490,10 +577,13 @@ class AvoidPlanner:
                     o.xmin, o.xmax = min(o.xmin, x0), max(o.xmax, x1)
                     o.ymin, o.ymax = ny0, ny1
                     o.hits += 1
+                    o.seen = True
                     merged = True
                     break
             if not merged:
-                self.obs.append(Obstacle(x0, x1, y0, y1))
+                n = Obstacle(x0, x1, y0, y1)
+                n.seen = True
+                self.obs.append(n)
 
     def obstacles(self, with_pref=True):
         """확정된 실제 장애물 + 가상 장애물(섬, 출구 선호)"""
@@ -592,7 +682,9 @@ class AvoidPlanner:
             if lane == cur or not why.get(lane, '').startswith('갈 수 있음'):
                 continue
             f = self.free_ahead(lane, obs, skip_beside=p.clear_rollout)
-            key = (min(f, 3.0), -abs(lane - cur), 1 if lane == self.exit_pref else 0)
+            score = (min(f, 3.0) - p.two_lane_penalty * (abs(lane - cur) - 1)
+                     + (p.center_bonus if lane == 0 else 0.0))
+            key = (round(score, 3), -abs(lane - cur), 1 if lane == self.exit_pref else 0)
             if best is None or key > best_key:
                 best, best_key = lane, key
         return best
@@ -933,6 +1025,21 @@ class AvoidPlanner:
                     self.target = 0
                     self.last_switch = t
                     self.rechosen = True             # 다시 고르기가 '앞이 더 빈 옆 차로'로 되돌리지 않게 (섬 때문에 가운데는 늘 짧음)
+
+        # ②''' 가운데로 돌아오기 (위 center_return 설명)
+        if (p.center_return and self.target != 0 and 0 in self.lanes and self.rb is None and self.rec is None
+                and t - self.last_switch >= max(p.hold_time, p.center_return_sec)
+                and abs(y - self.center(self.target)) < p.reach_tol
+                and not (self.flip_from == 0 and t - self.last_switch < p.flip_block_sec)):
+            rem = p.section_length - (x + p.robot_front)
+            if rem > p.center_from_m:
+                f0 = self.free_ahead(0, obs, skip_beside=False)
+                if f0 >= p.center_return_free and self.path_clear(self.target, 0, obs):
+                    self.events.append((x, f'가운데로 돌아옴: {lane_name(self.target)} → 2차선 (가운데 앞 {min(f0, 9.9):.2f}m)'))
+                    self.flip_from = self.target
+                    self.target = 0
+                    self.last_switch = t
+                    self.rechosen = True
 
         # ③ 속도
         in_lane = abs(y - self.center(self.target)) < p.reach_tol

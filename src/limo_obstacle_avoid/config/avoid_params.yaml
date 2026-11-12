@@ -79,8 +79,21 @@
     center_until_m: 1.6
     center_leave_m: 0.95     #   가운데에서 표지를 끝내 모르면 섬 앞 0.95 m에서 옆 차로로
     cont_change: true        # 11/12: 옮기는 도중 가던 차로 앞이 막히면 다음 차로까지 이어서 한 번에 (안전 조건 아래)
-    cont_min_free: 1.30      #   다음 차로 앞 1.3 m 넘게 비어야
-    cont_island_m: 1.70      #   섬까지 1.7 m 넘게 남아야 (그리고 40° 안, 지나갈 길 빔, 한 번 옮길 때 한 번만)
+    cont_min_free: 1.80      #   다음 차로 앞 1.8 m 넘게 비어야 (11/12 밤 1.3 -> 1.8: 두 차로 한 번에는 줄임)
+    cont_island_m: 2.00      #   섬까지 2.0 m 넘게 남아야 (그리고 40° 안, 지나갈 길 빔, 한 번 옮길 때 한 번만)
+    # 11/12 밤: 가능하면 2차로(가운데). 고르기 점수 = 앞 빈 거리(최대 3 m) - 1.2(두 칸 건너면) + 0.3(가운데면)
+    two_lane_penalty: 1.2
+    center_bonus: 0.3
+    center_return: true      # 1·3차로에서 장애물 지난 뒤 가운데 앞이 1.6 m 넘게 비면 가운데로 돌아옴 (섬 앞 2.6 m 안에서는 안 함)
+    center_return_free: 1.6
+    center_return_sec: 1.0
+    # 11/12 밤: 지도에 들어온 장애물이 안 지워져 사람 다리·튄 점이 차로를 영원히 막던 것 -> 앞면을 빔이 뚫고 지나가면 지움
+    forget: true
+    forget_scans: 4          #   4 스캔 연속
+    forget_rays: 3           #   빔 3개 이상이 앞면 너머에서 반사(또는 반사 없음)
+    forget_pass: 0.15
+    forget_min_x: 0.25
+    forget_max_x: 2.2
     clear_rollout: true      # 11/12: 옆 장애물을 지나는 중에도 꺾어 들어가는 길을 굴려 봐서 안 부딪히면 바로 옮김 (늦게 옮겨 후진하던 것)
     clear_rollout_margin: 0.04
     edge_guard: true         # 11/12: 바깥 차로에서 바깥쪽으로 향해 노란선을 넘을 것 같으면 안쪽으로 끝까지 꺾음
