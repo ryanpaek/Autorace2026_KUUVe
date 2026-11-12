@@ -808,7 +808,7 @@ class AvoidPlanner:
         if (p.abort_free > 0 and self.target != origin and self.rb is None and self.rec is None
                 and t - getattr(self, '_abort_t', -1e9) >= p.abort_gap_sec):
             f_tg = self.free_ahead(self.target, obs)
-            if f_tg < p.abort_free:
+            if 0.0 <= f_tg < p.abort_free:              # 음수 = 옆에 붙은 장애물(아직 못 지나감)은 path_hit이 봄
                 best, best_f = None, f_tg + p.better_margin
                 for lane in self.lanes:
                     if lane == self.target:
