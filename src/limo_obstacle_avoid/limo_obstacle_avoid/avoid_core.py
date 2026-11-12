@@ -116,9 +116,9 @@ class AvoidParams:
     align_max_psi_deg: float = 15.0   # 차가 이보다 비틀어져 있거나 후진(탈출) 중이면 정렬 보정 안 함
     # 11/12: 정렬 보정은 'LIMO가 차로 한가운데에 똑바로 서 있다'고 가정한다. 실제로 손으로 놓은 LIMO가 옆으로 10 cm쯤
     #   비켜 있으면 방향을 최대 6°까지 잘못 돌려, 3 m 앞 LIMO가 옆으로 25 cm 옮겨 보임 -> 내 차로에 없는 장애물이 생겨
-    #   '갈 차로 없음'으로 앞뒤 반복 (시뮬레이션 재현). 카메라 차선 보정이 최근에 됐으면 정렬 보정은 쉰다 (카메라가 더 정확)
+    #   '갈 차로 없음'으로 앞뒤 반복 (시뮬레이션 재현). 이번 회피에서 카메라 차선 보정이 한 번이라도 됐으면 정렬 보정은 끈다
+    #   (카메라가 더 정확. '최근 1초'만 쉬게 하면 차로 바꾸는 동안 정렬이 다시 틀어 카메라 문턱 밖으로 밀려남 -> 시뮬레이션에서 더 나빴음)
     align_skip_with_camera: bool = True
-    align_camera_sec: float = 1.0     # 카메라 차선 보정이 이 시간 안에 있었으면 정렬 보정 안 함
     # ── 카메라 차선 보정 (팀 lane_node의 /lane/status 를 그대로 받아 옆 위치·방향을 맞춤) ──
     #   차선 코드를 복사하지 않고 같은 노드의 결과를 쓰므로 차선 주행과 항상 같은 기준
     lane_fix: bool = True
@@ -278,8 +278,6 @@ class AvoidPlanner:
         self.lane_id_fix_n = 0
         self.lane_last = None        # 마지막 /lane/status
         self.lane_t = None
-        self.lane_fix_t = None       # 마지막으로 카메라 차선 보정을 쓴 시각
-        self.t_now = None            # 마지막 step 시각 (정렬 보정에서 씀)
         self.rollback_m = 0.0
 
     def start(self, ox, oy, yaw, t=0.0):
@@ -371,8 +369,7 @@ class AvoidPlanner:
         p = self.p
         if not p.lane_align:
             return
-        if (p.align_skip_with_camera and self.lane_fix_t is not None and self.t_now is not None
-                and self.t_now - self.lane_fix_t <= p.align_camera_sec):
+        if p.align_skip_with_camera and self.lane_fix_n > 0:
             return
         if self.rec is not None or self.rb is not None or abs(math.degrees(self.pose.psi)) > p.align_max_psi_deg:
             return      # 후진·크게 비틀어진 동안은 장애물 옆면이 비스듬히 보여 중심이 틀어짐 -> 정렬에 안 씀
@@ -597,7 +594,6 @@ class AvoidPlanner:
         d = p.lane_fix_heading_gain * dpsi if abs(math.degrees(dpsi)) <= 5.0 else 0.0
         self._apply_transform(d, p.lane_fix_gain * dy)
         self.lane_fix_n += 1
-        self.lane_fix_t = t
         self.lane_fix_dy = dy
         return True
 
@@ -730,7 +726,6 @@ class AvoidPlanner:
     def step(self, t):
         """→ (v, w).  20Hz 정도로 호출"""
         p = self.p
-        self.t_now = t
         if self.state != 'RUN':
             return 0.0, 0.0
         if self.rec is not None:
