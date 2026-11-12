@@ -110,6 +110,8 @@ class AvoidParams:
     cont_island_m: float = 1.70       # 섬 앞 끝까지 이보다 가까우면 안 함 [m]
     rollback_need_sharp: bool = True  # 후진을 멈출 '틀 공간'을 크게 꺾는 기준(recover_lookahead)으로 잼
     hold_time: float = 0.4   # 차선 바꾼 뒤 최소 유지 시간 [s]. 11/12 0.8 -> 0.4 (옮기는 중에도 다음 판단을 빨리)
+    flip_block_sec: float = 1.5       # 11/12 밤: 방금 떠난 차로로 이 시간 안에는 안 돌아감 (실차 -1 <-> 0 왔다갔다)
+    flip_ok_free: float = 0.5         #   지금 가는 차로 앞이 이보다 짧으면(정말 막힘) 예외로 허용 [m]
     stop_dist: float = 0.30           # 지금 조향대로 이만큼 더 가면 차체가 부딪힐 때만 정지(→ 후진). 옆 차로·옆에 붙은 장애물은 안 봄
     # 11/12: 막혔을 때 바로 서서 후진하지 말고 먼저 조향을 끝까지 꺾어 빠져 본다. 끝까지 꺾은 길로도
     #   squeeze_min_dist 안에서 부딪히면(장애물이 0.2 m까지 붙음) 그때만 서고 예전처럼 후진·탈출
@@ -125,7 +127,7 @@ class AvoidParams:
     v_change: float = 0.30   # 차선 변경 중 속도. 11/12 0.20 -> 0.30
     lookahead: float = 0.35   # pure pursuit 전방주시. 11/12 0.40 -> 0.35: 더 크게 꺾어 확 피함 (0.30은 속도 0.3과 같이 쓰면 코너 끝에서 켤 때 이탈 1/30)
     min_turn_radius: float = 0.53     # LIMO 아커만 최소 회전반경 실측값 (이보다 작게 두면 못 도는 경로를 계획)
-    max_heading_deg: float = 40.0     # 이 이상 비틀어지면 더 꺾지 않음
+    max_heading_deg: float = 40.0     # 이 이상 비틀어지면 더 꺾지 않음 (30으로 줄이면 붙은 배치 시험 4개 실패 -> 그대로)
     reach_tol: float = 0.08           # 차선 중심에서 이 안이면 '도착'
     # ── 갈림길(미션 2) 출구 차선 미리 이동 ──
     fork_shift: bool = True           # 갈림길 방향을 알면 섬 앞 끝 전에 출구 차선(A=+1, B=-1)으로 미리 옮김 (0/1/2차선)
@@ -292,6 +294,7 @@ class AvoidPlanner:
         self.align_dy = 0.0          # 누적 옆 보정 [m]
         self.align_th = 0.0          # 누적 방향 보정 [rad]
         self.exit_info = {}          # 출구 이동 판단 (status 로 내보냄)
+        self.flip_from = None        # 마지막으로 떠난 차로 (왔다갔다 막기)
         self._cont_done = False      # 이번 옮기기에서 '이어서 한 번에'를 이미 했나
         self.lane_why = {}           # 마지막 차로 고르기에서 차로별 판단 (status·멈춤 로그로 내보냄, 11/12 진단용)
         self._late_logged = False
@@ -831,8 +834,14 @@ class AvoidPlanner:
                     self.exit_info = {'plan': 'given_up'}
                     self.events.append((x, '출구선호 포기(현재 차선 유지)'))
                     obs = obs2
+            # 11/12 밤 실차: 방금 떠난 차로로 0.4초마다 되돌아가는 왔다갔다(-1 <-> 0)가 있었다 -> 그 차로로는
+            #   flip_block_sec 동안 안 돌아감 (지금 가는 차로가 flip_ok_free 안으로 정말 막혔을 때만 허용)
+            if (nxt is not None and nxt == self.flip_from and t - self.last_switch < p.flip_block_sec
+                    and f_cur >= p.flip_ok_free):
+                nxt = None
             if nxt is not None:
                 self.events.append((x, f'차선 {cur:+d} → {nxt:+d}  (앞 {f_cur:.2f}m)'))
+                self.flip_from = cur
                 self.target = nxt
                 self.last_switch = t
                 self.rechosen = False

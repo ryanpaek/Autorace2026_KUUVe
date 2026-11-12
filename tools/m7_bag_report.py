@@ -175,6 +175,7 @@ def main():
                         '라이다 각도·장착 위치(laser_yaw, laser_x_mm) 또는 장애물 위치 확인 (예비 위치로 켜졌을 것)')
         # 회피 노드
         rec, em = 0, 0
+        last_tg = None
         for t, s in d.get('/avoid/state', []):
             if t0 <= t <= t1 and isinstance(s, dict):
                 if s.get('recover_n', 0) > rec:
@@ -186,6 +187,16 @@ def main():
                     if s.get('obs_near') is not None:
                         print(f'             앞 장애물 [앞 m, 옆 y 범위 m]: {s["obs_near"]}  (차로 중심 y = +0.52 / 0 / -0.52)')
                 em += bool(s.get('emergency'))
+                # 11/12 밤: 목표 차로가 바뀔 때마다 왜 바꿨나 (차로별 판단, 출구 계획, 방향)
+                tg = s.get('target')
+                if tg != last_tg:
+                    print(f'{ts(t)}  [avoid] 목표 {last_tg} -> {tg}  x={s.get("x")} y={s.get("y")} psi={s.get("psi_deg")}° '
+                          f'출구={s.get("exit_pref")} 계획={s.get("exit_plan")} 남은={s.get("exit_rem_m")}m 필요={s.get("exit_need_m")}m')
+                    if s.get('lane_why'):
+                        print(f'             차로 판단: {s["lane_why"]}')
+                    if s.get('obs_near') is not None:
+                        print(f'             앞 장애물 [앞 m, 옆 y 범위 m]: {s["obs_near"]}')
+                    last_tg = tg
         if rec >= 3:
             warn.append(f'M7에서 탈출(후진) {rec}번: 막힘 반복')
         # 주기
