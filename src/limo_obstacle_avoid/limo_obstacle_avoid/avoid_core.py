@@ -114,6 +114,11 @@ class AvoidParams:
     align_w_max: float = 0.32
     align_min_span: float = 0.8       # 방향 보정은 앞뒤로 이만큼 떨어진 장애물들이 있을 때만 (가까우면 옆 위치만)
     align_max_psi_deg: float = 15.0   # 차가 이보다 비틀어져 있거나 후진(탈출) 중이면 정렬 보정 안 함
+    # 11/12: 정렬 보정은 'LIMO가 차로 한가운데에 똑바로 서 있다'고 가정한다. 실제로 손으로 놓은 LIMO가 옆으로 10 cm쯤
+    #   비켜 있으면 방향을 최대 6°까지 잘못 돌려, 3 m 앞 LIMO가 옆으로 25 cm 옮겨 보임 -> 내 차로에 없는 장애물이 생겨
+    #   '갈 차로 없음'으로 앞뒤 반복 (시뮬레이션 재현). 이번 회피에서 카메라 차선 보정이 한 번이라도 됐으면 정렬 보정은 끈다
+    #   (카메라가 더 정확. '최근 1초'만 쉬게 하면 차로 바꾸는 동안 정렬이 다시 틀어 카메라 문턱 밖으로 밀려남 -> 시뮬레이션에서 더 나빴음)
+    align_skip_with_camera: bool = True
     # ── 카메라 차선 보정 (팀 lane_node의 /lane/status 를 그대로 받아 옆 위치·방향을 맞춤) ──
     #   차선 코드를 복사하지 않고 같은 노드의 결과를 쓰므로 차선 주행과 항상 같은 기준
     lane_fix: bool = True
@@ -254,6 +259,7 @@ class AvoidPlanner:
         self.align_dy = 0.0          # 누적 옆 보정 [m]
         self.align_th = 0.0          # 누적 방향 보정 [rad]
         self.exit_info = {}          # 출구 이동 판단 (status 로 내보냄)
+        self.lane_why = {}           # 마지막 차로 고르기에서 차로별 판단 (status·멈춤 로그로 내보냄, 11/12 진단용)
         self._late_logged = False
         self._given_up_for = None
         self.stuck_since = None      # 막혀서 서 있기 시작한 시각
@@ -362,6 +368,8 @@ class AvoidPlanner:
         좌표 전체를 원점 기준 δ=-b 만큼 회전 + t=-a 만큼 옆으로 옮긴다."""
         p = self.p
         if not p.lane_align:
+            return
+        if p.align_skip_with_camera and self.lane_fix_n > 0:
             return
         if self.rec is not None or self.rb is not None or abs(math.degrees(self.pose.psi)) > p.align_max_psi_deg:
             return      # 후진·크게 비틀어진 동안은 장애물 옆면이 비스듬히 보여 중심이 틀어짐 -> 정렬에 안 씀
@@ -490,16 +498,27 @@ class AvoidPlanner:
         return True
 
     def choose(self, cur, obs):
-        """막힌 차선 cur 대신 갈 차선 고르기 (없으면 None)"""
+        """막힌 차선 cur 대신 갈 차선 고르기 (없으면 None). 차로별 판단을 self.lane_why 에 남긴다."""
         p = self.p
         f_cur = self.free_ahead(cur, obs)
         best, best_key = None, None
+        why = {cur: f'지금 앞 {min(f_cur, 9.9):.2f}m'}
         for lane in self.lanes:
-            if lane == cur or not self.path_clear(cur, lane, obs):
+            if lane == cur:
+                continue
+            if not self.path_clear(cur, lane, obs):
+                why[lane] = '지나갈 길 막힘(옆·앞 장애물)'
                 continue
             f = self.free_ahead(lane, obs)
             if f < f_cur + p.better_margin:
+                why[lane] = f'앞 {min(f, 9.9):.2f}m (지금보다 {p.better_margin:.1f}m 더 비어야 함)'
                 continue
+            why[lane] = f'갈 수 있음 앞 {min(f, 9.9):.2f}m'
+        self.lane_why = why
+        for lane in self.lanes:
+            if lane == cur or not why.get(lane, '').startswith('갈 수 있음'):
+                continue
+            f = self.free_ahead(lane, obs)
             key = (min(f, 3.0), -abs(lane - cur), 1 if lane == self.exit_pref else 0)
             if best is None or key > best_key:
                 best, best_key = lane, key
@@ -799,6 +818,8 @@ class AvoidPlanner:
                 self.stuck_since = t
             elif (p.recover and p.recover_mode == 'trail' and self.rec_n < p.recover_max
                   and t - self.stuck_since >= p.recover_after and len(self.trail) > 1):
+                self.choose(self.nearest_lane(y), obs)       # 차로별 판단을 로그에 남기려고 (결정은 안 바꿈)
+                self.events.append((x, '  차로 판단: ' + self._why_text()))
                 self.rb = {'t0': t, 'x0': x, 'y0': y, 'dist': 0.0, 'blocked': self.target}
                 self.rec_n += 1
                 why = '앞 비상' if self.emergency else '갈 차선 막힘'
@@ -909,6 +930,9 @@ class AvoidPlanner:
             self.blend_used = True
         return v * k
 
+    def _why_text(self):
+        return ' | '.join(f'{lane_name(k)} {v}' for k, v in sorted(self.lane_why.items(), reverse=True))
+
     def status(self):
         return {
             'state': self.state,
@@ -924,6 +948,11 @@ class AvoidPlanner:
             'lane_blend': getattr(self, 'blend_used', False),
             'lane_fix_n': self.lane_fix_n, 'lane_fix_dy_cm': round(self.lane_fix_dy * 100, 1),
             'exit_pref': self.exit_pref,
+            'lane_why': {str(k): v for k, v in self.lane_why.items()},
+            # 확정 장애물 (앞 1.5 m 안, 차 기준 x, 옆 y 범위). 실차에서 '어느 차로에 있다고 보는지' 확인용
+            'obs_near': [[round(o.xmin - self.pose.x, 2), round(o.ymin, 2), round(o.ymax, 2)]
+                         for o in self.obs if o.hits >= self.p.confirm_hits
+                         and -0.5 < o.xmin - self.pose.x < 1.5][:6],
             'n_obs': len([o for o in self.obs if o.hits >= self.p.confirm_hits]),
             'align_dy_cm': round(self.align_dy * 100, 1),
             'align_deg': round(math.degrees(self.align_th), 2),
