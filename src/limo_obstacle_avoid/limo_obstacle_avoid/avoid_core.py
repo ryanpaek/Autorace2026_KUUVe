@@ -1056,12 +1056,20 @@ class AvoidPlanner:
             rem = p.section_length - (x + p.robot_front)
             if p.center_until_m < rem <= p.center_from_m and self.nearest_lane(y) == self.target:
                 f0 = self.free_ahead(0, obs, skip_beside=False)   # 옆에서 지나가는 중인 것도 없어야 (가운데가 정말 빔)
-                if f0 >= rem - 0.05 and self.path_clear(self.target, 0, obs):
+                pc = self.path_clear(self.target, 0, obs)
+                if f0 >= rem - 0.05 and pc:
                     self.events.append((x, f'섬 앞 {rem:.2f}m: 표지를 보려고 가운데 차로로 ({lane_name(self.target)} → 2차선)'))
                     self.flip_from = self.target
                     self.target = 0
                     self.last_switch = t
                     self.rechosen = True             # 다시 고르기가 '앞이 더 빈 옆 차로'로 되돌리지 않게 (섬 때문에 가운데는 늘 짧음)
+                else:
+                    self._center_refused(x, rem, f'2차로 앞 {f0:.2f}m에 장애물(섬까지 비어야 함)' if f0 < rem - 0.05
+                                         else '지나갈 길 막힘(옆·앞 장애물)')
+        elif (p.center_before_island and self.target != 0 and self.exit_pref is not None
+              and p.center_until_m < p.section_length - (x + p.robot_front) <= p.center_from_m):
+            self._center_refused(x, p.section_length - (x + p.robot_front),
+                                 f'출구를 이미 앎({"A" if self.exit_pref > 0 else "B"}) -> 2차로 안 감, 출구 차로로')
 
         # ②''' 가운데로 돌아오기 (위 center_return 설명)
         if (p.center_return and self.target != 0 and 0 in self.lanes and self.rb is None and self.rec is None
@@ -1157,6 +1165,12 @@ class AvoidPlanner:
             return 0.0, 0.0
 
         return v, self.control(v, t, in_lane)
+
+    def _center_refused(self, x, rem, why):
+        """섬 앞 2차로 모으기를 못 한 이유를 바뀔 때만 로그 (실차에서 왜 1·3차로에 남았나 보려고)"""
+        if getattr(self, '_center_why', None) != why:
+            self._center_why = why
+            self.events.append((x, f'섬 앞 {rem:.2f}m: {lane_name(self.target)}에서 2차로로 안 감 - {why}'))
 
     def _creep_step(self, t):
         """막힘: 이번 스캔 덩어리로만 똑바로 creep_m(+여유) 앞이 비었으면 천천히 전진 (위 creep 설명)"""

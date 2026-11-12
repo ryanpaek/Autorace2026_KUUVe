@@ -370,6 +370,12 @@ class M7Link:
             self.trigger = None
 
         fork = mission.get('fork_choice')
+        if fork not in ('A', 'B') and self.fork_sent is None:
+            # 11/12 밤: 회피 노드는 판이 바뀌어도 계속 켜져 있어 지난 판에 받은 갈림길 방향(A/B)이 남는다 ->
+            #   이번 판 표지를 보기 전부터 출구를 안다고 보고 '표지 보러 2차로로 모으기'를 안 하고 지난 판 출구 쪽으로 감.
+            #   M7에 들어오면 아직 표지를 모를 때 한 번 'auto'(모름)를 보낸다
+            out.append(('fork', 'auto'))
+            self.fork_sent = 'auto'
         if fork in ('A', 'B') and fork != self.fork_sent:
             out.append(('fork', fork))
             self.fork_sent = fork
@@ -458,7 +464,7 @@ class M7Link:
     def _arm(self, t: float, pos: float, why: str) -> List[Tuple]:
         out: List[Tuple] = []
         self.start_heading_deg = self._straight_heading_deg()
-        if self.fork_sent is None and self.p.fork_fallback in ('A', 'B'):
+        if self.fork_sent in (None, 'auto') and self.p.fork_fallback in ('A', 'B'):
             out.append(('fork', self.p.fork_fallback))
             self.fork_sent = self.p.fork_fallback
         self.section_m = self._section(pos)
