@@ -118,6 +118,7 @@
     lane_id_window: 7
     lane_id_need: 5
     lane_keep_blend: 1.0     # 차로 안 직진: 조향 = 팀 차선 주행과 똑같이 v x kappa (/lane/status, 양쪽 선 보이고 같은 차로일 때)
+    lane_keep_blend_single: 0.7   # 11/12 밤: 차로 안에서 한쪽 선만 보여도 차선 노드 조향을 70% (차선 인식 우선)
                              #   (11/10 0.5 -> 1.0. 차로 바꾸는 중·한쪽 선만 보일 때는 회피 조향)
     lane_fresh_sec: 0.3
     lane_fix_gate: 0.15      # 지금 추정과 15 cm 넘게 다르면 다른 차로를 본 것 → 안 씀

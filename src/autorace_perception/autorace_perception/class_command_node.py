@@ -29,7 +29,10 @@ class ClassCommandNode(Node):
             self.declare_parameter(f'min_bbox_height_px.{cls}', 0.0)
         for mode in MODE_CLASSES:                      # 미션별 투표 기준. 0 = vote_need
             self.declare_parameter(f'mode_vote_need.{mode}', 0)
+        # 11/12 밤: 이 미션들은 최근 창이 다 차기 전에도 need번 보이면 바로 인정 (갈림길 표지를 늦게 정하던 것)
+        self.declare_parameter('early_confirm_modes', ['M2_FORK', 'M7_OBSTACLE'], readonly)
         self.router = ClassCommandRouter()
+        self.router.early_modes = set(self.get_parameter('early_confirm_modes').value)
         self.router.configure(
             self.get_parameter('conf_threshold').value,
             self.get_parameter('yellow_action').value,

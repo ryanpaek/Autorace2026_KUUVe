@@ -358,3 +358,11 @@ def test_done_waits_until_straight():
     ok.pose.x = ok.p.section_length + ok.p.done_margin + 0.05
     ok.step(10.0)
     assert ok.state == 'DONE'
+
+
+def test_lane_keep_blend_single_line():
+    """11/12 밤: 차로 안에서 한쪽 선(R)만 보여도 차선 노드 곡률을 0.7 섞는다 (예전엔 BOTH일 때만)."""
+    pl = running(0.0)
+    pl.lane_last, pl.lane_t = {'status': 'R', 'kappa': -1.0}, 0.0
+    w = pl.control(0.2, 0.05, True)
+    assert pl.blend_used and w == pytest.approx(0.2 * 0.7 * -1.0, abs=0.02)
