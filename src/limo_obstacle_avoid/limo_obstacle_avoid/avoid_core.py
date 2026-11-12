@@ -108,7 +108,7 @@ class AvoidParams:
     # ── 제어 (pure pursuit) ──
     v_cruise: float = 0.30   # 차선 안 속도. 11/12 0.25 -> 0.30 (팀 base_speed, 규정 권장 0.3~0.4의 아래쪽)
     v_change: float = 0.30   # 차선 변경 중 속도. 11/12 0.20 -> 0.30
-    lookahead: float = 0.30   # pure pursuit 전방주시. 11/12 0.40 -> 0.30: 더 크게 꺾어 확 피함 (흔들리면 0.35)
+    lookahead: float = 0.35   # pure pursuit 전방주시. 11/12 0.40 -> 0.35: 더 크게 꺾어 확 피함 (0.30은 속도 0.3과 같이 쓰면 코너 끝에서 켤 때 이탈 1/30)
     min_turn_radius: float = 0.53     # LIMO 아커만 최소 회전반경 실측값 (이보다 작게 두면 못 도는 경로를 계획)
     max_heading_deg: float = 40.0     # 이 이상 비틀어지면 더 꺾지 않음
     reach_tol: float = 0.08           # 차선 중심에서 이 안이면 '도착'
