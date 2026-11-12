@@ -89,6 +89,13 @@ class AvoidParams:
     trigger_dist: float = 1.3   # 내 차선 앞 장애물이 (앞범퍼 기준) 이 안이면 차선 변경. 11/12 1.0 -> 1.3 (더 일찍)
     change_len: float = 1.0           # 차선 1칸 옮기는 데 필요한 앞쪽 여유
     clear_back: float = 0.0           # 옮길 차선의 차 끝이 (뒤범퍼 - 이값)보다 뒤여야 들어감 (음수=더 일찍)
+    clear_rollout: bool = True        # 11/12: 옆 장애물을 지나는 중이면 꺾어 들어가는 길을 굴려 봐서 안 부딪히면 바로 옮김
+    clear_rollout_margin: float = 0.04  #   그때 차체 둘레 추가 여유 [m] (path_margin 0.02 + 이것)
+    # 11/12: 바깥 노란선 지킴. 바깥 차로에서 바깥쪽으로 향해 있고 edge_look 앞에서 차체 모서리가 선(가장자리 - edge_margin)을
+    #   넘을 것 같으면 안쪽으로 끝까지 꺾음 (회피 중 노란선 밖으로 나간 것, 11/12 실차)
+    edge_guard: bool = True
+    edge_margin: float = 0.03
+    edge_look: float = 0.40
     better_margin: float = 0.3        # 옮길 차선이 지금보다 이만큼 더 비어야 옮김
     rechoose_dy: float = 0.12         # 차로를 옮기기 시작했어도 원래 차로 중심에서 이만큼 안이면, 새로 확정된
                                       #   장애물로 다른 차로가 더 비어 보일 때 목표를 바꿈 (켜자마자 고른 쪽이 다음 줄에서 막힘 방지)
@@ -513,13 +520,31 @@ class AvoidPlanner:
         ahead = x + p.robot_front + p.change_len * abs(to - frm)
         back = x - p.robot_rear - p.clear_back
         step = 1 if to > frm else -1
+        beside = False
         for lane in range(frm + step, to + step, step):
             for o in obs:
                 if not self._in_corridor(o, lane):
                     continue
                 if o.xmin < ahead and o.x_end(p.obs_min_len) > back:
+                    if p.clear_rollout and o.xmin < x + p.robot_front:
+                        beside = True                       # 옆에 있는(지나가는 중인) 장애물 -> 아래 굴려 보기로 판단
+                        continue
                     return False
-        return True
+        if not beside:
+            return True
+        # 11/12: 옆 장애물을 다 지나기 전이라도, 그 차로로 실제로 꺾어 들어가는 길(차체 전체)을 굴려 봐서
+        #   안 부딪히면 지금 옮기기 시작 (S자로 일찍 꺾음). 예전엔 뒤범퍼가 옆 장애물을 다 지나야 시작 ->
+        #   다음 장애물이 가까워져 서고 후진
+        saved, saved_sharp = self.target, self.sharp
+        self.target = to
+        try:
+            m = p.path_margin
+            p.path_margin = m + p.clear_rollout_margin
+            hit = self.path_hit(obs, 0.0, p.change_len * abs(to - frm))
+        finally:
+            p.path_margin = m
+            self.target, self.sharp = saved, saved_sharp
+        return hit == INF
 
     def choose(self, cur, obs):
         """막힌 차선 cur 대신 갈 차선 고르기 (없으면 None). 차로별 판단을 self.lane_why 에 남긴다."""
@@ -959,6 +984,8 @@ class AvoidPlanner:
                 continue                               # 바깥 차로에서 바깥쪽으로는 안 꺾음 (트랙 밖)
             if side * self.pose.psi > mh:              # 이미 그쪽으로 많이 틀어짐 -> 더 꺾으면 차로 밖
                 continue
+            if p.edge_guard and side * self.pose.y > 0.5 * p.lane_width:
+                continue                               # 바깥 차로에서 바깥쪽으로 끝까지 꺾지 않음 (노란선 밖)
             k = side * kmax
             if self.path_hit(obs, k, p.squeeze_min_dist, fixed=True) < INF:
                 continue
@@ -1010,6 +1037,10 @@ class AvoidPlanner:
         mh = math.radians(p.max_heading_deg)
         if (psi > mh and k > 0) or (psi < -mh and k < 0):
             k = 0.0
+        if self._edge_danger(y, psi):
+            self.edge_guarded = True
+            return v * (-kmax if y > 0 else kmax)      # 바깥 노란선 앞: 안쪽으로 끝까지
+        self.edge_guarded = False
         # 차로 안에서 똑바로 갈 때는 팀 차선 노드 곡률을 섞는다 (양쪽 선 보임, 같은 차로, 최근 값)
         ln = self.lane_last
         self.blend_used = False
@@ -1022,6 +1053,18 @@ class AvoidPlanner:
             self.blend_used = True
         return v * k
 
+    def _edge_danger(self, y, psi):
+        """바깥 차로에서 바깥쪽으로 가는데 edge_look 앞에서 차체 앞 모서리가 노란선(가장자리 - edge_margin)을 넘나."""
+        p = self.p
+        if not p.edge_guard or abs(y) < 0.5 * p.lane_width:
+            return False
+        side = 1.0 if y > 0 else -1.0
+        out = side * psi                                # + 면 바깥쪽으로 향함
+        edge = (p.num_side_lanes + 0.5) * p.lane_width - p.edge_margin
+        corner = abs(y) + p.robot_half_width * math.cos(psi) + p.robot_front * max(0.0, math.sin(out))
+        pred = corner + p.edge_look * max(0.0, math.sin(out))
+        return corner > edge or pred > edge
+
     def _why_text(self):
         return ' | '.join(f'{lane_name(k)} {v}' for k, v in sorted(self.lane_why.items(), reverse=True))
 
@@ -1032,7 +1075,7 @@ class AvoidPlanner:
             'psi_deg': round(math.degrees(self.pose.psi), 1),
             'target': self.target,
             'now_lane': self.nearest_lane(self.pose.y),
-            'emergency': self.emergency, 'blocked': self.blocked, 'squeezing': getattr(self, 'squeezing', False),
+            'emergency': self.emergency, 'blocked': self.blocked, 'squeezing': getattr(self, 'squeezing', False), 'edge_guard': getattr(self, 'edge_guarded', False),
             'hit_m': None if self.hit_dist == INF else round(self.hit_dist, 2),
             'recovering': self.rec is not None or self.rb is not None, 'recover_n': self.rec_n,
             'rollback': self.rb is not None, 'rollback_m': round(self.rollback_m, 2),
