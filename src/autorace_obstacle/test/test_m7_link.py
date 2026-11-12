@@ -322,7 +322,7 @@ def run_front(link, s_from, s_to, front_of_s, step=20.0):
 
 def test_obstacle_trigger_enables_when_front_within_threshold():
     link = obstacle_link()
-    assert link.p.trigger_front_mm == 1000.0
+    assert link.p.trigger_front_mm == 1300.0                # 11/12 1000 -> 1300
     obs = 13589.0 + 1500.0                                   # 가운데 차로 장애물: 시작선 + 1.5 m
     en = run_front(link, 11905.0, 15000.0, lambda s: obs - s if obs - s < 2000 else None)
     assert en and en[0][0] == pytest.approx(obs - link.p.trigger_front_mm, abs=20)   # 기준 거리 앞에서

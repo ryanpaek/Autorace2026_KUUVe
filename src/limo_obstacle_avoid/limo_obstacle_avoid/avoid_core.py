@@ -86,7 +86,7 @@ class AvoidParams:
     obs_min_len: float = 0.33         # 앞면만 보여도 이 길이만큼 차가 있다고 가정 (LIMO 길이)
     confirm_hits: int = 3             # 이 횟수 이상 보여야 진짜 장애물로 인정
     # ── 판단 ──
-    trigger_dist: float = 1.0         # 내 차선 앞 장애물이 (앞범퍼 기준) 이 안이면 차선 변경
+    trigger_dist: float = 1.3   # 내 차선 앞 장애물이 (앞범퍼 기준) 이 안이면 차선 변경. 11/12 1.0 -> 1.3 (더 일찍)
     change_len: float = 1.0           # 차선 1칸 옮기는 데 필요한 앞쪽 여유
     clear_back: float = 0.0           # 옮길 차선의 차 끝이 (뒤범퍼 - 이값)보다 뒤여야 들어감 (음수=더 일찍)
     better_margin: float = 0.3        # 옮길 차선이 지금보다 이만큼 더 비어야 옮김
@@ -100,7 +100,7 @@ class AvoidParams:
     cont_min_free: float = 1.30       # 다음 차로 앞 최소 빈 거리 [m] (2칸 이동에 필요한 거리)
     cont_island_m: float = 1.70       # 섬 앞 끝까지 이보다 가까우면 안 함 [m]
     rollback_need_sharp: bool = True  # 후진을 멈출 '틀 공간'을 크게 꺾는 기준(recover_lookahead)으로 잼
-    hold_time: float = 0.8            # 차선 바꾼 뒤 최소 유지 시간 [s]
+    hold_time: float = 0.4   # 차선 바꾼 뒤 최소 유지 시간 [s]. 11/12 0.8 -> 0.4 (옮기는 중에도 다음 판단을 빨리)
     stop_dist: float = 0.30           # 지금 조향대로 이만큼 더 가면 차체가 부딪힐 때만 정지(→ 후진). 옆 차로·옆에 붙은 장애물은 안 봄
     # 11/12: 막혔을 때 바로 서서 후진하지 말고 먼저 조향을 끝까지 꺾어 빠져 본다. 끝까지 꺾은 길로도
     #   squeeze_min_dist 안에서 부딪히면(장애물이 0.2 m까지 붙음) 그때만 서고 예전처럼 후진·탈출
@@ -154,6 +154,9 @@ class AvoidParams:
     lane_fresh_sec: float = 0.3
     lane_fix_gate: float = 0.15       # 지금 추정과 이만큼 넘게 다르면 다른 차로를 본 것 → 안 씀 [m]
     lane_fix_max_deg: float = 10.0    # 차선 방향이 이보다 틀어져 보이면 안 씀 (차로 변경 중·3차선 입구 사선)
+    lane_fix_while_changing: bool = True   # 11/12: 옮기는 중·10~20° 틀어져도 양쪽 선이 보이면 반만 반영
+    lane_fix_change_deg: float = 20.0      #   이보다 틀어지면 안 씀
+    lane_fix_change_scale: float = 0.5     #   옮기는 중·10° 넘을 때 반영 비율
     lane_row: float = 0.55            # 차선 노드 offset_mm 을 재는 행 (기준점 앞 m)
     # ── 멈춤 탈출: 막혀서 서 있으면 상황이 안 바뀌어 계속 선다 → 조금 후진하며 크게 꺾어 다시 잡음 ──
     recover: bool = True
@@ -603,7 +606,14 @@ class AvoidPlanner:
         if lane.get('status') != 'BOTH' or lane.get('low_conf') or off is None or h is None:
             return False
         h = float(h)
-        if abs(math.degrees(h)) > p.lane_fix_max_deg:
+        deg = abs(math.degrees(h))
+        # 11/12: 차로를 옮기는 중(목표 차로 중심 밖)이거나 10~20°로 틀어져 있어도 양쪽 선이 잡히면 반만 반영 (늘 차선을 봄).
+        #   20° 넘으면 안 씀. 다른 차로를 본 것 같으면(gate) 안 씀은 그대로
+        changing = abs(self.pose.y - self.center(self.target)) >= p.reach_tol
+        if deg > (p.lane_fix_change_deg if p.lane_fix_while_changing else p.lane_fix_max_deg):
+            return False
+        scale = p.lane_fix_change_scale if (changing or deg > p.lane_fix_max_deg) else 1.0
+        if not p.lane_fix_while_changing and changing and deg > p.lane_fix_max_deg:
             return False
         off = float(off) / 1000.0
         y_in_lane = -off * math.cos(h) + p.lane_row * math.sin(h)
@@ -613,7 +623,9 @@ class AvoidPlanner:
             return False
         dpsi = wrap(-h - self.pose.psi)
         d = p.lane_fix_heading_gain * dpsi if abs(math.degrees(dpsi)) <= 5.0 else 0.0
-        self._apply_transform(d, p.lane_fix_gain * dy)
+        if not p.lane_fix_while_changing:
+            scale = 1.0
+        self._apply_transform(scale * d, scale * p.lane_fix_gain * dy)
         self.lane_fix_n += 1
         self.lane_fix_dy = dy
         return True
