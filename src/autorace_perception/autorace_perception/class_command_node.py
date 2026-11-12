@@ -22,7 +22,7 @@ class ClassCommandNode(Node):
                 ('mission_topic', '/mission/state'),
                 ('context_timeout_sec', 1.0)):
             self.declare_parameter(name, value, readonly)
-        for name, value in (('conf_threshold', 0.5), ('yellow_action', 'none'),
+        for name, value in (('conf_threshold', 0.7), ('yellow_action', 'none'),
                             ('vote_window', 10), ('vote_need', 7)):
             self.declare_parameter(name, value)
         for cls in V3_CLASSES:
