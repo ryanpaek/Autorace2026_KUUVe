@@ -59,7 +59,13 @@
     creep: true
     creep_m: 0.30
     creep_speed: 0.15
-    creep_max: 6
+    creep_max: 8
+    creep_search: true       # 11/12 밤: 1초 넘게 막혀 있으면 양쪽으로 꺾은 길(반쯤·끝까지)도 지금 라이다로 굴려 봐서 빈 쪽으로 0.3 m 전진
+    creep_search_after: 1.0
+    creep_search_deg: 30.0   #   차로 방향에서 30° 넘게는 안 틂
+    two_lane_wait: true      # 11/12 밤: 가운데 차로가 옆 장애물만 지나면 비는 거면 두 칸(1<->3) 건너기 보류하고 조금 더 가서 가운데로
+    two_lane_wait_free: 0.60 #   지금 차로 앞이 이보다 짧으면 급하니 두 칸 허용
+    side_wait_max: 6
     roi_side_extra: 0.10
     cluster_gap: 0.12
     cluster_min_pts: 3

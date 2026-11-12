@@ -11,7 +11,8 @@ M7 후반 ~ M2 ~ M8(콘 들어가기 전)에서만 찍음. 바뀔 때 바로(*),
  차선+코너80%            선은 보지만 미션의 코너 미리보기(IMU) 곡률이 80% 섞임 (route_corner_weight)
  코너곡률만(선 놓침)      선을 놓쳐 코너 미리보기 곡률로만 돎 (source route)
  직진유지(선 놓침)        선을 놓쳐 마지막 방향 유지 (source hold) -> 길게 가면 차선 무시처럼 보임
- 차선노드 정지            선을 오래 놓쳐 정지 (source stop)
+ 찾는 중(선 놓침)        선을 오래 놓쳐 직전 조향 반대쪽 30° -> 반대쪽으로 찾는 중 (source search)
+ 차선노드 정지            찾아봐도 없어 정지 (source stop). 선이 보이면 다시 감
  미션정지 / 콘 노드 / 회피노드 / 주차   미션이 차선 노드가 아닌 쪽을 고름 (mission source)
  덮어씀!                 미션은 lane을 골랐는데 /cmd_vel 조향이 /lane/cmd_vel 과 0.15 넘게 다름 (다른 노드가 같은 토픽에 냄)
 
@@ -47,6 +48,8 @@ def verdict(m, ln, w_lane, w_cmd):
     ls, st = ln.get('source'), ln.get('status')
     if ls == 'stop':
         return '차선노드 정지'
+    if ls == 'search':
+        return '찾는 중(선 놓침, 좌우 30°)'
     if ls == 'hold':
         return '직진유지(선 놓침)'
     if ls == 'route':

@@ -155,14 +155,25 @@ class AvoidParams:
     side_wait: bool = True
     side_wait_m: float = 0.30
     side_wait_look: float = 1.00      #   옮기는 길을 이만큼 굴려 봐서 옆 장애물에 닿으면 (change_len과 같게)
-    side_wait_max: int = 3            #   한 번 옮길 때 최대 횟수 (그 뒤엔 예전처럼 끝까지 꺾기)
+    side_wait_max: int = 6            #   한 번 옮길 때 최대 횟수 (그 뒤엔 예전처럼 끝까지 꺾기). 11/12 밤 3 -> 6
+    # 11/12 밤 실차: 1차로에서 막혀 2차로로 가야 하는데 2차로 장애물이 아직 옆이라 못 가면 1 -> 3차로로 두 칸을 바로 건넜다.
+    #   지금 차로 앞이 two_lane_wait_free 넘게 남았고 가운데 차로가 '옆 장애물만 지나면' 비는 거면 두 칸 건너기를 보류하고
+    #   조금 더 직진한 뒤 가운데로 (앞이 그보다 짧으면 급하니 예전처럼 두 칸)
+    two_lane_wait: bool = True
+    two_lane_wait_free: float = 0.60
     # 11/12 밤 실차 요청: 막혀서(끝까지 꺾어도 못 빠짐) 서게 되면, 쌓인 지도 말고 '이번 라이다 한 바퀴'로 똑바로 creep_m 앞이
     #   비었는지 보고 비었으면 creep_speed로 creep_m 전진한 뒤 다시 판단 (지도 상자가 커져 옆 장애물에 막힌 것으로 서던 것).
     #   한 번 멈춤에 최대 creep_max번. 범퍼 앞 비상(emergency)이면 안 함
     creep: bool = True
     creep_m: float = 0.30
     creep_speed: float = 0.15
-    creep_max: int = 6
+    creep_max: int = 8
+    # 11/12 밤 실차 요청: 멈춘 채로 끝내지 말고 찾아본다. creep_search_after 넘게 막혀 있으면 똑바로뿐 아니라
+    #   양쪽으로 꺾은 길(절반·끝까지)도 이번 라이다로 굴려 봐서 빈 쪽으로 creep_m 전진. 차로 방향에서 creep_search_deg 넘게는 안 틀고,
+    #   바깥 차로에서 바깥쪽(노란선 밖)으로는 안 감
+    creep_search: bool = True
+    creep_search_after: float = 1.0
+    creep_search_deg: float = 30.0
     stop_dist: float = 0.30           # 지금 조향대로 이만큼 더 가면 차체가 부딪힐 때만 정지(→ 후진). 옆 차로·옆에 붙은 장애물은 안 봄
     # 11/12: 막혔을 때 바로 서서 후진하지 말고 먼저 조향을 끝까지 꺾어 빠져 본다. 끝까지 꺾은 길로도
     #   squeeze_min_dist 안에서 부딪히면(장애물이 0.2 m까지 붙음) 그때만 서고 예전처럼 후진·탈출
@@ -355,6 +366,7 @@ class AvoidPlanner:
         self.sw_n = 0
         self.creep = None            # creep 전진 중
         self.creep_n = 0
+        self.block_t0 = None
         self._center_why = None
         self.t_start = 0.0
         self.obs = []
@@ -736,6 +748,12 @@ class AvoidPlanner:
             key = (round(score, 3), -abs(lane - cur), 1 if lane == self.exit_pref else 0)
             if best is None or key > best_key:
                 best, best_key = lane, key
+        if best is not None and abs(best - cur) == 2 and p.two_lane_wait and f_cur >= p.two_lane_wait_free:
+            mid = (best + cur) // 2
+            f_mid = self.free_ahead(mid, obs, skip_beside=True)      # 옆 장애물을 지난 뒤의 가운데 앞
+            if f_mid >= f_cur + p.better_margin:
+                why[best] = f'두 칸 건너기 보류: 조금 더 가서 {lane_name(mid)}로 (지금 앞 {f_cur:.2f}m, 가운데 앞 {min(f_mid, 9.9):.2f}m)'
+                return None
         return best
 
     # ---------- 갈림길 출구 차선 이동 ----------
@@ -1158,6 +1176,7 @@ class AvoidPlanner:
             self.creep = None
             if not self.blocked:
                 self.creep_n = 0
+                self.block_t0 = None
         if self.blocked or self.emergency:
             v = 0.0
             # 서 있으면 상황이 안 바뀐다 → 잠시 뒤 후진하며 크게 꺾어 다시 잡기 (횟수 제한)
@@ -1204,33 +1223,56 @@ class AvoidPlanner:
 
     def _center_refused(self, x, rem, why):
         """섬 앞 2차로 모으기를 못 한 이유를 바뀔 때만 로그 (실차에서 왜 1·3차로에 남았나 보려고)"""
-        if getattr(self, '_center_why', None) != why:
-            self._center_why = why
+        key = why.split(' ')[0] + why[-6:] if '장애물' not in why else '장애물'   # 숫자가 매번 달라도 같은 이유면 한 번만
+        if getattr(self, '_center_why', None) != key:
+            self._center_why = key
             self.events.append((x, f'섬 앞 {rem:.2f}m: {lane_name(self.target)}에서 2차로로 안 감 - {why}'))
 
     def _creep_step(self, t):
-        """막힘: 이번 스캔 덩어리로만 똑바로 creep_m(+여유) 앞이 비었으면 천천히 전진 (위 creep 설명)"""
+        """막힘: 이번 스캔 덩어리로만 봐서 빈 길(똑바로, 오래 막혔으면 양쪽으로 꺾은 길도)로 creep_m 천천히 전진 (creep·creep_search 설명)"""
         p = self.p
         if not p.creep:
             return None
-        x = self.pose.x
+        x, y, psi = self.pose.x, self.pose.y, self.pose.psi
+        if getattr(self, 'block_t0', None) is None:
+            self.block_t0 = t
         cr = getattr(self, 'creep', None)
-        if cr is not None and x - cr['x0'] >= p.creep_m:
+        if cr is not None and math.hypot(x - cr['x0'], y - cr['y0']) >= p.creep_m:
             self.creep = cr = None                      # 다 감 -> 다시 판단 (아직 막혔으면 아래에서 또)
         raw = [Obstacle(*c) for c in (getattr(self, 'last_clusters', None) or [])]
-        if cr is not None and self.path_hit(raw, 0.0, p.stop_dist, fixed=True) < INF:
-            self.creep = None                           # 가는 중 라이다로 앞이 막힘 -> 정지
-            return None
+        if cr is not None and self.path_hit(raw, cr['k'], p.stop_dist, fixed=True) < INF:
+            self.creep = cr = None                      # 가는 중 라이다로 앞이 막힘 -> 다시 고름
         if cr is None:
             if getattr(self, 'creep_n', 0) >= p.creep_max:
                 return None
-            if self.path_hit(raw, 0.0, p.creep_m + p.stop_dist, fixed=True) < INF:
-                return None                             # 지금 라이다로도 앞이 막힘 -> 정말 막힘
+            kmax = 1.0 / p.min_turn_radius
+            cands = [0.0]
+            out_side = 1.0 if y > 0 else -1.0
+            if out_side * y > 0.5 * p.lane_width and out_side * psi > math.radians(10.0):
+                # 바깥 차로에서 바깥쪽으로 틀어진 채 똑바로 가면 노란선 밖 (시뮬레이션: 9 cm 나감) -> 안쪽으로 꺾은 길만
+                cands = [-out_side * kmax, -out_side * 0.5 * kmax]
+            elif p.creep_search and t - self.block_t0 >= p.creep_search_after:
+                toward = 1.0 if self.center(self.target) - y >= 0 else -1.0
+                lim = math.radians(p.creep_search_deg)
+                for side in (toward, -toward):
+                    if side * psi > lim:                # 이미 그쪽으로 30° 넘게 틀어짐
+                        continue
+                    if side * y > 0.5 * p.lane_width:
+                        continue                        # 바깥 차로에서 바깥쪽으로는 안 꺾음 (노란선 밖)
+                    cands += [side * 0.5 * kmax, side * kmax]
+            pick = None
+            for k in cands:
+                if self.path_hit(raw, k, p.creep_m + p.stop_dist, fixed=True) == INF:
+                    pick = k
+                    break
+            if pick is None:
+                return None                             # 지금 라이다로도 어느 쪽이든 막힘 -> 정말 막힘 (서서 계속 다시 봄)
             self.creep_n = getattr(self, 'creep_n', 0) + 1
-            self.creep = {'x0': x}
-            self.events.append((x, f'막힘(지도)인데 지금 라이다로는 앞 {p.creep_m:.2f}m 빔 -> 천천히 전진 '
+            cr = self.creep = {'x0': x, 'y0': y, 'k': pick}
+            how = '똑바로' if pick == 0.0 else f'{"왼쪽" if pick > 0 else "오른쪽"}으로 {"끝까지" if abs(pick) >= kmax - 1e-9 else "반쯤"} 꺾어'
+            self.events.append((x, f'막힘인데 지금 라이다로는 {how} {p.creep_m:.2f}m 빔 -> 천천히 전진 '
                                    f'({self.creep_n}/{p.creep_max})'))
-        return p.creep_speed, 0.0
+        return p.creep_speed, p.creep_speed * cr['k']
 
     def _side_wait_step(self, obs, t):
         """옮기는 초반(아직 원래 차로 쪽)에 옮기는 길이 가려는 차로 옆 장애물에 닿으면 원래 차로로 side_wait_m 직진"""
@@ -1272,7 +1314,7 @@ class AvoidPlanner:
         self.target = origin
         try:
             k = self.control(1.0, t, False)
-            straight_hit = self.path_hit(obs, k, p.side_wait_m + p.stop_dist)
+            straight_hit = self.path_hit(obs, k, p.stop_dist + 0.05)   # 갈 수 있는 만큼만 (가는 중에도 매번 다시 봄). 예전 0.6 m 다 비어야 했음
         finally:
             self.target = saved
         if straight_hit < INF:

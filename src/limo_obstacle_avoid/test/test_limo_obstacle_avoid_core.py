@@ -413,3 +413,61 @@ def test_center_force_waits_04_when_obstacle_beside():
     pl.pose.x = x0 + 0.41
     pl.step(11.0)
     assert pl.target == 0                            # 0.4 m 더 간 뒤 2차선으로
+
+
+# ── 11/12 밤: 두 칸(1<->3) 바로 건너기 보류 / 오래 막히면 양쪽으로 찾기 ──
+def _one_blocked_mid_beside(front_gap):
+    """1차로(+1)에 있고 앞 front_gap 에 1차로 장애물, 2차로 장애물은 바로 옆(지나가는 중), 3차로는 빔"""
+    pl = _pl_center()
+    pl.pose.x, pl.pose.y = 1.0, 0.52
+    pl.target = 1
+    xf = pl.pose.x + pl.p.robot_front
+    obs = [_confirmed(Obstacle(xf + front_gap, xf + front_gap + 0.33, 0.41, 0.63)),
+           _confirmed(Obstacle(pl.pose.x + 0.10, pl.pose.x + 0.43, -0.11, 0.11))]
+    return pl, obs
+
+
+def test_two_lane_jump_deferred_when_middle_frees_up_soon():
+    """실차: 2차로를 타야 할 때 1 -> 3차로로 두 칸을 바로 감. 앞이 0.6 m 넘게 남았으면 보류(조금 더 가서 2차로)"""
+    pl, obs = _one_blocked_mid_beside(1.0)
+    pl.p.two_lane_wait = False
+    assert pl.choose(1, obs) == -1                      # 예전: 3차로(두 칸)
+    pl.p.two_lane_wait = True
+    assert pl.choose(1, obs) is None                    # 이제: 보류 (직진 계속)
+    assert '보류' in pl.lane_why[-1]
+    pl.p.two_lane_wait_free = 1.2                       # 앞 남은 거리(1.0)가 기준보다 짧으면 급함 -> 두 칸 허용
+    assert pl.choose(1, obs) == -1
+
+
+def test_search_both_sides_when_stuck_long():
+    """멈춘 채 끝내지 않기: 1초 넘게 막혀 있고 똑바로는 라이다로도 막혔으면, 양쪽으로 꺾은 길 중 빈 쪽으로 천천히 전진"""
+    pl = _pl_center()
+    pl.pose.x, pl.pose.y = 1.0, 0.0
+    pl.target = 0
+    pl.last_switch = 9.9                                # 차로 다시 고르기는 아직 (hold_time)
+    g = _confirmed(Obstacle(1.45, 1.78, -0.30, -0.08))  # 앞 0.25 m, 오른쪽에 걸침
+    pl.obs = [g]
+    pl.last_clusters = [(1.45, 1.78, -0.30, -0.08)]
+    pl.p.squeeze = False                                # 지도 기준 끝까지 꺾기는 빼고 찾기만 봄
+    v, w = pl.step(10.0)
+    assert v == 0.0                                     # 처음엔 정지 (똑바로는 막힘)
+    v, w = pl.step(11.2)
+    assert v > 0 and w > 0                              # 1초 뒤: 빈 왼쪽으로 꺾어 전진
+    assert any('꺾어' in e and '천천히 전진' in e for _, e in pl.events)
+    pl.p.creep_search = False
+    pl.creep = None
+    pl.creep_n = 0
+    assert pl.step(11.3)[0] == 0.0                      # 끄면 예전처럼 정지
+
+
+def test_search_does_not_turn_past_30deg():
+    pl = _pl_center()
+    pl.pose.x, pl.pose.y, pl.pose.psi = 1.0, 0.0, math.radians(35.0)
+    pl.target = 1
+    pl.block_t0 = 0.0
+    pl.blocked = True
+    c, s_ = math.cos(pl.pose.psi), math.sin(pl.pose.psi)
+    bx, by = 1.0 + 0.35 * c, 0.35 * s_                  # 차 바로 앞(진행 방향)에 상자
+    pl.last_clusters = [(bx - 0.05, bx + 0.25, by - 0.15, by + 0.15)]
+    out = pl._creep_step(5.0)
+    assert out is None or out[1] <= 0                   # 이미 왼쪽 35° -> 왼쪽으로 더는 안 꺾음
