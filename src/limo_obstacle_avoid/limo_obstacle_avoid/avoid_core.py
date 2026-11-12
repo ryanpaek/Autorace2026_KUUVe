@@ -505,8 +505,13 @@ class AvoidPlanner:
         hw = self.p.robot_half_width + self.p.side_margin
         return not (o.ymax < c - hw or o.ymin > c + hw)
 
-    def free_ahead(self, lane, obs, skip_beside=False):
+    def free_ahead(self, lane, obs, skip_beside=None):
         """그 차선에서 앞범퍼 ~ 가장 가까운 장애물까지 거리 (없으면 INF, 옆에 붙어있으면 음수)"""
+        # 11/12 밤 실차: 차로 고르기는 옆(지나가는 중) 장애물을 빼고 보는데, 고른 뒤 '지금 목표 차로'는 빼지 않고 봐서
+        #   옮기자마자 그 차로가 막힌 것(앞 거리 음수)으로 보여 0.4초마다 되돌아갔다 (bag: -1<->0 반복, 1->-1 뒤집힘).
+        #   기본(None) = 차가 아직 그 차로에 안 들어갔으면 옆 장애물을 뺌 (들어갈 수 있는지는 path_clear·path_hit가 봄)
+        if skip_beside is None:
+            skip_beside = self.p.clear_rollout and lane != self.nearest_lane(self.pose.y)
         p = self.p
         x = self.pose.x
         xf = x + p.robot_front
