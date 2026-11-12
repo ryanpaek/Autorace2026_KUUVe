@@ -34,6 +34,7 @@ DEFAULT_PARAMS = {
     'base_speed': 0.30,          # m/s, 규정 권장 0.3~0.4
     'slow_speed': 0.20,          # 서행 (규정 최대 0.2). 11/09 팀 결정: 0.2
     'approach_speed': 0.18,      # 정지선·장애물 접근 속도
+    'm7_speed': 0.10,            # 11/12: M7(횡단보도 끝 코너 ~ 3차선 회피) 차선 주행 속도. 회피 노드 속도도 0.10 (avoid_params.yaml)
     'vote_window': 8,            # 다수결 창 (인식 프레임 수)
     'vote_need': 5,
     'det_conf': 0.5,
@@ -508,7 +509,7 @@ class MissionFSM:
         if done or ((d >= self.p['m7_len_mm']) if end is None else end):
             self._next(inp, 'obstacle zone done' if done else f'm7 end at {d:.0f}mm')
         src = 'obstacle' if self.p['obstacle_source_ready'] else 'lane'
-        return Command(src, self._lane(self.p['approach_speed'],
+        return Command(src, self._lane(self.p['m7_speed'],
                                        lane_width_mm=self.p['three_lane_width_mm'],
                                        lane_color=self.p['three_lane_color']))
 
@@ -525,7 +526,7 @@ class MissionFSM:
             # 회피 노드가 도중에 멈춤: 차선 주행으로 넘기면 정차 LIMO 사이를 직진한다 -> 정지
             return Command('stop', self._lane(0.0), note='M7_OBSTACLE/hold (avoid node lost)')
         src = 'obstacle' if inp.obstacle.get('m7_active') else 'lane'
-        return Command(src, self._lane(self.p['approach_speed'],
+        return Command(src, self._lane(self.p['m7_speed'],
                                        lane_width_mm=self.p['three_lane_width_mm'],
                                        lane_color=self.p['three_lane_color']))
 

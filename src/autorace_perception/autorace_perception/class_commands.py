@@ -223,6 +223,11 @@ class ClassCommandRouter:
             command['request_id'] = self._requests[key]
 
         return {'schema_version': 2, 'stamp': stamp, 'mode': self.mode,
+                # 부가 관측 신호. commands는 그대로 유지하여 제어 동작을 바꾸지 않는다.
+                # 황색 기본 정책은 none: 정지/가속/적색 해제 요청이 아니다.
+                'signals': ([{'class': 'yellow', 'signal': 'YELLOW_OBSERVED',
+                              'action': self.yellow_action, **self._evidence['yellow']}]
+                            if 'yellow' in confirmed and 'yellow' in best else []),
                 'observed_classes': [cls for cls in V3_CLASSES if cls in best],
                 'confirmed_classes': [cls for cls in V3_CLASSES if cls in confirmed],
                 'vote': {'window': self.vote_window, 'need': need,
