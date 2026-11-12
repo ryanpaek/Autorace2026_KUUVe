@@ -269,6 +269,7 @@ def test_sharper_steering_after_reverse_until_new_lane():
     assert w_sharp > w_norm > 0                                     # 후진 뒤엔 더 크게 꺾음
     pl.sharp = True
     pl.pose.y = 0.52                                                # 새 차로 도착
+    pl.p.center_return = False                                      # 빈 길이라 가운데로 돌아가 버리면 이 시험이 아님
     pl.step(10.0)
     assert pl.sharp is False
 
