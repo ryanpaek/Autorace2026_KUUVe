@@ -41,6 +41,13 @@ def cdr_bool(data: bytes) -> bool:
 
 
 def open_bag(path):
+    path = os.path.expanduser(path.rstrip('/'))
+    if not os.path.exists(path):
+        # 11/12 밤: 없는 경로를 주면 sqlite3가 빈 파일을 만들어 다음부터 'no such table' 오류가 났다
+        near = sorted(glob.glob(os.path.join(os.path.dirname(path) or '.', '*')))[-8:]
+        sys.exit(f'없는 경로: {path}\n최근 녹화 폴더:\n  ' + '\n  '.join(near))
+    if os.path.isfile(path) and (not path.endswith('.db3') or os.path.getsize(path) == 0):
+        sys.exit(f'녹화 폴더(또는 .db3)가 아님: {path} (크기 {os.path.getsize(path)} B). 빈 파일이면 지우고 폴더 이름을 다시 확인')
     dbs = sorted(glob.glob(os.path.join(path, '*.db3'))) if os.path.isdir(path) else [path]
     if not dbs:
         mc = glob.glob(os.path.join(path, '*.mcap'))
@@ -52,7 +59,7 @@ def read(dbs):
     """-> {topic: [(t_sec, value)]}  String은 JSON이면 dict, Bool은 bool, 나머지는 None (주기만 셈)."""
     out = {}
     for db in dbs:
-        con = sqlite3.connect(db)
+        con = sqlite3.connect(f'file:{db}?mode=ro', uri=True)     # 읽기 전용 (없으면 새로 만들지 않음)
         topics = {tid: name for tid, name in con.execute('SELECT id, name FROM topics')}
         want = {tid: n for tid, n in topics.items() if n in STR_TOPICS + BOOL_TOPICS + RATE_TOPICS}
         for tid, ts, data in con.execute('SELECT topic_id, timestamp, data FROM messages ORDER BY timestamp'):
