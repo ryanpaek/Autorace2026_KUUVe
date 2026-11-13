@@ -218,6 +218,23 @@ class LaneParams:
     jump_max_mm: float = 120.0        # 목표점 횡위치가 한 프레임에 이보다 튀면 버린다
     jump_max_frames: int = 6          # 이만큼 연속으로 튀면 새 값을 받아들인다
     lost_hold_frames: int = 30        # 차선을 놓친 뒤 버티는 프레임 수 (30fps면 1초)
+    lost_corner_frames: int = 120     # 11/12 밤: M7 직전 코너 미리보기가 있을 때 선을 놓쳐도 코너 곡률로 버티는 프레임 수
+    route_corner_weight: float = 0.8  # 11/12 밤: M7 직전 코너에서 선이 보여도 코너 곡률을 섞는 비율 (실차 60~70도 뒤 직진 -> 0.6에서 0.8)
+    # 11/12 밤 실차 요청: 미리 아는 코너(M7 직전, M2 뒤 = 미션이 코너 미리보기를 줄 때)에서는 안쪽 선 기준.
+    #   코너에서 바깥 선은 화면(BEV) 밖으로 나가거나 다른 차로 선과 헷갈리고, 안쪽 선은 차 가까이 계속 보인다.
+    #   미리보기 앞 corner_inner_ahead_mm 안에 코너 곡률이 있으면 양쪽이 보여도 안쪽 선 하나 + 반폭으로 중앙선을 만든다
+    # 11/12 밤 실차 요청: 선을 오래 놓치면 서서 끝내지 말고 찾아본다 (미션이 M7 차선 구간·M2·M2 뒤에서만 켬).
+    #   놓친 직후(lost_hold_frames까지): hold_axis_deg(미션이 준 직선 방향)가 있으면 그 방향으로 조향을 서서히 풂
+    #     (합류 사선에서 놓치면 예전엔 사선 방향을 유지해 반대쪽 선을 뚫고 나감)
+    #   그 뒤: 기준 방향에서 '직전 조향의 반대쪽'으로 lost_search_deg 틀어 lost_search_mm, 다시 반대쪽으로 2배 거리, 그래도 없으면 정지.
+    #   선이 다시 보이면 언제든 바로 차선 주행 (정지 중에도 계속 인식)
+    lost_search: bool = False
+    lost_search_deg: float = 30.0
+    lost_search_mm: float = 350.0
+    lost_search_speed: float = 0.6     # 찾는 동안 속도 비율
+    hold_axis_deg: float = 999.0       # 놓쳤을 때 붙잡을 직선 방향 (IMU yaw, deg). 999 = 없음 (마지막 차선 방향)
+    corner_inner_line: bool = True
+    corner_inner_ahead_mm: float = 600.0
     lost_decay: float = 0.95          # IMU가 없을 때 마지막 곡률의 프레임당 감쇠
     # 헤딩 유지 (IMU)
     yaw_kp: float = 1.5               # 헤딩 오차 1 rad당 요레이트 명령 (rad/s)
@@ -339,6 +356,7 @@ class LaneOutput:
         cl = self.debug.get('centerline')
         d['model'] = ('circle' if cl.circle is not None else 'poly') if cl is not None else None
         d['circle_r_mm'] = round(cl.circle[2]) if cl is not None and cl.circle is not None else None
+        d['inner'] = self.debug.get('inner')      # 코너 안쪽 선 기준이면 'L'/'R'
         return d
 
 
@@ -1317,6 +1335,7 @@ class LaneFollower:
         # 도면 곡률 미리보기: 앞바퀴에서 0, step, 2*step ... mm 앞의 곡률 (왼쪽 +, 1/m).
         # 노드가 매 프레임 넣는다 (오래되면 None).
         self.route_k: Optional[List[float]] = None
+        self.route_corner: bool = False      # 미리보기가 M7 직전 코너(IMU)에서 온 것인가
         self.route_step_mm: float = 100.0
         self.route_pts: Optional[List[Tuple[float, float]]] = None   # 도면 중심선 (차 기준, 복귀용)
         self.reset()
@@ -1393,6 +1412,13 @@ class LaneFollower:
         n_lab, lab_full = cv2.connectedComponents((bev_lane > 0).astype(np.uint8), connectivity=8)
         if det.status in ('L', 'R') and self.mode not in ('left_only', 'right_only'):
             self._keep_side_by_overlap(det, lab_full)
+        inner = self.corner_inner_side()
+        out.debug['inner'] = inner
+        if inner is not None and det.status == 'BOTH':
+            if inner == 'R':
+                det.left_x0, det.status = None, 'R'
+            else:
+                det.right_x0, det.status = None, 'L'
         out.status = det.status
 
         left = track_line(bev_lane, det.left_x0, cfg, p) if det.left_x0 is not None else None
@@ -1532,18 +1558,39 @@ class LaneFollower:
         elif kappa_raw is None:
             # 차선을 놓침
             self.lost_frames += 1
-            if self.lost_frames > p.lost_hold_frames:
-                source, kappa_raw = 'stop', 0.0
-                out.speed_scale = 0.0
-            elif yaw is not None and self.hold_yaw_ref is not None:
+            k_corner = (self._route_kappa(p.route_ff_preview_mm + speed * p.latency_comp_sec * 1000.0)
+                        if self.route_corner and self.route_k else None)
+            if k_corner is not None and self.lost_frames <= p.lost_corner_frames:
+                # 11/12 밤: M7 직전 코너(미션 노드가 IMU로 '아직 코너 중'이라고 보냄)에서 선을 놓치면
+                #   방향 유지(직진) 대신 코너 곡률로 계속 돈다
+                source, kappa_raw = 'route', k_corner
+            elif self.lost_frames > p.lost_hold_frames:
+                sk = self._lost_search(yaw, dist_mm, speed) if p.lost_search else None
+                if sk is not None:
+                    source, kappa_raw = 'search', sk
+                    out.speed_scale = p.lost_search_speed
+                else:
+                    source, kappa_raw = 'stop', 0.0
+                    out.speed_scale = 0.0
+            elif yaw is not None and (self.hold_yaw_ref is not None or abs(p.hold_axis_deg) <= 360.0):
                 source = 'hold'
-                kappa_raw = self._heading_kappa(yaw, self.hold_yaw_ref, speed)
+                ref = math.radians(p.hold_axis_deg) if abs(p.hold_axis_deg) <= 360.0 else self.hold_yaw_ref
+                kappa_raw = self._heading_kappa(yaw, ref, speed)
             else:
                 source = 'hold'
                 kappa_raw = self.last_good_kappa * (p.lost_decay ** self.lost_frames)
         # 도면 곡률 미리 넣기
         k_ff = self._route_kappa(p.route_ff_preview_mm + speed * p.latency_comp_sec * 1000.0)
-        if k_ff is not None and (p.route_ff_weight > 0.0 or p.route_ff_weight_lost > 0.0):
+        if k_ff is not None and self.route_corner and source in ('lane', 'memory'):
+            # 11/12 밤 실차: M7 직전 코너(미션 노드가 IMU로 '아직 코너 중')에서 차선 노드가 선을 '보고' 있는데도 직진했다.
+            #   이 코너에서는 선이 잘 보여도 코너 곡률을 route_corner_weight 만큼 섞고, 도면과 다르다고 버리지 않는다
+            out.ff_kappa = k_ff
+            k_lane = kappa_raw
+            kappa_raw = kappa_raw + p.route_corner_weight * (k_ff - kappa_raw)
+            # 11/12 밤: 코너에서 바깥으로 밀려 선을 밟고 놓침 -> 차선이 코너 방향으로 더 크게 꺾으라고 하면 그 값을 그대로 (적어도 코너 곡률, 필요하면 더)
+            if k_lane * k_ff > 0 and abs(k_lane) > abs(kappa_raw):
+                kappa_raw = k_lane
+        elif k_ff is not None and (p.route_ff_weight > 0.0 or p.route_ff_weight_lost > 0.0):
             out.ff_kappa = k_ff
             w = 0.0
             strong = out.status == 'BOTH' and not out.low_conf
@@ -1639,6 +1686,17 @@ class LaneFollower:
             det.left_x0, det.right_x0 = (x0, None) if side == 'L' else (None, x0)
             det.status = side
 
+    def corner_inner_side(self) -> Optional[str]:
+        """미리 아는 코너 안(또는 바로 앞)이면 안쪽 선 쪽 'L'/'R', 아니면 None (corner_inner_line 설명)"""
+        p = self.p
+        if not (p.corner_inner_line and self.route_corner and self.route_k and self.mode == 'normal'):
+            return None
+        n = int(p.corner_inner_ahead_mm / max(self.route_step_mm, 1.0)) + 1
+        for k in self.route_k[:n]:
+            if abs(k) > 0.1:
+                return 'L' if k > 0 else 'R'
+        return None
+
     def _inner_arc(self, side: str, pix, pose, dist_mm: float):
         """이 선이 자기 쪽으로 휘는 원이면 (중심 세계좌표, 반경, 거리, yaw). 아니면 None."""
         if pix is None or len(pix) < 40:
@@ -1698,6 +1756,34 @@ class LaneFollower:
         ds = np.arange(len(ks)) * self.route_step_mm
         q = np.linspace(d_mm - half_win_mm, d_mm + half_win_mm, 7)
         return float(np.mean(np.interp(q, ds, ks)))
+
+    def _lost_search(self, yaw, dist_mm, speed) -> Optional[float]:
+        """선을 오래 놓쳤을 때 찾기 조향 (lost_search 설명). 다 찾아봤으면 None (-> 정지)."""
+        p = self.p
+        if yaw is None:
+            return None
+        sr = getattr(self, 'search', None)
+        if sr is None or sr['frame'] != self.lost_frames - 1:
+            ref = (math.radians(p.hold_axis_deg) if abs(p.hold_axis_deg) <= 360.0
+                   else self.hold_yaw_ref if self.hold_yaw_ref is not None else yaw)
+            if abs(self.last_good_kappa) > 0.15:
+                first = -1.0 if self.last_good_kappa > 0 else 1.0      # 직전 조향(왼쪽 +)의 반대쪽
+            else:
+                first = 1.0 if self.mode == 'left_only' else -1.0       # 따라가던 선 쪽
+            sr = self.search = {'ref': ref, 'first': first, 'd0': dist_mm, 'n': 0, 'frame': self.lost_frames}
+        sr['frame'] = self.lost_frames
+        sr['n'] += 1
+        if dist_mm is not None and sr['d0'] is not None:
+            d = dist_mm - sr['d0']
+        else:
+            d = sr['n'] * max(abs(speed), 0.05) * p.lost_search_speed * 70.0   # 프레임당 약 70 ms
+        if d < p.lost_search_mm:
+            side = sr['first']
+        elif d < 3.0 * p.lost_search_mm:
+            side = -sr['first']
+        else:
+            return None
+        return self._heading_kappa(yaw, sr['ref'] + side * math.radians(p.lost_search_deg), speed)
 
     def _heading_kappa(self, yaw: float, yaw_ref: float, speed: float) -> float:
         """yaw_ref를 향하도록 하는 곡률 (왼쪽 +). omega = -kp*err, kappa = omega/v."""

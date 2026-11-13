@@ -63,6 +63,7 @@ class AvoidParams:
     use_island: bool = True           # 섬을 가상 장애물로 넣을지
     exit_lane: str = 'auto'           # 'auto' | 'A'(왼쪽 +1) | 'B'(오른쪽 -1)
     done_margin: float = 0.3          # 섬 시작 + 이만큼 지나고 차선에 붙으면 완료
+    done_max_psi_deg: float = 8.0     # 11/12 밤: 끝낼 때 차가 이보다 비스듬하면 조금 더 가며 바로잡고 끝냄 (차선 노드가 비스듬한 채 받아 차선을 벗어나던 것)
     # ── 차량 (LIMO PRO) ──
     robot_front: float = 0.20         # base_link → 앞 범퍼
     robot_rear: float = 0.16          # base_link → 뒤 범퍼
@@ -77,16 +78,32 @@ class AvoidParams:
     roi_front: float = 2.5            # 앞으로 이만큼까지만 봄
     roi_back: float = 0.6             # 뒤로 이만큼까지 (옆 차 지나가는 중 확인용)
     roi_side_extra: float = 0.10      # 3차선 바깥으로 이만큼만 더 봄 (트랙 밖 사람 무시)
+    obs_max_center_y: float = 0.67    # 11/12 밤: 장애물 덩어리 중심이 차로 중심선에서 이보다 밖이면 트랙 밖 물체로 보고 버림 [m]
     cluster_gap: float = 0.12         # 점 사이가 이보다 멀면 다른 물체
     cluster_min_pts: int = 3          # 점이 이보다 적으면 노이즈
     merge_dist: float = 0.20          # 같은 장애물로 합치는 거리
     max_obs_width: float = 0.45       # 장애물 하나의 최대 폭 (LIMO 0.22)
+    # 11/12 밤 실차(m7_stop_watch): 같은 LIMO를 여러 번 본 것을 합칠 때 상자를 합집합으로 키워서, 위치 추정이 몇 cm씩
+    #   흔들리면 폭이 0.45 m까지 커지고(실제 0.22) 옆 차로를 침범 -> 옆 차로에서 '가는 길 막힘'으로 6초 넘게 멈춤.
+    #   합쳐서 merge_max_w(옆)·merge_max_len(앞뒤)을 넘으면 최근 관측을 중심으로 그 크기로 줄인다 (예전: 따로 새 장애물을 만들어 겹친 상자 3개)
+    merge_max_w: float = 0.30
+    merge_max_len: float = 0.70       # 앞뒤는 안 줄임(= max_obs_len). 0.45로 줄이면 드리프트 복합 조건 40 -> 33
     max_obs_len: float = 0.70         # 한 번에 본 덩어리가 앞뒤로 이보다 길면 벽·트랙 테두리로 보고 버림 (LIMO 0.32)
     min_obs_size: float = 0.08        # 덩어리 가로·세로 중 긴 쪽이 이보다 작으면 버림 (기둥·다리. 리모 면 0.22)
     obs_min_len: float = 0.33         # 앞면만 보여도 이 길이만큼 차가 있다고 가정 (LIMO 길이)
     confirm_hits: int = 3             # 이 횟수 이상 보여야 진짜 장애물로 인정
+    # 11/12 밤: 지도에 한 번 들어온 장애물은 지워지지 않았다 -> 사람 다리·손·튄 점·위치가 어긋난 채 찍힌 가짜가
+    #   차로를 영원히 막아 '멈춤 엔딩'. 장애물이 있어야 할 앞면을 라이다 빔이 forget_rays개 이상 뚫고 지나가고
+    #   (그 너머에서 반사) 그 스캔에 덩어리로도 안 보이면 miss+1, forget_scans번 연속이면 지운다.
+    #   앞쪽 forget_min_x ~ forget_max_x 안의 것만 (옆·뒤는 빔이 비스듬해 판단 안 함)
+    forget: bool = True
+    forget_scans: int = 4
+    forget_rays: int = 3
+    forget_pass: float = 0.15         # 앞면보다 이만큼 더 멀리서 반사돼야 '뚫고 지나감' [m]
+    forget_min_x: float = 0.25        # 차 기준 앞 이 거리부터 [m] (base_link 기준)
+    forget_max_x: float = 2.2
     # ── 판단 ──
-    trigger_dist: float = 1.3   # 내 차선 앞 장애물이 (앞범퍼 기준) 이 안이면 차선 변경. 11/12 1.0 -> 1.3 (더 일찍)
+    trigger_dist: float = 1.5   # 내 차선 앞 장애물이 (앞범퍼 기준) 이 안이면 차선 변경. 11/12 1.0 -> 1.3 -> 밤 1.5 (멀리서 미리. 1.8은 갈림길 시뮬레이션 30->28)
     change_len: float = 1.0           # 차선 1칸 옮기는 데 필요한 앞쪽 여유
     clear_back: float = 0.0           # 옮길 차선의 차 끝이 (뒤범퍼 - 이값)보다 뒤여야 들어감 (음수=더 일찍)
     clear_rollout: bool = True        # 11/12: 옆 장애물을 지나는 중이면 꺾어 들어가는 길을 굴려 봐서 안 부딪히면 바로 옮김
@@ -105,10 +122,58 @@ class AvoidParams:
     #   안전 조건: 다음 차로 앞이 cont_min_free 넘게 비고 지금 가던 차로보다 better_margin 더 비어야, 섬까지 cont_island_m 넘게,
     #   지나갈 길(path_clear) 비어야, 차가 max_heading_deg 까지 안 틀어졌어야. 한 번 옮기는 동안 한 번만.
     cont_change: bool = True
-    cont_min_free: float = 1.30       # 다음 차로 앞 최소 빈 거리 [m] (2칸 이동에 필요한 거리)
-    cont_island_m: float = 1.70       # 섬 앞 끝까지 이보다 가까우면 안 함 [m]
+    cont_min_free: float = 1.80       # 다음 차로 앞 최소 빈 거리 [m]. 11/12 밤 1.3 -> 1.8 (두 차로 한 번에는 정말 필요할 때만)
+    cont_island_m: float = 2.00       # 섬 앞 끝까지 이보다 가까우면 안 함 [m]. 11/12 밤 1.7 -> 2.0
+    # 11/12 밤 실차 요청: 두 차로를 한 번에 건너는 일을 줄이고 가능하면 2차로(가운데)로 달림.
+    #   고르기 점수 = 앞 빈 거리(최대 3 m) - two_lane_penalty x (두 칸이면 1) + center_bonus x (가운데면 1)
+    two_lane_penalty: float = 1.2
+    center_bonus: float = 0.3
+    #   옆 차로(1·3)에서 장애물을 지난 뒤 가운데 앞이 center_return_free 넘게 비고(옆에 지나가는 것도 없음) 갈 길이 비면
+    #   가운데로 돌아옴. 섬 앞 center_from_m 안(출구·표지 판단 구간)에서는 안 함. 차로를 바꾼 뒤 center_return_sec 지나서만
+    center_return: bool = True
+    center_return_free: float = 1.6
+    center_return_sec: float = 1.0
+    center_before_island: bool = True  # 11/12 밤: 표지를 모르면 섬 앞에서 가능하면 2차로로 모아 표지를 보게 함
+    center_from_m: float = 2.6        #   섬 앞 끝까지 이 거리 안에서
+    center_until_m: float = 1.6       #   이 거리까지 (그보다 가까우면 2차로로 들어가지 않음: 1차로 옮겨 나갈 거리 1.1 m + 여유)
+    center_leave_m: float = 0.95      #   가운데에서 표지를 기다리다 끝내 모르면 섬 앞 이 거리에서 옆 차로로 (1차로 옮겨 나갈 최소 0.84 m + 여유)
+    # 11/12 밤 실차 요청: M7 시작(횡단보도 끝)에서 약 4000 mm(= 3차선 시작선 + 2.32 m = 섬 앞 2.07 m)에 오면
+    #   표지를 아직 모를 때 '일단' 2차로로. 위 center_before_island(섬까지 2차로가 다 비어야 함)보다 조건이 느슨하다:
+    #   2차로 앞 center_force_free(또는 섬까지)만 비고 지나갈 길이 비면 옮김. 옆·앞에 장애물이 있으면 center_force_wait_m
+    #   더 가서 다시 본다. 섬 앞 center_until_m(1.6 m)보다 가까워지면 안 함 (2차로 도착 뒤 표지 보고 옆 출구로 갈 거리)
+    center_force: bool = True
+    center_force_rem_m: float = 2.07
+    center_force_free: float = 1.0
+    center_force_wait_m: float = 0.40
     rollback_need_sharp: bool = True  # 후진을 멈출 '틀 공간'을 크게 꺾는 기준(recover_lookahead)으로 잼
     hold_time: float = 0.4   # 차선 바꾼 뒤 최소 유지 시간 [s]. 11/12 0.8 -> 0.4 (옮기는 중에도 다음 판단을 빨리)
+    flip_block_sec: float = 1.5       # 11/12 밤: 방금 떠난 차로로 이 시간 안에는 안 돌아감 (실차 -1 <-> 0 왔다갔다)
+    flip_ok_free: float = 0.5         #   지금 가는 차로 앞이 이보다 짧으면(정말 막힘) 예외로 허용 [m]
+    flip_ok_if_clear: bool = True     # 11/12 밤: 떠난 차로가 이미 비었으면(옆·앞 trigger_dist 안에 장애물 없음) 바로 돌아가도 됨.
+                                      #   옮기자마자 새 차로에 장애물이 나타났는데 0.5 m까지 붙어야 반응하던 것
+    # 11/12 밤 실차 요청: 일찍 옮기기 시작했는데 가려는 차로 옆에 장애물이 걸리면(라이다) 꺾지 말고 원래 차로로 side_wait_m 직진한 뒤 다시 옮김
+    side_wait: bool = True
+    side_wait_m: float = 0.30
+    side_wait_look: float = 1.00      #   옮기는 길을 이만큼 굴려 봐서 옆 장애물에 닿으면 (change_len과 같게)
+    side_wait_max: int = 6            #   한 번 옮길 때 최대 횟수 (그 뒤엔 예전처럼 끝까지 꺾기). 11/12 밤 3 -> 6
+    # 11/12 밤 실차: 1차로에서 막혀 2차로로 가야 하는데 2차로 장애물이 아직 옆이라 못 가면 1 -> 3차로로 두 칸을 바로 건넜다.
+    #   지금 차로 앞이 two_lane_wait_free 넘게 남았고 가운데 차로가 '옆 장애물만 지나면' 비는 거면 두 칸 건너기를 보류하고
+    #   조금 더 직진한 뒤 가운데로 (앞이 그보다 짧으면 급하니 예전처럼 두 칸)
+    two_lane_wait: bool = True
+    two_lane_wait_free: float = 0.60
+    # 11/12 밤 실차 요청: 막혀서(끝까지 꺾어도 못 빠짐) 서게 되면, 쌓인 지도 말고 '이번 라이다 한 바퀴'로 똑바로 creep_m 앞이
+    #   비었는지 보고 비었으면 creep_speed로 creep_m 전진한 뒤 다시 판단 (지도 상자가 커져 옆 장애물에 막힌 것으로 서던 것).
+    #   한 번 멈춤에 최대 creep_max번. 범퍼 앞 비상(emergency)이면 안 함
+    creep: bool = True
+    creep_m: float = 0.30
+    creep_speed: float = 0.15
+    creep_max: int = 8
+    # 11/12 밤 실차 요청: 멈춘 채로 끝내지 말고 찾아본다. creep_search_after 넘게 막혀 있으면 똑바로뿐 아니라
+    #   양쪽으로 꺾은 길(절반·끝까지)도 이번 라이다로 굴려 봐서 빈 쪽으로 creep_m 전진. 차로 방향에서 creep_search_deg 넘게는 안 틀고,
+    #   바깥 차로에서 바깥쪽(노란선 밖)으로는 안 감
+    creep_search: bool = True
+    creep_search_after: float = 1.0
+    creep_search_deg: float = 30.0
     stop_dist: float = 0.30           # 지금 조향대로 이만큼 더 가면 차체가 부딪힐 때만 정지(→ 후진). 옆 차로·옆에 붙은 장애물은 안 봄
     # 11/12: 막혔을 때 바로 서서 후진하지 말고 먼저 조향을 끝까지 꺾어 빠져 본다. 끝까지 꺾은 길로도
     #   squeeze_min_dist 안에서 부딪히면(장애물이 0.2 m까지 붙음) 그때만 서고 예전처럼 후진·탈출
@@ -124,7 +189,14 @@ class AvoidParams:
     v_change: float = 0.30   # 차선 변경 중 속도. 11/12 0.20 -> 0.30
     lookahead: float = 0.35   # pure pursuit 전방주시. 11/12 0.40 -> 0.35: 더 크게 꺾어 확 피함 (0.30은 속도 0.3과 같이 쓰면 코너 끝에서 켤 때 이탈 1/30)
     min_turn_radius: float = 0.53     # LIMO 아커만 최소 회전반경 실측값 (이보다 작게 두면 못 도는 경로를 계획)
-    max_heading_deg: float = 40.0     # 이 이상 비틀어지면 더 꺾지 않음
+    max_heading_deg: float = 40.0     # 이 이상 비틀어지면 더 꺾지 않음 (30으로 줄이면 붙은 배치 시험 4개 실패 -> 그대로)
+    # 11/12 밤 실차 요청: 멀리서 미리, 각을 덜 벌려 옮김 (크게 틀면 카메라가 선을 놓치고 사각지대가 커짐).
+    #   지금 차가 들어 있는 차로의 앞 장애물이 gentle_free 넘게 멀면 전방 주시 gentle_lookahead, 최대 틀기 gentle_heading_deg.
+    #   (가려는 차로도 같은 조건). 가까워지면(또는 옆에 붙으면) 예전처럼 lookahead·max_heading_deg 로 크게 꺾음
+    gentle: bool = False             # 시뮬레이션에서 나빠져 끔 (듬성 배치 40/40 -> 35/40, 20° 넘은 시간 21% -> 40%): 각을 묶으면 비스듬히 오래 감
+    gentle_free: float = 1.6         # 1.0·1.2는 붙은 배치(zigzag6·mixed7)에서 막힘. 랜덤 120판: 1.4/0.5/25°는 114, 1.6/0.6/30°는 120
+    gentle_lookahead: float = 0.60
+    gentle_heading_deg: float = 30.0
     reach_tol: float = 0.08           # 차선 중심에서 이 안이면 '도착'
     # ── 갈림길(미션 2) 출구 차선 미리 이동 ──
     fork_shift: bool = True           # 갈림길 방향을 알면 섬 앞 끝 전에 출구 차선(A=+1, B=-1)으로 미리 옮김 (0/1/2차선)
@@ -159,6 +231,7 @@ class AvoidParams:
     lane_id_need: int = 5
     # 차로 안에서 똑바로 갈 때 조향 = (1-a) x 회피 pure pursuit + a x 차선 노드 곡률 (양쪽 선 보임 + 같은 차로일 때만)
     lane_keep_blend: float = 1.0      # 11/10 오후 0.5 -> 1.0: 차로 안 직진은 팀 차선 주행과 완전히 같은 조향 (v x kappa)
+    lane_keep_blend_single: float = 0.7   # 11/12 밤: 한쪽 선(L/R)만 보일 때 차선 노드 조향 비율 (예전 0 = 안 섞음)
     lane_fresh_sec: float = 0.3
     lane_fix_gate: float = 0.15       # 지금 추정과 이만큼 넘게 다르면 다른 차로를 본 것 → 안 씀 [m]
     lane_fix_max_deg: float = 10.0    # 차선 방향이 이보다 틀어져 보이면 안 씀 (차로 변경 중·3차선 입구 사선)
@@ -217,19 +290,28 @@ class LocalPose:
 # ──────────────────────────────────────────────────────────────
 # 2) 라이다 → 로봇 좌표 점
 # ──────────────────────────────────────────────────────────────
+class ScanPts(list):
+    """scan_to_base 결과. list 그대로 + .far = 반사 없음(inf·0·range_max 넘음) 빔들의 라이다 기준 방향 [rad]"""
+    far = ()
+
+
 def scan_to_base(ranges, angle_min, angle_inc, p):
     """LaserScan ranges → [(x, y) 또는 None, ...]  (base_link 기준, 순서 유지)"""
     off = math.radians(p.scan_yaw_offset_deg)
-    out = []
+    out = ScanPts()
+    far = []
     for i, r in enumerate(ranges):
-        if not (p.range_min <= r <= p.range_max):      # nan / inf 도 여기서 걸러짐
-            out.append(None)
-            continue
         a = angle_min + i * angle_inc
         if p.scan_flip:
             a = -a
         a += off
+        if not (p.range_min <= r <= p.range_max):      # nan / inf 도 여기서 걸러짐
+            out.append(None)
+            if not (r == r) or r == 0.0 or r > p.range_max:   # 반사 없음 (빔이 끝까지 감). nan 포함
+                far.append(math.atan2(math.sin(a), math.cos(a)))
+            continue
         out.append((p.lidar_x + r * math.cos(a), r * math.sin(a)))
+    out.far = far
     return out
 
 
@@ -240,6 +322,8 @@ class Obstacle:
         self.hits = 1
         self.virtual = virtual
         self.tag = tag
+        self.miss = 0          # 있어야 할 자리를 라이다가 뚫고 지나간 연속 횟수 (forget)
+        self.seen = False      # 이번 스캔에서 덩어리와 합쳐졌나
 
     def x_end(self, min_len):
         """뒤쪽 끝.  앞면만 봤어도 차 길이만큼은 있다고 가정"""
@@ -277,6 +361,13 @@ class AvoidPlanner:
     # ---------- 상태 ----------
     def reset(self):
         self.state = 'IDLE'          # IDLE → RUN → DONE
+        self.force_wait_x = None     # center_force: 이 x까지 더 가서 다시 봄
+        self.sw = None               # side_wait 직진 중
+        self.sw_n = 0
+        self.creep = None            # creep 전진 중
+        self.creep_n = 0
+        self.block_t0 = None
+        self._center_why = None
         self.t_start = 0.0
         self.obs = []
         self.target = self.p.start_lane
@@ -290,6 +381,7 @@ class AvoidPlanner:
         self.align_dy = 0.0          # 누적 옆 보정 [m]
         self.align_th = 0.0          # 누적 방향 보정 [rad]
         self.exit_info = {}          # 출구 이동 판단 (status 로 내보냄)
+        self.flip_from = None        # 마지막으로 떠난 차로 (왔다갔다 막기)
         self._cont_done = False      # 이번 옮기기에서 '이어서 한 번에'를 이미 했나
         self.lane_why = {}           # 마지막 차로 고르기에서 차로별 판단 (status·멈춤 로그로 내보냄, 11/12 진단용)
         self._late_logged = False
@@ -363,7 +455,11 @@ class AvoidPlanner:
                 ys = [q[1] for q in cur]
                 lx, wy = max(xs) - min(xs), max(ys) - min(ys)
                 # 너무 크면 벽·테두리(길이 max_obs_len, 폭 max_obs_width 초과), 너무 작으면 기둥·다리 -> 버림 (11/10)
-                if lx <= p.max_obs_len and wy <= p.max_obs_width and max(lx, wy) >= p.min_obs_size:
+                yc = 0.5 * (max(ys) + min(ys))
+                # 11/12 밤 실차: 트랙 밖(노란 실선 밖) 물체·사람이 장애물로 들어옴 -> 중심이 바깥 차로 중심보다
+                #   obs_max_center_y 넘게 밖이면 버림 (바깥 차로 LIMO 중심 0.52 m, 위치 오차 15 cm까지 받음)
+                if (lx <= p.max_obs_len and wy <= p.max_obs_width and max(lx, wy) >= p.min_obs_size
+                        and abs(yc) <= p.obs_max_center_y):
                     clusters.append((min(xs), max(xs), min(ys), max(ys)))
             cur.clear()
 
@@ -389,9 +485,66 @@ class AvoidPlanner:
 
         self.emergency = emerg_n >= max(1, p.emerg_min_pts)
         self.last_clusters = clusters
+        for o in self.obs:
+            o.seen = False
         self._merge(clusters)
+        if p.forget:
+            self._forget(pts_base)
         self._align()
         return clusters
+
+    def _forget(self, pts_base):
+        """있어야 할 앞면을 빔이 뚫고 지나가면(그 너머에서 반사) 그 장애물은 없는 것 -> 몇 번 연속이면 지움"""
+        p = self.p
+        P = self.pose
+        c, s = math.cos(P.psi), math.sin(P.psi)
+        lx, ly = P.x + p.lidar_x * c, P.y + p.lidar_x * s
+        rays = []
+        for pt in pts_base:
+            if pt is None:
+                continue
+            bx, by = pt[0] - p.lidar_x, pt[1]
+            rays.append((math.atan2(by, bx), math.hypot(bx, by)))
+        rays.extend((a, INF) for a in getattr(pts_base, 'far', ()))
+        if not rays:
+            return
+        keep = []
+        for o in self.obs:
+            if o.virtual or o.seen:
+                o.miss = 0 if o.seen else o.miss
+                keep.append(o)
+                continue
+            # 앞면 양 끝을 라이다 기준 (방향, 거리)로
+            ends = []
+            for yy in (o.ymin, o.ymax):
+                dx, dy = o.xmin - lx, yy - ly
+                fx, fy = dx * c + dy * s, -dx * s + dy * c
+                ends.append((math.atan2(fy, fx), math.hypot(fx, fy), fx))
+            fx_min = min(e[2] for e in ends)
+            if not (p.forget_min_x <= fx_min + p.lidar_x <= p.forget_max_x):
+                keep.append(o)
+                continue
+            a0, a1 = sorted(e[0] for e in ends)
+            pad = 0.25 * (a1 - a0)                    # 가장자리 빔은 빼고 가운데만
+            a0, a1 = a0 + pad, a1 - pad
+            near = min(e[1] for e in ends)
+            far = max(e[1] for e in ends)
+            n_pass = n_hit = 0
+            for a, r in rays:
+                if a0 <= a <= a1:
+                    if r > far + p.forget_pass:
+                        n_pass += 1
+                    elif r > near - 0.10:
+                        n_hit += 1
+            if n_pass >= p.forget_rays and n_hit == 0:
+                o.miss += 1
+            elif n_hit > 0:
+                o.miss = 0
+            if o.miss >= p.forget_scans:
+                self.events.append((self.pose.x, f'장애물 지움 (x {o.xmin:.2f}, y {0.5 * (o.ymin + o.ymax):+.2f}: 빔이 뚫고 지나감)'))
+                continue
+            keep.append(o)
+        self.obs = keep
 
     # ---------- 정렬 보정 ----------
     def _align(self):
@@ -467,19 +620,31 @@ class AvoidPlanner:
         for (x0, x1, y0, y1) in clusters:
             merged = False
             for o in self.obs:
+                if o.virtual:
+                    continue
                 if x0 <= o.xmax + md and x1 >= o.xmin - md and y0 <= o.ymax + md and y1 >= o.ymin - md:
                     ny0, ny1 = min(o.ymin, y0), max(o.ymax, y1)
+                    nx0, nx1 = min(o.xmin, x0), max(o.xmax, x1)
                     if ny1 - ny0 > p.max_obs_width:
                         continue
-                    if max(o.xmax, x1) - min(o.xmin, x0) > p.max_obs_len:   # 벽 조각이 이어 붙어 길어지는 것 방지
+                    if nx1 - nx0 > p.max_obs_len:   # 벽 조각이 이어 붙어 길어지는 것 방지
                         continue
-                    o.xmin, o.xmax = min(o.xmin, x0), max(o.xmax, x1)
+                    if ny1 - ny0 > p.merge_max_w:          # 합집합으로 커짐 -> 최근 관측 중심, merge_max_w 폭
+                        c, h = 0.5 * (y0 + y1), 0.5 * max(p.merge_max_w, y1 - y0)
+                        ny0, ny1 = c - h, c + h
+                    if nx1 - nx0 > p.merge_max_len:
+                        c, h = 0.5 * (x0 + x1), 0.5 * max(p.merge_max_len, x1 - x0)
+                        nx0, nx1 = c - h, c + h
+                    o.xmin, o.xmax = nx0, nx1
                     o.ymin, o.ymax = ny0, ny1
                     o.hits += 1
+                    o.seen = True
                     merged = True
                     break
             if not merged:
-                self.obs.append(Obstacle(x0, x1, y0, y1))
+                n = Obstacle(x0, x1, y0, y1)
+                n.seen = True
+                self.obs.append(n)
 
     def obstacles(self, with_pref=True):
         """확정된 실제 장애물 + 가상 장애물(섬, 출구 선호)"""
@@ -500,8 +665,13 @@ class AvoidPlanner:
         hw = self.p.robot_half_width + self.p.side_margin
         return not (o.ymax < c - hw or o.ymin > c + hw)
 
-    def free_ahead(self, lane, obs, skip_beside=False):
+    def free_ahead(self, lane, obs, skip_beside=None):
         """그 차선에서 앞범퍼 ~ 가장 가까운 장애물까지 거리 (없으면 INF, 옆에 붙어있으면 음수)"""
+        # 11/12 밤 실차: 차로 고르기는 옆(지나가는 중) 장애물을 빼고 보는데, 고른 뒤 '지금 목표 차로'는 빼지 않고 봐서
+        #   옮기자마자 그 차로가 막힌 것(앞 거리 음수)으로 보여 0.4초마다 되돌아갔다 (bag: -1<->0 반복, 1->-1 뒤집힘).
+        #   기본(None) = 차가 아직 그 차로에 안 들어갔으면 옆 장애물을 뺌 (들어갈 수 있는지는 path_clear·path_hit가 봄)
+        if skip_beside is None:
+            skip_beside = self.p.clear_rollout and lane != self.nearest_lane(self.pose.y)
         p = self.p
         x = self.pose.x
         xf = x + p.robot_front
@@ -573,9 +743,17 @@ class AvoidPlanner:
             if lane == cur or not why.get(lane, '').startswith('갈 수 있음'):
                 continue
             f = self.free_ahead(lane, obs, skip_beside=p.clear_rollout)
-            key = (min(f, 3.0), -abs(lane - cur), 1 if lane == self.exit_pref else 0)
+            score = (min(f, 3.0) - p.two_lane_penalty * (abs(lane - cur) - 1)
+                     + (p.center_bonus if lane == 0 else 0.0))
+            key = (round(score, 3), -abs(lane - cur), 1 if lane == self.exit_pref else 0)
             if best is None or key > best_key:
                 best, best_key = lane, key
+        if best is not None and abs(best - cur) == 2 and p.two_lane_wait and f_cur >= p.two_lane_wait_free:
+            mid = (best + cur) // 2
+            f_mid = self.free_ahead(mid, obs, skip_beside=True)      # 옆 장애물을 지난 뒤의 가운데 앞
+            if f_mid >= f_cur + p.better_margin:
+                why[best] = f'두 칸 건너기 보류: 조금 더 가서 {lane_name(mid)}로 (지금 앞 {f_cur:.2f}m, 가운데 앞 {min(f_mid, 9.9):.2f}m)'
+                return None
         return best
 
     # ---------- 갈림길 출구 차선 이동 ----------
@@ -809,7 +987,13 @@ class AvoidPlanner:
         f_cur = self.free_ahead(cur, obs)
 
         # ① 내 차선 앞이 막혔나? → ② 갈 차선 고르기
-        if f_cur < p.trigger_dist and t - self.last_switch >= p.hold_time:
+        # 가운데 차로에서 표지를 기다리는 중: 앞을 막는 게 섬뿐이면 center_leave_m 까지는 안 비킴 (표지를 알면 ②'가 1차로만 옮김)
+        wait_sign = False
+        if p.center_before_island and self.exit_pref is None and cur == 0:
+            real = [o for o in obs if not o.virtual]
+            rem = p.section_length - (x + p.robot_front)
+            wait_sign = rem > p.center_leave_m and self.free_ahead(0, real) >= p.trigger_dist
+        if f_cur < p.trigger_dist and t - self.last_switch >= p.hold_time and not wait_sign:
             nxt = self.choose(cur, obs)
             if nxt is None and self.exit_pref is not None:
                 obs2 = self.obstacles(False)            # 출구 선호 때문에 막혔으면 선호 포기
@@ -829,8 +1013,16 @@ class AvoidPlanner:
                     self.exit_info = {'plan': 'given_up'}
                     self.events.append((x, '출구선호 포기(현재 차선 유지)'))
                     obs = obs2
+            # 11/12 밤 실차: 방금 떠난 차로로 0.4초마다 되돌아가는 왔다갔다(-1 <-> 0)가 있었다 -> 그 차로로는
+            #   flip_block_sec 동안 안 돌아감 (지금 가는 차로가 flip_ok_free 안으로 정말 막혔을 때만 허용)
+            if (nxt is not None and nxt == self.flip_from and t - self.last_switch < p.flip_block_sec
+                    and f_cur >= p.flip_ok_free
+                    and not (p.flip_ok_if_clear
+                             and self.free_ahead(nxt, obs, skip_beside=False) >= p.trigger_dist)):
+                nxt = None
             if nxt is not None:
                 self.events.append((x, f'차선 {cur:+d} → {nxt:+d}  (앞 {f_cur:.2f}m)'))
+                self.flip_from = cur
                 self.target = nxt
                 self.last_switch = t
                 self.rechosen = False
@@ -887,6 +1079,78 @@ class AvoidPlanner:
         elif self.exit_pref is not None and self.target == self.exit_pref:
             self.exit_info = {'need_lanes': 0, 'plan': 'keep'}
 
+        # ②'' 11/12 밤 실차: 1·3차로에서 섬 앞 갈림길 표지(섬 앞 끝 가운데)를 잘 못 봄 -> 표지를 아직 모르면 섬 앞
+        #   center_from_m ~ center_until_m 사이에서는 가능하면 2차로(가운데)로 모아 표지를 보게 한다.
+        #   2차로 앞이 섬까지 비고 지나갈 길이 비었을 때만 (특별한 경우 = 장애물이 있으면 그대로).
+        #   표지를 알게 되면 위 ②'가 1차로만 옮기면 되고, 끝까지 모르면 섬(가상 장애물) 때문에 ①에서 옆 차로를 고른다.
+        if (p.center_before_island and self.exit_pref is None and self.target != 0 and 0 in self.lanes
+                and t - self.last_switch >= p.hold_time and self.rb is None and self.rec is None):
+            rem = p.section_length - (x + p.robot_front)
+            if p.center_until_m < rem <= p.center_from_m and self.nearest_lane(y) == self.target:
+                f0 = self.free_ahead(0, obs, skip_beside=False)   # 옆에서 지나가는 중인 것도 없어야 (가운데가 정말 빔)
+                pc = self.path_clear(self.target, 0, obs)
+                if f0 >= rem - 0.05 and pc:
+                    self.events.append((x, f'섬 앞 {rem:.2f}m: 표지를 보려고 가운데 차로로 ({lane_name(self.target)} → 2차선)'))
+                    self.flip_from = self.target
+                    self.target = 0
+                    self.last_switch = t
+                    self.rechosen = True             # 다시 고르기가 '앞이 더 빈 옆 차로'로 되돌리지 않게 (섬 때문에 가운데는 늘 짧음)
+                else:
+                    self._center_refused(x, rem, f'2차로 앞 {f0:.2f}m에 장애물(섬까지 비어야 함)' if f0 < rem - 0.05
+                                         else '지나갈 길 막힘(옆·앞 장애물)')
+        elif (p.center_before_island and self.target != 0 and self.exit_pref is not None
+              and p.center_until_m < p.section_length - (x + p.robot_front) <= p.center_from_m):
+            self._center_refused(x, p.section_length - (x + p.robot_front),
+                                 f'출구를 이미 앎({"A" if self.exit_pref > 0 else "B"}) -> 2차로 안 감, 출구 차로로')
+
+        # ②''' 가운데로 돌아오기 (위 center_return 설명)
+        if (p.center_return and self.target != 0 and 0 in self.lanes and self.rb is None and self.rec is None
+                and t - self.last_switch >= max(p.hold_time, p.center_return_sec)
+                and abs(y - self.center(self.target)) < p.reach_tol
+                and not (self.flip_from == 0 and t - self.last_switch < p.flip_block_sec)):
+            rem = p.section_length - (x + p.robot_front)
+            if rem > p.center_from_m:
+                f0 = self.free_ahead(0, obs, skip_beside=False)
+                if f0 >= p.center_return_free and self.path_clear(self.target, 0, obs):
+                    self.events.append((x, f'가운데로 돌아옴: {lane_name(self.target)} → 2차선 (가운데 앞 {min(f0, 9.9):.2f}m)'))
+                    self.flip_from = self.target
+                    self.target = 0
+                    self.last_switch = t
+                    self.rechosen = True
+
+        # 부드럽게 옮기기: 지금 들어 있는 차로 앞 장애물이 멀면 작은 각으로 (위 gentle 설명)
+        #   가려는 차로도 옆·앞 gentle_free 안에 장애물이 없어야 (옆 장애물 뒤로 S자로 들어갈 때는 크게 꺾어야 함)
+        self.gentle_on = (p.gentle and not self.sharp
+                          and self.free_ahead(self.nearest_lane(y), obs, skip_beside=False) >= p.gentle_free
+                          and self.free_ahead(self.target, obs, skip_beside=False) >= p.gentle_free)
+
+        # ②'''' 옆 장애물 기다리기 (위 side_wait 설명)
+        out = self._side_wait_step(obs, t)
+        if out is not None:
+            return out
+
+        # ②''''' M7 시작 약 4000 mm에서 일단 2차로 (위 center_force 설명)
+        if (p.center_force and self.exit_pref is None and self.target != 0 and 0 in self.lanes
+                and self.rb is None and self.rec is None and t - self.last_switch >= p.hold_time
+                and self.nearest_lane(y) == self.target):
+            rem = p.section_length - (x + p.robot_front)
+            wx = getattr(self, 'force_wait_x', None)
+            if p.center_until_m < rem <= p.center_force_rem_m and (wx is None or x >= wx):
+                f0 = self.free_ahead(0, obs, skip_beside=False)   # 옆에 지나가는 중인 것도 있으면 음수
+                if f0 >= min(p.center_force_free, rem - 0.05) and self.path_clear(self.target, 0, obs):
+                    self.events.append((x, f'M7 약 4000 mm(섬 앞 {rem:.2f}m): 일단 2차선으로 ({lane_name(self.target)} → 2차선)'))
+                    self.flip_from = self.target
+                    self.target = 0
+                    self.last_switch = t
+                    self.rechosen = True
+                    self.force_wait_x = None
+                else:
+                    self.force_wait_x = x + p.center_force_wait_m
+                    why = (f'2차로 옆·앞 {f0:.2f}m에 장애물' if f0 < min(p.center_force_free, rem - 0.05)
+                           else '지나갈 길 막힘')
+                    self.events.append((x, f'M7 약 4000 mm(섬 앞 {rem:.2f}m): 2차선으로 가려는데 {why} -> '
+                                           f'{p.center_force_wait_m:.1f}m 더 가서 다시'))
+
         # ③ 속도
         in_lane = abs(y - self.center(self.target)) < p.reach_tol
         if in_lane and self.sharp:
@@ -903,6 +1167,16 @@ class AvoidPlanner:
             if out is not None:
                 self.stuck_since = None
                 return out
+        if self.blocked and not self.emergency:
+            out = self._creep_step(t)
+            if out is not None:
+                self.stuck_since = None
+                return out
+        else:
+            self.creep = None
+            if not self.blocked:
+                self.creep_n = 0
+                self.block_t0 = None
         if self.blocked or self.emergency:
             v = 0.0
             # 서 있으면 상황이 안 바뀐다 → 잠시 뒤 후진하며 크게 꺾어 다시 잡기 (횟수 제한)
@@ -939,12 +1213,138 @@ class AvoidPlanner:
 
         # ④ 끝났나?
         L = p.section_length
-        if (x > L + p.done_margin and in_lane) or x > L + p.island_length:
+        settled = in_lane and abs(math.degrees(self.pose.psi)) <= p.done_max_psi_deg
+        if (x > L + p.done_margin and settled) or x > L + p.island_length:
             self.state = 'DONE'
             self.events.append((x, f'완료 (차선 {self.target:+d})'))
             return 0.0, 0.0
 
         return v, self.control(v, t, in_lane)
+
+    def _center_refused(self, x, rem, why):
+        """섬 앞 2차로 모으기를 못 한 이유를 바뀔 때만 로그 (실차에서 왜 1·3차로에 남았나 보려고)"""
+        key = why.split(' ')[0] + why[-6:] if '장애물' not in why else '장애물'   # 숫자가 매번 달라도 같은 이유면 한 번만
+        if getattr(self, '_center_why', None) != key:
+            self._center_why = key
+            self.events.append((x, f'섬 앞 {rem:.2f}m: {lane_name(self.target)}에서 2차로로 안 감 - {why}'))
+
+    def _creep_step(self, t):
+        """막힘: 이번 스캔 덩어리로만 봐서 빈 길(똑바로, 오래 막혔으면 양쪽으로 꺾은 길도)로 creep_m 천천히 전진 (creep·creep_search 설명)"""
+        p = self.p
+        if not p.creep:
+            return None
+        x, y, psi = self.pose.x, self.pose.y, self.pose.psi
+        if getattr(self, 'block_t0', None) is None:
+            self.block_t0 = t
+        cr = getattr(self, 'creep', None)
+        if cr is not None and math.hypot(x - cr['x0'], y - cr['y0']) >= p.creep_m:
+            self.creep = cr = None                      # 다 감 -> 다시 판단 (아직 막혔으면 아래에서 또)
+        raw = [Obstacle(*c) for c in (getattr(self, 'last_clusters', None) or [])]
+        if cr is not None and self.path_hit(raw, cr['k'], p.stop_dist, fixed=True) < INF:
+            self.creep = cr = None                      # 가는 중 라이다로 앞이 막힘 -> 다시 고름
+        if cr is None:
+            if getattr(self, 'creep_n', 0) >= p.creep_max:
+                return None
+            kmax = 1.0 / p.min_turn_radius
+            cands = [0.0]
+            out_side = 1.0 if y > 0 else -1.0
+            if out_side * y > 0.5 * p.lane_width and out_side * psi > math.radians(10.0):
+                # 바깥 차로에서 바깥쪽으로 틀어진 채 똑바로 가면 노란선 밖 (시뮬레이션: 9 cm 나감) -> 안쪽으로 꺾은 길만
+                cands = [-out_side * kmax, -out_side * 0.5 * kmax]
+            elif p.creep_search and t - self.block_t0 >= p.creep_search_after:
+                toward = 1.0 if self.center(self.target) - y >= 0 else -1.0
+                lim = math.radians(p.creep_search_deg)
+                for side in (toward, -toward):
+                    if side * psi > lim:                # 이미 그쪽으로 30° 넘게 틀어짐
+                        continue
+                    if side * y > 0.5 * p.lane_width:
+                        continue                        # 바깥 차로에서 바깥쪽으로는 안 꺾음 (노란선 밖)
+                    cands += [side * 0.5 * kmax, side * kmax]
+            pick = None
+            for k in cands:
+                if self.path_hit(raw, k, p.creep_m + p.stop_dist, fixed=True) == INF:
+                    pick = k
+                    break
+            if pick is None:
+                return None                             # 지금 라이다로도 어느 쪽이든 막힘 -> 정말 막힘 (서서 계속 다시 봄)
+            self.creep_n = getattr(self, 'creep_n', 0) + 1
+            cr = self.creep = {'x0': x, 'y0': y, 'k': pick}
+            how = '똑바로' if pick == 0.0 else f'{"왼쪽" if pick > 0 else "오른쪽"}으로 {"끝까지" if abs(pick) >= kmax - 1e-9 else "반쯤"} 꺾어'
+            self.events.append((x, f'막힘인데 지금 라이다로는 {how} {p.creep_m:.2f}m 빔 -> 천천히 전진 '
+                                   f'({self.creep_n}/{p.creep_max})'))
+        return p.creep_speed, p.creep_speed * cr['k']
+
+    def _side_wait_step(self, obs, t):
+        """옮기는 초반(아직 원래 차로 쪽)에 옮기는 길이 가려는 차로 옆 장애물에 닿으면 원래 차로로 side_wait_m 직진"""
+        p = self.p
+        x, y = self.pose.x, self.pose.y
+        sw = getattr(self, 'sw', None)
+        if sw is not None:
+            if sw['target'] != self.target or x >= sw['x_end'] or self.rb is not None or self.rec is not None:
+                self.sw = None
+            else:
+                lane = sw['lane']
+                saved = self.target
+                self.target = lane                      # 원래 차로 중심을 따라 똑바로
+                try:
+                    k = self.control(1.0, t, False)
+                    hit = self.path_hit(obs, k, p.stop_dist)
+                finally:
+                    self.target = saved
+                if hit < INF:
+                    self.sw = None                      # 직진도 막힘 -> 예전 처리(끝까지 꺾기)
+                    return None
+                self.waiting_side = True
+                return p.v_change, p.v_change * k
+        self.waiting_side = False
+        if not p.side_wait or self.rb is not None or self.rec is not None:
+            return None
+        origin = self.nearest_lane(y)
+        if origin == self.target or abs(y - self.center(self.target)) < p.reach_tol:
+            self.sw_n = 0
+            return None
+        if getattr(self, 'sw_n', 0) >= p.side_wait_max:
+            return None
+        hit, o = self._path_hit_obs(obs, p.side_wait_look)
+        if hit == INF or o is None or o.virtual or not self._in_corridor(o, self.target):
+            return None
+        if o.xmin > x + p.robot_front + p.side_wait_m:
+            return None                                 # 앞쪽 장애물(옆이 아님) -> 기다려도 소용없음
+        saved = self.target
+        self.target = origin
+        try:
+            k = self.control(1.0, t, False)
+            straight_hit = self.path_hit(obs, k, p.stop_dist + 0.05)   # 갈 수 있는 만큼만 (가는 중에도 매번 다시 봄). 예전 0.6 m 다 비어야 했음
+        finally:
+            self.target = saved
+        if straight_hit < INF:
+            return None
+        self.sw = {'x_end': x + p.side_wait_m, 'lane': origin, 'target': self.target}
+        self.sw_n = getattr(self, 'sw_n', 0) + 1
+        self.events.append((x, f'옆 장애물(x {o.xmin:.2f}) 걸림 -> {lane_name(origin)}로 {p.side_wait_m:.2f}m 직진 뒤 다시 '
+                               f'{lane_name(self.target)}로 ({self.sw_n}/{p.side_wait_max})'))
+        return self._side_wait_step(obs, t)
+
+    def _path_hit_obs(self, obs, dist):
+        """path_hit과 같은 굴리기, (거리, 닿은 장애물)"""
+        p = self.p
+        boxes = [o for o in obs if not (o.virtual and o.tag == 'exit')]
+        x, y, h = self.pose.x, self.pose.y, self.pose.psi
+        hw = p.robot_half_width + p.path_margin
+        front, rear = p.robot_front + p.path_margin, p.robot_rear
+        n = max(1, int(math.ceil(dist / 0.05)))
+        ds = dist / n
+        for i in range(n + 1):
+            if i > 0:
+                kk = self._pursuit_k(x, y, h)
+                hm = h + 0.5 * kk * ds
+                x, y, h = x + ds * math.cos(hm), y + ds * math.sin(hm), h + kk * ds
+            c, s = math.cos(h), math.sin(h)
+            car = [(x + a * c - b * s, y + a * s + b * c) for a, b in ((front, hw), (front, -hw), (-rear, -hw), (-rear, hw))]
+            for o in boxes:
+                if _rect_hits_box(car, o.xmin, o.x_end(p.obs_min_len), o.ymin, o.ymax):
+                    return ds * i, o
+        return INF, None
 
     # ---------- 바로 앞 충돌 판단 ----------
     def path_hit(self, obs, k, dist, fixed=False):
@@ -1010,7 +1410,9 @@ class AvoidPlanner:
 
     def _ld(self):
         """전방 주시 거리. 후진(되돌아가기·탈출)한 뒤 다음 차로에 들어갈 때까지는 짧게 -> 더 크게 꺾어 빨리 빠짐."""
-        return self.p.recover_lookahead if self.sharp else self.p.lookahead
+        if self.sharp:
+            return self.p.recover_lookahead
+        return self.p.gentle_lookahead if getattr(self, 'gentle_on', False) else self.p.lookahead
 
     def _pursuit_k(self, x, y, psi):
         """(x, y, psi)에서 목표 차로 중심을 따라가는 곡률 (control과 같은 식, 차선 노드 섞기 없음)."""
@@ -1022,7 +1424,7 @@ class AvoidPlanner:
         k = 2.0 * yr / (xr * xr + yr * yr)
         kmax = 1.0 / p.min_turn_radius
         k = max(-kmax, min(kmax, k))
-        mh = math.radians(p.max_heading_deg)
+        mh = math.radians(p.gentle_heading_deg if getattr(self, 'gentle_on', False) else p.max_heading_deg)
         if (psi > mh and k > 0) or (psi < -mh and k < 0):
             k = 0.0
         return k
@@ -1052,10 +1454,12 @@ class AvoidPlanner:
         ln = self.lane_last
         self.blend_used = False
         if (p.lane_keep_blend > 0 and in_lane and ln and t is not None and self.lane_t is not None
-                and t - self.lane_t <= p.lane_fresh_sec and ln.get('status') == 'BOTH' and not ln.get('low_conf')
+                and t - self.lane_t <= p.lane_fresh_sec and ln.get('status') in ('BOTH', 'L', 'R')
+                and not ln.get('low_conf')
                 and ln.get('kappa') is not None and self.target == self.nearest_lane(y)
                 and (self.lane_id is None or self.lane_id == self.target)):
-            a = p.lane_keep_blend
+            # 11/12 밤: 차로 안에서는 차선 인식 우선. 한쪽 선만 보여도 lane_keep_blend_single 만큼 차선 노드 조향
+            a = p.lane_keep_blend if ln.get('status') == 'BOTH' else p.lane_keep_blend_single
             k = max(-kmax, min(kmax, (1.0 - a) * k + a * float(ln['kappa'])))
             self.blend_used = True
         return v * k
@@ -1082,7 +1486,7 @@ class AvoidPlanner:
             'psi_deg': round(math.degrees(self.pose.psi), 1),
             'target': self.target,
             'now_lane': self.nearest_lane(self.pose.y),
-            'emergency': self.emergency, 'blocked': self.blocked, 'squeezing': getattr(self, 'squeezing', False), 'edge_guard': getattr(self, 'edge_guarded', False),
+            'emergency': self.emergency, 'blocked': self.blocked, 'creeping': getattr(self, 'creep', None) is not None, 'squeezing': getattr(self, 'squeezing', False), 'edge_guard': getattr(self, 'edge_guarded', False),
             'hit_m': None if self.hit_dist == INF else round(self.hit_dist, 2),
             'recovering': self.rec is not None or self.rb is not None, 'recover_n': self.rec_n,
             'rollback': self.rb is not None, 'rollback_m': round(self.rollback_m, 2),

@@ -119,10 +119,20 @@ def test_fork_forwarded_and_fallback():
     link = M7Link(M7LinkParams(fork_fallback='A'))
     acts = drive(link, 13000.0, 13700.0)
     forks = [a for _, a in acts if a[0] == 'fork']
-    assert forks == [('fork', 'A')]                        # 표지를 못 읽음 -> 켤 때 대체값
+    assert forks == [('fork', 'auto'), ('fork', 'A')]     # M7 들어오면 '모름'(지난 판 방향 지움) -> 표지를 못 읽음 -> 켤 때 대체값
     link2 = M7Link()
     acts = drive(link2, 13000.0, 13700.0, fork='B')
-    assert [a for _, a in acts if a[0] == 'fork'] == [('fork', 'B')]   # 한 번만
+    assert [a for _, a in acts if a[0] == 'fork'] == [('fork', 'B')]   # 한 번만 (이미 표지를 알면 'auto' 안 보냄)
+
+
+def test_fork_cleared_each_new_m7_run():
+    """11/12 밤: 회피 노드에 지난 판 방향이 남지 않게, 새 판 M7에 들어올 때 표지를 아직 모르면 'auto'를 한 번 보냄"""
+    link = M7Link()
+    acts = drive(link, 13000.0, 13700.0, fork='A')
+    assert [a for _, a in acts if a[0] == 'fork'] == [('fork', 'A')]
+    link.update(20.0, {'state': 'M2_FORK', 'route': {}}, {})                 # 다음 미션으로
+    acts = drive(link, 13000.0, 13300.0, t0=30.0)                           # 새 판 (표지 아직 모름)
+    assert [a for _, a in acts if a[0] == 'fork'] == [('fork', 'auto')]
 
 
 def test_done_sets_exit_and_state():
@@ -322,9 +332,9 @@ def run_front(link, s_from, s_to, front_of_s, step=20.0):
 
 def test_obstacle_trigger_enables_when_front_within_threshold():
     link = obstacle_link()
-    assert link.p.trigger_front_mm == 1300.0                # 11/12 1000 -> 1300
-    obs = 13589.0 + 1500.0                                   # 가운데 차로 장애물: 시작선 + 1.5 m
-    en = run_front(link, 11905.0, 15000.0, lambda s: obs - s if obs - s < 2000 else None)
+    assert link.p.trigger_front_mm == 1800.0                # 11/12 1000 -> 1300 -> 밤 1800
+    obs = 13589.0 + 2000.0                                   # 가운데 차로 장애물: 시작선 + 2.0 m (1.8 m 앞이 코너 끝 문턱 뒤가 되게)
+    en = run_front(link, 11905.0, 15000.0, lambda s: obs - s if obs - s < 2500 else None)
     assert en and en[0][0] == pytest.approx(obs - link.p.trigger_front_mm, abs=20)   # 기준 거리 앞에서
     assert link.state()['m7_trigger'] == 'obstacle'
     assert en[0][1] == pytest.approx((17973.0 - en[0][0]) / 1000.0, abs=0.03)   # section = 지금 위치 ~ 섬
@@ -427,7 +437,7 @@ def test_obstacle_trigger_700_if_configured():
     """제안값 0.7 m로 바꾸면 그 거리에서 켠다 (params.yaml m7_trigger_front_mm)."""
     link = obstacle_link(trigger_front_mm=700.0)
     obs = 13589.0 + 1500.0
-    en = run_front(link, 11905.0, 15000.0, lambda s: obs - s if obs - s < 2000 else None)
+    en = run_front(link, 11905.0, 15000.0, lambda s: obs - s if obs - s < 2500 else None)
     assert en and en[0][0] == pytest.approx(obs - 700.0, abs=20)
 
 
@@ -636,3 +646,16 @@ def test_state_reports_distance_to_island_tip():
     assert link.state()['m7_to_tip_mm'] is None
     link.pos = 3384.0
     assert link.state()['m7_to_tip_mm'] == 1000
+
+
+def test_sign_off_waits_until_settled_in_side_lane():
+    """11/12 밤: 표지를 지났어도 차가 비스듬하거나(>8°) 아직 차로 중심 밖이면 끄지 않고, 자리 잡으면 끈다."""
+    link = running_link()
+    link.on_avoid_state({'state': 'RUN', 'target': -1, 'now_lane': -1, 'psi_deg': -20.0, 'y': -0.40})
+    for _ in range(4):
+        link.on_detections(det(True))
+    for _ in range(5):
+        link.on_detections(det(False))
+    assert ('disable',) not in link.update(5.0, mission(17973.0 - 600.0), {})
+    link.on_avoid_state({'state': 'RUN', 'target': -1, 'now_lane': -1, 'psi_deg': -3.0, 'y': -0.50})
+    assert ('disable',) in link.update(5.1, mission(17973.0 - 590.0), {})

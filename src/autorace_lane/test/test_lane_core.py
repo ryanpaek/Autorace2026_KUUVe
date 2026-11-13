@@ -297,3 +297,107 @@ def test_lost_lane_follows_route_curvature(cfg, w, expect):
     out = run(f, synth.blank(cfg), frames=15, yaw=0.0)
     assert out.source == 'hold'
     assert out.kappa == pytest.approx(expect, abs=0.1)
+
+
+def test_m7_corner_preview_keeps_turning_when_lost(cfg):
+    """11/12 밤: M7 직전 코너(미션 노드가 m7_corner로 보냄)에서 선을 놓치면 직진(hold)·정지 대신 코너 곡률로 계속 돈다."""
+    f = LaneFollower(cfg, LaneParams(route_ff_weight_lost=0.8))
+    run(f, synth.straight_lane(cfg), yaw=0.0)
+    f.route_k = [-1.5625] * 14            # R640 오른쪽
+    f.route_step_mm = 100.0
+    f.route_corner = True
+    out = run(f, synth.blank(cfg), frames=60, yaw=0.0)   # lost_hold_frames(30)를 넘겨도
+    assert out.source == 'route' and out.speed_scale > 0.0
+    assert out.kappa == pytest.approx(-1.5625, abs=0.1)
+    f.route_corner = False                 # 코너가 아니면 예전대로 (오래 놓치면 정지)
+    out = run(f, synth.blank(cfg), frames=40, yaw=0.0)
+    assert out.source in ('hold', 'stop')
+
+
+def test_m7_corner_blends_corner_even_when_lines_seen(cfg):
+    """11/12 밤 실차: 코너에서 차선 노드가 선을 '보면서' 직진. m7_corner면 선이 보여도 코너 곡률을 섞는다 (도면 다르다고 안 버림)."""
+    f = LaneFollower(cfg, LaneParams(route_ff_weight_lost=0.8))
+    f.route_k = [-1.5625] * 14
+    f.route_step_mm = 100.0
+    f.route_corner = True
+    out = run(f, synth.straight_lane(cfg), frames=20, yaw=0.0)     # 선은 똑바로 보임
+    assert out.source == 'lane' and out.kappa < -0.6               # 그래도 오른쪽으로 꺾음
+    f.route_corner = False
+    out = run(f, synth.straight_lane(cfg), frames=20, yaw=0.0)
+    assert abs(out.kappa) < 0.3                                     # 코너가 아니면 예전대로 선을 따름
+
+
+def test_corner_uses_inner_line_only(cfg):
+    """11/12 밤: 미리 아는 코너(오른쪽)에서는 양쪽이 보여도 안쪽(오른쪽) 선 + 반폭으로 중앙선.
+    바깥(왼쪽) 선이 다른 차로 선이라 멀리 잡혀도 안쪽 선 기준이면 차로 가운데를 유지"""
+    img = synth.straight_lane(cfg, center_x_mm=-85.0, width_mm=700.0)   # 오른쪽 선 +265, 왼쪽 선 -435 (바깥 선 잘못)
+    f = LaneFollower(cfg, LaneParams())
+    out = run(f, img, frames=10, yaw=0.0)
+    assert out.status == 'BOTH' and abs(out.offset_mm) > 60          # 예전: 양쪽 가운데 -> 85 mm 쏠림
+    f = LaneFollower(cfg, LaneParams())
+    f.route_k = [-1.5625] * 14
+    f.route_step_mm = 100.0
+    f.route_corner = True
+    out = run(f, img, frames=10, yaw=0.0)
+    assert out.status == 'R' and out.debug.get('inner') == 'R'
+    assert abs(out.offset_mm) < 30                                    # 안쪽 선 기준 -> 가운데
+
+
+def test_inner_line_only_near_corner(cfg):
+    """코너가 아직 먼 미리보기(앞 600 mm 안에 곡률 없음)나 코너 미리보기가 아니면 예전처럼 양쪽"""
+    img = synth.straight_lane(cfg)
+    f = LaneFollower(cfg, LaneParams())
+    f.route_k = [0.0] * 8 + [-1.5625] * 6
+    f.route_step_mm = 100.0
+    f.route_corner = True
+    assert run(f, img, frames=5, yaw=0.0).status == 'BOTH'
+    f.route_k = [-1.5625] * 14
+    f.route_corner = False
+    assert run(f, img, frames=5, yaw=0.0).status == 'BOTH'
+    f.route_corner = True
+    f.p.corner_inner_line = False
+    assert run(f, img, frames=5, yaw=0.0).status == 'BOTH'
+
+
+def test_lost_search_instead_of_stop(cfg):
+    """11/12 밤: 선을 오래 놓치면 서서 끝내지 않고(lost_search) 직전 조향 반대쪽 30° -> 반대쪽 -> 그래도 없으면 정지.
+    선이 다시 보이면 바로 차선 주행"""
+    import math as _m
+    f = LaneFollower(cfg, LaneParams(lost_search=True))
+    run(f, synth.straight_lane(cfg), yaw=0.0)
+    f.last_good_kappa = 0.8                      # 직전에 왼쪽으로 꺾고 있었음
+    out = run(f, synth.blank(cfg), frames=31, yaw=0.0)
+    assert out.source == 'search' and out.speed_scale > 0.0
+    assert out.kappa < 0                          # 반대쪽(오른쪽)으로 찾음
+    out = run(f, synth.blank(cfg), frames=1, yaw=_m.radians(-30.0))
+    assert out.source == 'search'
+    f.search['d0'] = None                         # 거리 정보 없이 프레임으로 진행
+    out = run(f, synth.blank(cfg), frames=400, yaw=0.0)
+    assert out.source == 'stop' and out.speed_scale == 0.0      # 다 찾아봐도 없으면 정지
+    out = run(f, synth.straight_lane(cfg), frames=3, yaw=0.0)
+    assert out.source == 'lane' and out.speed_scale > 0.0       # 다시 보이면 바로 감
+    off = LaneFollower(cfg, LaneParams())
+    run(off, synth.straight_lane(cfg), yaw=0.0)
+    assert run(off, synth.blank(cfg), frames=40, yaw=0.0).source == 'stop'   # 끄면 예전대로
+
+
+def test_hold_unwinds_to_axis(cfg):
+    """합류 사선에서 선을 놓치면 사선 방향을 유지하지 않고 미션이 준 직선 방향(hold_axis_deg)으로 조향을 풂"""
+    import math as _m
+    f = LaneFollower(cfg, LaneParams(hold_axis_deg=0.0))
+    run(f, synth.straight_lane(cfg), yaw=_m.radians(40.0))      # 차가 왼쪽 40°로 틀어진 채 선을 봄 -> 예전 hold는 이 방향 유지
+    out = run(f, synth.blank(cfg), frames=3, yaw=_m.radians(40.0))
+    assert out.source == 'hold' and out.kappa < -0.3             # 직선 방향(0°)으로 되돌림 = 오른쪽
+
+
+def test_corner_takes_lane_kappa_when_it_asks_for_more(cfg):
+    """코너에서 차선이 코너 방향으로 더 크게 꺾으라고 하면(바깥으로 밀림) 섞지 않고 그 값을 씀"""
+    f = LaneFollower(cfg, LaneParams())
+    f.route_k = [-0.5] * 14
+    f.route_step_mm = 100.0
+    f.route_corner = True
+    img = synth.arc_lane(cfg, 500.0, turn='right')
+    out = run(f, img, frames=20, yaw=0.0)
+    g = LaneFollower(cfg, LaneParams(corner_inner_line=False))
+    plain = run(g, img, frames=20, yaw=0.0)
+    assert out.kappa < -0.9 and out.kappa <= plain.kappa * 0.6   # 0.5만 섞였다면 약 -0.8 근처. 차선 요구가 살아 있음

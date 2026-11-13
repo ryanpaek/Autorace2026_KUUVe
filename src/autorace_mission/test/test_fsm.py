@@ -404,3 +404,104 @@ def test_parking_direct_hands_over_at_m4_start():
     cmd = fsm.step(Inputs(t=0.0, dist_mm=0.0, route_s=3000.0, confirmed_classes={}))
     assert cmd.source == 'parking' and fsm.parking_armed
     assert cmd.lane['speed'] == fsm.p['slow_speed']
+
+
+def test_m7_corner_preview_from_crosswalk_only():
+    """11/12 밤: 횡단보도에서 넘어온 M7은 코너를 IMU로 다 돌 때까지 R640 오른쪽 곡률을 미리보기로 낸다. 연습 set_state M7은 안 냄."""
+    import math as _m
+    fsm = MissionFSM({'start_state': 'M3_PEDESTRIAN'})
+    inp = Inputs(t=0.0, dist_mm=1000.0, yaw=0.0)
+    fsm._goto('M7_OBSTACLE', inp, 'left crosswalk')
+    k = fsm.m7_corner_k(1000.0, 0.0)                     # 진입 직후: 330 mm 뒤 코너 (+ 차선 노드 미리보기 300 mm 만큼 밈)
+    assert k[0] == 0.0 and k[5] == 0.0 and k[7] == pytest.approx(-1.5625, abs=1e-3)
+    k = fsm.m7_corner_k(1600.0, _m.radians(-60.0))       # 돌기 시작한 뒤에는 다 돌 때까지 전부 코너 곡률 (60~70°에서 끊기던 것)
+    assert all(v == pytest.approx(-1.5625, abs=1e-3) for v in k)
+    assert fsm.m7_corner_k(2200.0, _m.radians(-86.0)) is None    # 다 돎 -> 끝
+    manual = MissionFSM({'start_state': 'M3_PEDESTRIAN'})
+    manual._goto('M7_OBSTACLE', inp, 'manual')
+    assert manual.m7_corner_k(1000.0, 0.0) is None
+
+
+def test_m7_corner_uses_plain_lane_config_until_turned():
+    """11/12 밤 실차: 코너 동안은 3차선 설정(흰 선도 차선, 폭 520) 대신 보통 차선 설정. 다 돌면 3차선 설정."""
+    import math as _m
+    fsm = MissionFSM({'start_state': 'M3_PEDESTRIAN', 'm7_external_avoid': True})
+    fsm._goto('M7_OBSTACLE', Inputs(t=0.0, dist_mm=0.0, yaw=0.0), 'left crosswalk')
+    cmd = fsm.step(Inputs(t=0.1, dist_mm=50.0, yaw=0.0, obstacle={}))
+    assert 'lane_color' not in cmd.lane and 'lane_width_mm' not in cmd.lane
+    fsm.m7_corner_k(1500.0, _m.radians(-88.0))                   # 다 돎 -> 미리보기 끝
+    cmd = fsm.step(Inputs(t=0.2, dist_mm=1500.0, yaw=_m.radians(-88.0), obstacle={}))
+    assert cmd.lane.get('lane_color') == 'both' and cmd.lane.get('lane_width_mm') == 520.0
+
+
+def test_m8_corner_preview_after_m2():
+    """11/12 밤 실차: M2 끝 뒤 좌하단 코너에서 차선을 놓치고 멋대로 감 -> M2에서 넘어오면 같은 IMU 코너 미리보기 (연습 M8은 아님)."""
+    import math as _m
+    fsm = MissionFSM({'start_state': 'M2_FORK'})
+    fsm._goto('M8_CONES', Inputs(t=0.0, dist_mm=5000.0, yaw=0.0), 'fork B done')
+    k = fsm.m7_corner_k(5000.0, 0.0)                     # 진입 직후: 650 mm 뒤 코너 (+300 밈)
+    kc = -1.5625 * 1.15                                  # 11/12 밤: M2 뒤 코너는 1.15배 (더 안쪽으로)
+    assert k[0] == 0.0 and k[9] == 0.0 and k[10] == pytest.approx(kc, abs=1e-3)
+    assert all(v == pytest.approx(kc, abs=1e-3) for v in fsm.m7_corner_k(5900.0, _m.radians(-30.0)))
+    assert fsm.m7_corner_k(6900.0, _m.radians(-86.0)) is None
+    practice = MissionFSM({'start_state': 'M2_FORK'})
+    practice._goto('M8_CONES', Inputs(t=0.0, dist_mm=0.0, yaw=0.0), 'manual')
+    assert practice.m7_corner_k(0.0, 0.0) is None
+
+
+def _m8_after_fork(choice, ready, **kw):
+    fsm = MissionFSM(dict({'start_state': 'M2_FORK', 'cones_source_ready': ready}, **kw))
+    fsm.fork_choice = choice
+    fsm._goto('M8_CONES', Inputs(t=0.0, dist_mm=5000.0, yaw=0.0), f'fork {choice} done')
+    return fsm
+
+
+def test_m8_keeps_one_line_through_merge_and_corner():
+    """11/12 밤 실차: M2 끝(합류)에서 normal로 바꾸자 선을 놓쳐 차선 무시 + 바로 뒤 코너에서 직진.
+    M2에서 넘어오면 합류 ~ 코너 앞: 갈림길 바깥선(A=left_only, B=right_only), 양쪽 선이 보여도 유지.
+    코너 600 mm 앞부터 다 돌 때까지: 안쪽 선(오른쪽 코너 = right_only). 그동안 0.15 m/s. 다 돌면 normal"""
+    import math as _m
+    for ready in (False, True):
+        for choice, mode in (('A', 'left_only'), ('B', 'right_only')):
+            fsm = _m8_after_fork(choice, ready)
+            cmd = fsm.step(Inputs(t=0.1, dist_mm=5050.0, yaw=0.0, lane={'status': 'L'}))
+            assert cmd.lane['mode'] == mode and cmd.lane['speed'] == pytest.approx(0.15)
+            for i in range(5):                                       # 양쪽 선이 보여도 코너 전이면 그대로
+                cmd = fsm.step(Inputs(t=0.2 + 0.1 * i, dist_mm=5100.0 + 20 * i, yaw=0.0, lane={'status': 'BOTH'}))
+            assert cmd.lane['mode'] == mode
+            cmd = fsm.step(Inputs(t=1.0, dist_mm=5400.0, yaw=0.0, lane={'status': 'BOTH'}))   # 코너 600 mm 앞
+            assert cmd.lane['mode'] == 'right_only'                  # 코너 안쪽 선
+            cmd = fsm.step(Inputs(t=2.0, dist_mm=6000.0, yaw=_m.radians(-45.0), lane={'status': 'R'}))
+            assert cmd.lane['mode'] == 'right_only' and cmd.lane['speed'] == pytest.approx(0.15)
+            fsm.step(Inputs(t=3.0, dist_mm=6700.0, yaw=_m.radians(-88.0), lane={'status': 'R'}))   # 다 돎
+            cmd = fsm.step(Inputs(t=3.1, dist_mm=6720.0, yaw=_m.radians(-89.0), lane={'status': 'BOTH'}))
+            assert cmd.lane['mode'] == 'normal'
+            assert any('M8 lane normal (corner done' in x for x in fsm.log)
+
+
+def test_m8_one_line_safety_distance_and_manual():
+    fsm = _m8_after_fork('A', False, m8_corner_preview=False)    # 코너 미리보기가 없으면 거리 상한(2.5 m)으로 끝
+    assert fsm.step(Inputs(t=0.1, dist_mm=7000.0, yaw=0.0, lane={'status': 'NONE'})).lane['mode'] == 'left_only'
+    assert fsm.step(Inputs(t=0.2, dist_mm=7520.0, yaw=0.0, lane={'status': 'NONE'})).lane['mode'] == 'normal'
+    manual = MissionFSM({'start_state': 'M2_FORK'})
+    manual.fork_choice = 'A'
+    manual._goto('M8_CONES', Inputs(t=0.0, dist_mm=0.0, yaw=0.0), 'manual')
+    assert manual.step(Inputs(t=0.1, dist_mm=10.0, yaw=0.0, lane={'status': 'L'})).lane['mode'] == 'normal'
+
+
+def test_fork_lane_cfg_keeps_away_from_island_and_searches():
+    """11/12 밤: M2 한쪽 선 모드는 폭 460(바깥선에서 230 mm, 섬 쪽 선에서 멀리) + 선 놓치면 찾기 + 직선 방향(M7 진입 방향 - 90°)"""
+    import math as _m
+    fsm = MissionFSM({'start_state': 'M3_PEDESTRIAN'})
+    fsm._goto('M7_OBSTACLE', Inputs(t=0.0, dist_mm=0.0, yaw=_m.radians(-90.0)), 'crosswalk done')   # 남쪽으로 가다 코너
+    fsm.fork_choice = 'B'
+    fsm._goto('M2_FORK', Inputs(t=1.0, dist_mm=5000.0, yaw=_m.radians(180.0)), 'obstacle zone done')
+    cmd = fsm.step(Inputs(t=1.1, dist_mm=5010.0, yaw=_m.radians(175.0), obstacle={'m7_exit': 'B'}))
+    assert cmd.lane['mode'] == 'right_only' and cmd.lane['lane_width_mm'] == 460.0
+    assert cmd.lane['lost_search'] is True
+    assert abs(abs(cmd.lane['hold_axis_deg']) - 180.0) < 0.2          # 서쪽 (코너 진입 -90° 에서 오른쪽 90°)
+    fsm._goto('M8_CONES', Inputs(t=5.0, dist_mm=5020.0, yaw=_m.radians(180.0)), 'fork B done')
+    cmd = fsm.step(Inputs(t=5.1, dist_mm=5070.0, yaw=_m.radians(180.0), lane={'status': 'R'}))
+    assert cmd.lane['mode'] == 'right_only' and cmd.lane['lane_width_mm'] == 460.0 and cmd.lane['lost_search'] is True
+    cmd = fsm.step(Inputs(t=6.0, dist_mm=5420.0, yaw=_m.radians(180.0), lane={'status': 'R'}))   # 코너 안쪽 선 구간
+    assert cmd.lane['mode'] == 'right_only' and 'lane_width_mm' not in cmd.lane and 'hold_axis_deg' not in cmd.lane

@@ -14,7 +14,9 @@ topics=(/scan /odom /wheel/odom /imu /limo_status /cmd_vel /limo/ack_cmd /lane/c
         # M7 차로 (늘) / M7 끝 차로 -> M2
         /m7/lane /m7/exit_lane
         # M7 직전 코너 진단 (tools/curve_diag.py가 켜져 있을 때)
-        /diag/curve)
+        /diag/curve
+        # 11/12 밤: 노드 로그(회피 판단·미션 전환·[코너 보완] 등)와 표지 투표 결과도 같이 -> bag 하나로 원인 분석
+        /rosout /perception/commands)
 if [ "${RAW:-1}" = "1" ]; then
   topics+=(/camera/color/image_raw)
 else

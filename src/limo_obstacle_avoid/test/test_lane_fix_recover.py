@@ -189,7 +189,7 @@ def test_side_obstacle_does_not_stop_or_reverse():
     pl = running(0.0)
     pl.target = 1
     obs = _with_obs(pl, (-0.10, 0.25, 0.41, 0.63))
-    assert pl.free_ahead(1, obs) < pl.p.stop_dist                  # 예전 판단이면 막힘
+    assert pl.free_ahead(1, obs, skip_beside=False) < pl.p.stop_dist   # 예전 판단이면 막힘
     v, w = pl.step(10.0)
     assert not pl.blocked and v > 0 and pl.rb is None and pl.rec is None
 
@@ -269,6 +269,7 @@ def test_sharper_steering_after_reverse_until_new_lane():
     assert w_sharp > w_norm > 0                                     # 후진 뒤엔 더 크게 꺾음
     pl.sharp = True
     pl.pose.y = 0.52                                                # 새 차로 도착
+    pl.p.center_return = False                                      # 빈 길이라 가운데로 돌아가 버리면 이 시험이 아님
     pl.step(10.0)
     assert pl.sharp is False
 
@@ -344,3 +345,61 @@ def test_choose_ignores_obstacle_being_passed_beside():
     assert pl.choose(1, obs) == 0
     p.clear_rollout = False
     assert pl.choose(1, obs) is None                 # 예전: 옆 장애물 때문에 못 고름
+
+
+def test_done_waits_until_straight():
+    """섬 끝 + done_margin을 지나도 차가 8° 넘게 비스듬하면 아직 안 끝냄 (차선 노드가 비스듬한 채 받지 않게)."""
+    pl = running(0.52, math.radians(15.0))
+    pl.target = 1
+    pl.pose.x = pl.p.section_length + pl.p.done_margin + 0.05
+    pl.step(10.0)
+    assert pl.state == 'RUN'
+    ok = running(0.52, math.radians(3.0))
+    ok.target = 1
+    ok.pose.x = ok.p.section_length + ok.p.done_margin + 0.05
+    ok.step(10.0)
+    assert ok.state == 'DONE'
+
+
+def test_lane_keep_blend_single_line():
+    """11/12 밤: 차로 안에서 한쪽 선(R)만 보여도 차선 노드 곡률을 0.7 섞는다 (예전엔 BOTH일 때만)."""
+    pl = running(0.0)
+    pl.lane_last, pl.lane_t = {'status': 'R', 'kappa': -1.0}, 0.0
+    w = pl.control(0.2, 0.05, True)
+    assert pl.blend_used and w == pytest.approx(0.2 * 0.7 * -1.0, abs=0.02)
+
+
+def test_no_flip_back_to_lane_just_left():
+    """11/12 밤 실차: -1 차로에서 0으로 옮기자마자 0.4초 뒤 다시 -1로 (반복). 방금 떠난 차로로 1.5초 안에는 안 돌아감."""
+    from limo_obstacle_avoid.avoid_core import Obstacle
+    p = AvoidParams()
+    pl = AvoidPlanner(p)
+    pl.start(0.0, 0.0, 0.0, 0.0)
+    pl.pose.x, pl.pose.y = 1.0, -0.50
+    pl.target, pl.flip_from, pl.last_switch = 0, -1, 9.8        # 방금 -1 -> 0 으로 바꿈
+    o = Obstacle(2.0, 2.32, -0.11, 0.11)                        # 0 차로 앞 0.8 m (막혔다고 보지만 정말 붙은 건 아님)
+    o2 = Obstacle(1.6, 1.92, 0.41, 0.63)                        # +1 차로도 막힘 (이어서 +1로 가는 것도 안 됨)
+    o.hits = o2.hits = p.confirm_hits
+    pl.obs = [o, o2]
+    pl.step(10.0)
+    assert pl.target == 0                                       # 예전: 바로 -1로 되돌아감
+    pl.step(11.5)
+    assert pl.target == -1                                      # 1.5초 지나면 허용
+
+
+def test_target_lane_beside_obstacle_does_not_flip_back():
+    """11/12 밤 bag (22.3 s): 2차선에서 1차선(+1)으로 옮기기 시작하자마자 1차선 '옆' 장애물 때문에 1차선 앞 거리가 음수로 보여
+    다시 고르기가 3차선(-1)으로 뒤집었다 -> A를 놓침. 옮겨 가는 차로의 옆 장애물은 빼고 본다."""
+    from limo_obstacle_avoid.avoid_core import Obstacle
+    p = AvoidParams()
+    pl = AvoidPlanner(p)
+    pl.start(0.0, 0.0, 0.0, 0.0)
+    pl.pose.x, pl.pose.y = 3.15, 0.03
+    obs = [Obstacle(3.15 + 0.2 + 1.2, 3.15 + 0.2 + 1.52, -0.30, 0.07),   # 내 차로(0) 앞 1.2 m
+           Obstacle(3.15 - 0.47, 3.15 - 0.15, 0.23, 0.64)]              # 1차로 옆(지나가는 중)
+    for o in obs:
+        o.hits = p.confirm_hits
+    pl.obs = obs
+    pl.target, pl.last_switch, pl.rechosen = 1, 9.95, False             # 방금 0 -> +1
+    pl.step(10.0)
+    assert pl.target == 1                                               # 예전: -1로 뒤집음

@@ -66,7 +66,7 @@ class M7LinkParams:
     release_grace_sec: float = 0.3      # 정상 종료는 active false 직후 done이 온다 -> 이만큼 지나도 안 오면 '멈춤'으로 기록
     # 켜기 방식 (모듈 설명 6)
     enable_mode: str = 'line'           # 'line' | 'obstacle'
-    trigger_front_mm: float = 1300.0    # 11/12 1000 -> 1300. obstacle: 라이다 -> 앞 차로 장애물이 이 안이면 켬. 시뮬레이션: 0.7 m는 7조건 중 3만 성공(멈춤·이탈), 0.9 m 이상 멈춤 없음
+    trigger_front_mm: float = 1800.0    # 11/12 1000 -> 1300 -> 밤 1800 (멀리서 미리). obstacle: 라이다 -> 앞 차로 장애물이 이 안이면 켬. 시뮬레이션: 0.7 m는 7조건 중 3만 성공(멈춤·이탈), 0.9 m 이상 멈춤 없음
     trigger_half_width_mm: float = 200.0  # 앞 차로로 보는 좌우 폭(차 중심 ±). 옆 차로 LIMO(중심 ±520, 가장자리 ±410)는 안 들어옴
     trigger_gate_mm: float = -250.0     # obstacle: 시작선 기준 이 위치부터 감시 결과로 켬 (코너 끝 = 시작선 -288 mm)
     trigger_gate_early_mm: float = 300.0  # 카메라로 직선이 확인되면 문턱보다 이만큼 일찍부터 (도면 위치 늦음 대비, 0 = 안 씀)
@@ -96,6 +96,8 @@ class M7LinkParams:
     off_sign_edge_px: float = 10.0      # 상자가 화면 좌우 끝 이만큼 안에 닿으면 '가장자리' (검출기가 화면 밖은 잘라냄. 0 = 안 씀)
     off_sign_edge_frames: int = 2       # 가장자리에서 본 뒤 이만큼 연속 안 보이면 '화면 밖으로 나감' (한 번 놓친 것과 구분)
     off_sign_img_w: float = 640.0       # 카메라 가로 화소
+    off_settle_deg: float = 8.0         # 11/12 밤: 표지로 끌 때 차가 이보다 비스듬하면 기다림
+    off_settle_dy_m: float = 0.08       #   목표 차로 중심에서 이보다 떨어져 있어도 기다림
     off_sign_after_mm: float = 400.0    # 지나감을 안 뒤 이만큼 더 가서 끔 (화각 70°·표지가 섬 앞 끝이면 섬 앞 끝 약 25 cm 전. 실차로 맞춤)
     off_gate_mm: float = 1500.0         # 섬 앞 끝까지 이 안일 때만 표지로 끔 (멀리서 가려져 사라지는 오판 방지)
 
@@ -178,6 +180,8 @@ class M7Link:
         self.pos = None              # 마지막으로 계산한 앞바퀴 - 시작선 (mm), 진단용
         self.enable_t = None
         self.section_m = None
+        self.avoid_psi = None        # /avoid/state psi_deg (차로 방향 기준 차 방향)
+        self.avoid_dy = None         # 목표 차로 중심에서 옆으로 떨어진 거리 (m)
         self.heading_forced = False
         self.how = None              # 'line' | 'route' | 'distance'
         self.fork_sent = None
@@ -239,6 +243,10 @@ class M7Link:
         self.avoid_running = st.get('state') == 'RUN'
         if 'target' in st:
             self.avoid_target = st.get('target')
+        if 'psi_deg' in st:
+            self.avoid_psi = st.get('psi_deg')
+        if 'y' in st and st.get('target') is not None:
+            self.avoid_dy = abs(float(st['y']) - 0.52 * float(st['target']))
         if 'now_lane' in st:
             self.avoid_lane = st.get('now_lane')
             if self.phase in ('armed', 'running') and self.avoid_lane in LANE_NUMBER:
@@ -362,6 +370,12 @@ class M7Link:
             self.trigger = None
 
         fork = mission.get('fork_choice')
+        if fork not in ('A', 'B') and self.fork_sent is None:
+            # 11/12 밤: 회피 노드는 판이 바뀌어도 계속 켜져 있어 지난 판에 받은 갈림길 방향(A/B)이 남는다 ->
+            #   이번 판 표지를 보기 전부터 출구를 안다고 보고 '표지 보러 2차로로 모으기'를 안 하고 지난 판 출구 쪽으로 감.
+            #   M7에 들어오면 아직 표지를 모를 때 한 번 'auto'(모름)를 보낸다
+            out.append(('fork', 'auto'))
+            self.fork_sent = 'auto'
         if fork in ('A', 'B') and fork != self.fork_sent:
             out.append(('fork', fork))
             self.fork_sent = fork
@@ -450,7 +464,7 @@ class M7Link:
     def _arm(self, t: float, pos: float, why: str) -> List[Tuple]:
         out: List[Tuple] = []
         self.start_heading_deg = self._straight_heading_deg()
-        if self.fork_sent is None and self.p.fork_fallback in ('A', 'B'):
+        if self.fork_sent in (None, 'auto') and self.p.fork_fallback in ('A', 'B'):
             out.append(('fork', self.p.fork_fallback))
             self.fork_sent = self.p.fork_fallback
         self.section_m = self._section(pos)
@@ -485,6 +499,13 @@ class M7Link:
         lane = self.avoid_lane if self.avoid_lane is not None else self.avoid_target
         if lane in (None, 0):
             return None                      # 아직 가운데 차로: 섬에 부딪히므로 끄지 않음
+        # 11/12 밤: 옮기는 중(목표 차로 밖)이거나 비스듬하면 아직 끄지 않음 -> 차선 노드가 비스듬한 채 받으면 차선을 벗어남
+        if self.avoid_target is not None and self.avoid_target != self.avoid_lane:
+            return None
+        if self.avoid_psi is not None and abs(self.avoid_psi) > self.p.off_settle_deg:
+            return None
+        if self.avoid_dy is not None and self.avoid_dy > self.p.off_settle_dy_m:
+            return None
         return why
 
     def _check_hold(self, t: float) -> None:
