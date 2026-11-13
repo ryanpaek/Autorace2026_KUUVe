@@ -203,6 +203,24 @@ def cell_line_from_neighbors(clusters, side_max_mm=700.0, ahead_max_mm=150.0, ro
     return mx, my, ux, uy
 
 
+def corridor_mid(points, x_lo, x_hi, y_min_mm=40.0, gap_min_mm=650.0, gap_max_mm=1000.0):
+    """양옆 리모 사이 빈 통로의 가운데 (11/13 캡틴: '양쪽 물체의 정중앙').
+
+    points: 라이다 점 (앞바퀴 기준, 앞 +, 왼쪽 +, mm). 앞 x_lo~x_hi 띠에서 왼쪽 물체의 가장 안쪽 면(y 최소)과
+    오른쪽 물체의 가장 안쪽 면(y 최대)을 찾아 그 가운데 (띠 가운데 x, 가운데 y)를 돌려준다.
+    리모는 칸 가운데에 서 있으니 두 안쪽 면의 가운데 = 칸 가운데 선. 통로 폭이 gap_min~gap_max(1·3번 사이 약 820)가
+    아니면 None (한쪽만 보임, 5번 앞면이 끼어듦 등).
+    """
+    left = [y for x, y in points if x_lo <= x <= x_hi and y >= y_min_mm]
+    right = [y for x, y in points if x_lo <= x <= x_hi and y <= -y_min_mm]
+    if len(left) < 2 or len(right) < 2:
+        return None
+    yl, yr = min(left), max(right)
+    if not gap_min_mm <= yl - yr <= gap_max_mm:
+        return None
+    return (x_lo + x_hi) / 2.0, (yl + yr) / 2.0
+
+
 def pursuit_kappa_on_line(px, py, yaw, line, look_mm, reverse=False):
     """뒷바퀴축 (px, py, yaw)에서 직선 line=(cx, cy, ux, uy)를 따라가는 pure pursuit 곡률 (1/m, 왼쪽 +).
 
@@ -294,10 +312,72 @@ class ParkingV2:
         self.end_d = self.end_at = None   # 칸 끝 선(카메라): 마지막으로 본 거리, 그때 누적 거리
         self.stop_how = None       # 'side' | 'memory' | 'camera' | 'cap' (어떻게 멈췄나, 디버그)
         self.err = None            # 마지막 재정렬 판단 값 (옆 mm, 방향 도)
+        # 11/13 실차: 양옆 리모 정중앙 맞추기 + 앞뒤 바꿀 때 멈춤 + 옆 감시에 걸리면 끝내지 말고 후진 뒤 다시
+        self.switch_to = None      # SWITCH(멈춤) 다음 단계
+        self.back_len = None       # 이번 BACK 거리 (앞 막힘·옆 감시 = back_mm, 가운데 다시 맞추기 = center_back_mm)
+        self.guard_backs = 0       # 옆 감시로 후진한 횟수
+        self.center_tries = 0      # 끝에서 가운데 다시 맞춘 횟수
+        self.center_off = None     # 마지막으로 잰 양옆 정중앙에서 차체 중심 옆 거리 (mm, 왼쪽 +)
 
     def _enter(self, phase, inp):
         """단계 바꾸기: 시작 시각·거리·방향 기록."""
         self.phase, self.t_phase, self.d_phase, self.yaw_phase = phase, inp['t'], inp['dist_mm'], inp['yaw']
+
+    def _switch(self, nxt, inp, back_len=None):
+        """전진 <-> 후진을 바꿀 때: switch_pause_sec 멈춘 뒤 nxt (11/13 실차: 바로 바꾸면 차가 출렁이고 거리가 틀어짐)."""
+        if nxt == 'BACK':
+            self.back_len = self.p['back_mm'] if back_len is None else back_len
+        if self.p.get('switch_pause_sec', 0.0) <= 0.0:
+            self._enter(nxt, inp)
+        else:
+            self.switch_to = nxt
+            self._enter('SWITCH', inp)
+        return self._out(0.0, 0.0)
+
+    def _centered_line(self):
+        """옆 위치·방향 = 양옆 리모 정중앙 선, 깊이 기준점 = 칸 추정선 (정중앙 선 위로 내린 점)."""
+        cell = self._cell()
+        if self.side_line is None or cell is None:
+            return cell
+        px, py, ux, uy = self.side_line
+        t = (cell[0] - px) * ux + (cell[1] - py) * uy
+        return px + t * ux, py + t * uy, ux, uy
+
+    def _corridor_rel(self, inp):
+        """앞 두 띠의 통로 가운데로 차 기준 칸 가운데 선 (앞바퀴 기준 mx, my, ux, uy). 띠 하나만 되면 방향은 칸 추정선."""
+        p = self.p
+        pts = inp.get('points', [])
+        b = p.get('center_bands_mm', ((40.0, 170.0), (230.0, 420.0)))
+        m1 = corridor_mid(pts, b[0][0], b[0][1], gap_min_mm=p.get('center_gap_min_mm', 650.0),
+                          gap_max_mm=p.get('center_gap_max_mm', 1000.0))
+        m2 = corridor_mid(pts, b[1][0], b[1][1], gap_min_mm=p.get('center_gap_min_mm', 650.0),
+                          gap_max_mm=p.get('center_gap_max_mm', 1000.0))
+        if m1 is not None and m2 is not None:
+            vx, vy = m2[0] - m1[0], m2[1] - m1[1]
+            n = math.hypot(vx, vy)
+            if n > 1e-6 and abs(math.degrees(math.atan2(vy, vx))) <= p.get('center_max_dir_deg', 25.0):
+                return m1[0], m1[1], vx / n, vy / n
+        m = m1 or m2
+        cell = self._cell()
+        if m is None or cell is None:
+            return None
+        yaw = inp['yaw'] or 0.0
+        ux, uy = cell[2], cell[3]                        # 방향은 칸 추정선 (자기 위치 좌표 -> 차 기준)
+        rx, ry = math.cos(yaw) * ux + math.sin(yaw) * uy, -math.sin(yaw) * ux + math.cos(yaw) * uy
+        if rx < 0:
+            rx, ry = -rx, -ry
+        return m[0], m[1], rx, ry
+
+    def _side_mid(self, side, inp):
+        """양옆 리모로 구한 칸 가운데 선을 자기 위치 좌표로 바꿔 부드럽게 (튀는 값 줄임)."""
+        new = self._line_to_world(side, inp)
+        old = self.side_line
+        a = self.p.get('center_smooth', 0.5)
+        if old is None or not self.p.get('center_on_sides', False):
+            return new
+        ux, uy = old[2] + a * (new[2] - old[2]), old[3] + a * (new[3] - old[3])
+        n = math.hypot(ux, uy) or 1.0
+        return (old[0] + a * (new[0] - old[0]), old[1] + a * (new[1] - old[1]), ux / n, uy / n)
 
     def _turned_deg(self, inp):
         """TURN 시작부터 돈 각도(도)."""
@@ -919,12 +999,17 @@ class ParkingV2:
             else:
                 return self._out(0.0, 0.0)
 
-        if self.phase == 'BACK':            # ④-1 앞이 막혀서 back_mm 후진
-            moved = inp['dist_mm'] - self.d_phase
-            if moved >= p['back_mm']:
-                self._enter('TURN', inp)
+        if self.phase == 'SWITCH':          # 전진 <-> 후진 사이 멈춤
+            if inp['t'] - self.t_phase >= p.get('switch_pause_sec', 0.0):
+                self._enter(self.switch_to, inp)
             else:
-                return self._out(-p['back_speed'], p['back_kappa'])
+                return self._out(0.0, 0.0)
+
+        if self.phase == 'BACK':            # ④-1 앞이 막혀서(또는 옆 감시·가운데 다시 맞추기) 후진
+            moved = inp['dist_mm'] - self.d_phase
+            if moved >= (self.back_len or p['back_mm']):
+                return self._switch('TURN', inp)
+            return self._out(-p['back_speed'], p['back_kappa'])
 
         if self.phase == 'TURN':            # ④ 오른쪽 최대 조향 전진 + ⑤ 양옆 확인까지 반복
             moved = inp['dist_mm'] - self.d_phase
@@ -935,11 +1020,19 @@ class ParkingV2:
             side = (cell_line_from_neighbors(seen, p['side_max_mm'])
                     if self._turned_deg(inp) >= p['stop_min_turn_deg'] else None)
             turned_ok = self._turned_deg(inp) >= p['stop_min_turn_deg']
+            if p.get('center_on_sides', False) and self._turned_deg(inp) >= p.get('center_min_turn_deg', 70.0):
+                # 양옆 리모 정중앙 선 (조향용): 라이다 점에서 앞 두 띠의 '왼쪽 리모 안쪽 면 ~ 오른쪽 리모 안쪽 면' 가운데.
+                # (덩어리 중심은 보이는 면 쪽으로 쏠리고, 1·3번이 옆에 오면 라이다 시야 ±105° 뒤라 안 보임)
+                rel = self._corridor_rel(inp)
+                if rel is not None:
+                    self.side_line = self._side_mid(rel, inp)
+                    self.center_off = self._center_offset(self.side_line, inp)
             if self.pair_line is not None and side is not None:
                 # 짝을 알고 양옆 리모 옆면이 보이면: 옆면으로 구한 선에서 차체 중심이 칸 가운데 오면 멈춤.
                 # (차선에서 본 짝은 리모의 차선 쪽 끝면만 보여 깊이가 8~17cm 얕게 나온다 -> 깊이는 옆면으로)
-                self.line = self._line_to_world(side, inp)
-                self.side_line = self.line
+                if not p.get('center_on_sides', False):
+                    self.side_line = self._line_to_world(side, inp)
+                self.line = self.side_line
                 self.side_seen = True
                 r = l = self._body_s(inp) >= -p['enter_brake_mm']
                 self.stop_how = 'side' if r else None
@@ -977,8 +1070,14 @@ class ParkingV2:
             if (not (r and l) and self._turned_deg(inp) >= 10.0 and self.realigns >= p['max_realign']
                     and p['guard_stop_mm'] > 0 and self._cell() is not None
                     and self._side_gap(inp) < p['guard_stop_mm']):
-                # 재정렬을 끈 경우 옆 감시: 리모에 guard_stop_mm보다 가까우면 박기 전에 그 자리에서 정지
-                self.err = ('guard_stop', round(self._side_gap(inp)))
+                # 재정렬을 끈 경우 옆 감시: 리모에 guard_stop_mm보다 가까우면 박기 전에 멈춤.
+                # 11/13 실차: 그 자리에서 끝내면 칸에 반쯤 걸친 채 끝 -> 멈추고 back_mm 후진 뒤 다시 (guard_back_max번까지)
+                gap = round(self._side_gap(inp))
+                if p.get('guard_back', False) and self.guard_backs < p.get('guard_back_max', 0):
+                    self.guard_backs += 1
+                    self.err = ('guard_back', gap, self.guard_backs)
+                    return self._switch('BACK', inp)
+                self.err = ('guard_stop', gap)
                 return self._done('GUARD_STOP', inp)
             if (not (r and l) and self._turned_deg(inp) >= 10.0 and self.realigns < p['max_realign']
                     and self._guard_hit(inp)):
@@ -1004,8 +1103,13 @@ class ParkingV2:
                     self.backs += 1
                     if self.backs > p['max_backs']:
                         return self._done('FAIL_TOO_MANY_BACKS', inp)
-                    self._enter('BACK', inp)
-                    return self._out(-p['back_speed'], p['back_kappa'])
+                    return self._switch('BACK', inp)
+                if (p.get('center_on_sides', False) and self.side_line is not None
+                        and self._turned_deg(inp) >= p['stop_min_turn_deg']):
+                    # 11/13: 양옆 리모가 보이면 그 정중앙 선을 따라 들어감 (예전엔 깊이에만 쓰고 조향은 칸 추정선·5번)
+                    k = pursuit_kappa_on_line(self.px, self.py, inp['yaw'] or 0.0, self.side_line,
+                                              p['pursuit_look_mm'])
+                    return self._out(p['turn_speed'], max(-2.0, min(2.0, k)))
                 if self.turn_travel >= p['turn_max_mm']:
                     return self._done('FAIL_TURN_TOO_LONG', inp)
                 straight = (p['straighten_yaw_deg'] > 0
@@ -1021,6 +1125,21 @@ class ParkingV2:
         if self.phase == 'CHECK':           # (재정렬) 칸 가운데에 반듯하게 들어갔나
             rel = cell_line_from_neighbors(
                 in_view(inp['clusters'], p['front_axle_from_lidar_mm'], p['side_view_deg']), p['side_max_mm'])
+            if p.get('center_on_sides', False):
+                cr = self._corridor_rel(inp)
+                if cr is not None:
+                    self.side_line = self._side_mid(cr, inp)
+            if p.get('center_check', False) and self.side_line is not None:
+                # 11/13: '칸 안이면 끝'만 보던 것 -> 양옆 리모 정중앙에서 final_lat_tol_mm 넘게 벗어났으면 뒤로 빼서 다시
+                off = self._center_offset(self.side_line, inp)
+                self.center_off = off
+                if abs(off) > p.get('center_tol_mm', p['final_lat_tol_mm']) and self.center_tries < p.get('center_retries', 0):
+                    # 뒤로 빠졌다가(PULLOUT) 정중앙 선을 따라 다시 들어감(ENTER). 0.5초씩 멈춤
+                    self.center_tries += 1
+                    self.err = ('center', round(off), self.center_tries)
+                    self.stop_how = None
+                    self.line = self._centered_line()
+                    return self._switch('PULLOUT', inp)
             if p['max_realign'] <= 0 or (rel is None and self.pair_line is None):
                 return self._done('PARKED', inp)
             if rel is not None:
@@ -1045,9 +1164,9 @@ class ParkingV2:
 
         if self.phase == 'PULLOUT':         # (재정렬) 칸 가운데 선을 따라 뒤로 빠지기
             moved = inp['dist_mm'] - self.d_phase
-            if moved >= p['pullout_mm']:
-                self._enter('ENTER', inp)
+            if moved >= (p.get('center_pullout_mm', p['pullout_mm']) if self.center_tries else p['pullout_mm']):
                 self.seen_ahead = False
+                return self._switch('ENTER', inp)
             else:
                 # 사람이 빼듯이: 앞범퍼가 옆 리모 끝을 지나기 전엔 바퀴 똑바로, 지나면 칸 가운데 선 따라 꺾으며 후진.
                 # (처음부터 꺾으면 앞이 옆으로 휘둘려 옆 리모에 닿음 — 11/06 시뮬레이션)
@@ -1062,7 +1181,12 @@ class ParkingV2:
             if inp['blocked']:
                 return self._done('BLOCKED', inp)
             self._update_col5(inp)
-            if self.col5 is not None and self.col5_n >= p['col5_min_frames']:
+            if p.get('center_on_sides', False) and self.center_tries:
+                cr = self._corridor_rel(inp)                  # 다시 들어가는 중에도 양옆 정중앙을 계속 잼
+                if cr is not None:
+                    self.side_line = self._side_mid(cr, inp)
+                self.line = self._centered_line()
+            elif self.col5 is not None and self.col5_n >= p['col5_min_frames']:
                 self.line = self._cell()                      # 5번 세로선이 생기면 그 선으로 따라감
             if self._body_s(inp) >= -p['enter_brake_mm']:      # 차체 중심이 칸 가운데에 옴
                 self._enter('CHECK', inp)
@@ -1149,7 +1273,22 @@ DEFAULTS = {
     'turn_speed': 0.12,
     'straighten_yaw_deg': 87.0,  # (추가) 이만큼 돌면 바퀴 펴고 직진. 0 = 끔 (시뮬레이션: 끄면 5번 칸에서 계속 돎)
     'turn_max_mm': 2000.0,     # 안전: TURN에서 이만큼 움직여도 안 끝나면 멈춤
-    'back_mm': 50.0,           # ④-1 캡틴 값 5cm 후진
+    'back_mm': 50.0,           # ④-1 캡틴 값 5cm 후진 (params: 11/13 150)
+    'switch_pause_sec': 0.0,   # 11/13: 전진 <-> 후진 바꿀 때 멈춤 (params 0.5). 0 = 바로 바꿈 (예전)
+    'center_on_sides': False,  # 11/13: 양옆 리모가 보이면(stop_min_turn_deg 이상 돈 뒤) 그 정중앙 선을 따라 조향 (params true)
+    'center_smooth': 0.5,      #   정중앙 선 갱신 비율 (1 = 매번 새 값)
+    'center_min_turn_deg': 70.0,   #   이만큼 돈 뒤부터 (덜 돌면 통로가 비스듬)
+    'center_bands_mm': ((0.0, 170.0), (230.0, 420.0)),   #   통로 가운데를 재는 앞 두 띠 (앞바퀴 기준)
+    'center_gap_min_mm': 650.0,    #   1·3번 사이 통로 폭 (도면: 칸 두 개 1040 - 리모 폭 220 = 820)
+    'center_gap_max_mm': 1000.0,
+    'center_max_dir_deg': 25.0,    #   두 띠로 구한 방향이 차와 이보다 틀어지면 안 믿음
+    'center_check': False,     # 11/13: 끝에서 정중앙에서 final_lat_tol_mm 넘게 벗어났으면 center_back_mm 후진 뒤 다시 (params true)
+    'center_retries': 2,
+    'center_tol_mm': 15.0,     #   끝에서 차체 중심이 양옆 정중앙에서 이보다 벗어나면 다시 맞춤 (시뮬레이션 18개: 30 -> 최대 30mm, 15 -> 최대 13mm)
+    'center_back_mm': 200.0,
+    'center_pullout_mm': 450.0,    #   가운데 다시 맞출 때 뒤로 빠지는 거리 (앞범퍼가 옆 리모 끝을 지나 방향까지 고칠 몫)
+    'guard_back': False,       # 11/13: 옆 감시(guard_stop_mm)에 걸리면 끝내지 말고 back_mm 후진 뒤 다시 (params true)
+    'guard_back_max': 3,
     'back_speed': 0.10,
     'back_kappa': 0.0,         # 후진할 때 곡률. 0 = 바퀴 똑바로. +값(왼쪽)이면 후진하면서 더 돌아감
                                # (오른쪽 -값으로 후진하면 앞에서 돈 만큼 되돌아가니 쓰지 말 것)

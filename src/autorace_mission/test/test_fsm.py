@@ -440,7 +440,8 @@ def test_m8_corner_preview_after_m2():
     fsm = MissionFSM({'start_state': 'M2_FORK'})
     fsm._goto('M8_CONES', Inputs(t=0.0, dist_mm=5000.0, yaw=0.0), 'fork B done')
     k = fsm.m7_corner_k(5000.0, 0.0)                     # 진입 직후: 650 mm 뒤 코너 (+300 밈)
-    kc = -1.5625 * 1.15                                  # 11/12 밤: M2 뒤 코너는 1.15배 (더 안쪽으로)
+    kc = -1.5625 * fsm.p['m8_corner_k_gain']             # 11/13: 1.15 -> 1.0 (R557은 안쪽 선을 밟음)
+    assert fsm.p['m8_corner_k_gain'] == 1.0
     assert k[0] == 0.0 and k[9] == 0.0 and k[10] == pytest.approx(kc, abs=1e-3)
     assert all(v == pytest.approx(kc, abs=1e-3) for v in fsm.m7_corner_k(5900.0, _m.radians(-30.0)))
     assert fsm.m7_corner_k(6900.0, _m.radians(-86.0)) is None
@@ -505,3 +506,81 @@ def test_fork_lane_cfg_keeps_away_from_island_and_searches():
     assert cmd.lane['mode'] == 'right_only' and cmd.lane['lane_width_mm'] == 460.0 and cmd.lane['lost_search'] is True
     cmd = fsm.step(Inputs(t=6.0, dist_mm=5420.0, yaw=_m.radians(180.0), lane={'status': 'R'}))   # 코너 안쪽 선 구간
     assert cmd.lane['mode'] == 'right_only' and 'lane_width_mm' not in cmd.lane and 'hold_axis_deg' not in cmd.lane
+
+
+def _m1_from_m8(yaw0=0.0, route_s=None, **kw):
+    import math as _m
+    fsm = MissionFSM(dict({'start_state': 'M3_PEDESTRIAN', 'route_points': {'m1_corner_start': 24506.0}}, **kw))
+    fsm._goto('M7_OBSTACLE', Inputs(t=0.0, dist_mm=0.0, yaw=yaw0), 'crosswalk done')       # 3차선 방향 = yaw0 - 90°
+    fsm._goto('M8_CONES', Inputs(t=1.0, dist_mm=5000.0, yaw=yaw0 - _m.pi / 2), 'fork B done')
+    fsm._goto('M1_TRAFFIC', Inputs(t=2.0, dist_mm=9000.0, yaw=yaw0 - _m.pi, route_s=route_s), 'lane back (R, 120mm)')
+    return fsm
+
+
+def test_m1_corner_after_cones_slow_inner_outward_then_normal():
+    """11/13 실차: 라바콘 뒤 좌상단 코너에서 0.3 m/s 보통 차선으로 직진하다 늦게 꺾어 안쪽 선을 밟음.
+    M8에서 넘어오면 코너 미리보기 + 0.2 m/s + 안쪽(오른쪽) 선 모드 + 바깥쪽(왼쪽) 3 cm, 다 돌면 보통 차선."""
+    import math as _m
+    fsm = _m1_from_m8(route_s=24300.0)
+    assert fsm.m7c is not None and fsm.m7c[3] == pytest.approx(206.0)          # 도면: 코너까지 206 mm
+    lane = {'status': 'BOTH'}
+    cmd = fsm.step(Inputs(t=2.1, dist_mm=9010.0, yaw=-_m.pi, lane=lane))
+    assert cmd.lane['speed'] == pytest.approx(0.20)
+    assert cmd.lane['mode'] == 'right_only' and cmd.lane['target_offset_mm'] == pytest.approx(30.0)
+    k = fsm.m7_corner_k(9010.0, -_m.pi)
+    assert k[0] == 0.0 and any(v == pytest.approx(-1.5625, abs=1e-3) for v in k)
+    cmd = fsm.step(Inputs(t=4.0, dist_mm=9600.0, yaw=-_m.pi - _m.radians(60), lane=lane))   # 돌고 있음
+    assert cmd.lane['mode'] == 'right_only'
+    cmd = fsm.step(Inputs(t=6.0, dist_mm=10200.0, yaw=-_m.pi - _m.radians(88), lane=lane))  # 다 돎
+    assert cmd.lane['mode'] == 'normal' and cmd.lane['speed'] == pytest.approx(fsm.p['base_speed'])
+    assert 'target_offset_mm' not in cmd.lane
+    assert any('M1 corner done' in x for x in fsm.log)
+
+
+def test_m1_corner_counts_turn_already_done_in_cones():
+    """라바콘 끝에서 이미 30° 돈 채로 M1에 들어와도 기준은 라바콘 세로 직선: 55° 더 돌면 끝 (85° 넘게 더 돌지 않음)."""
+    import math as _m
+    fsm = _m1_from_m8()
+    fsm.m7c = (fsm.m7c[0], 9000.0, 'M1_TRAFFIC', fsm.m7c[3])
+    assert fsm.m7_corner_k(9100.0, -_m.pi - _m.radians(30)) is not None       # 30°: 아직
+    assert fsm.m7_corner_k(9500.0, -_m.pi - _m.radians(86)) is None           # 세로 직선 기준 86°: 끝
+
+
+def test_m1_corner_off_for_practice_and_without_preview():
+    import math as _m
+    manual = MissionFSM({'start_state': 'M8_CONES'})
+    manual._goto('M1_TRAFFIC', Inputs(t=0.0, dist_mm=0.0, yaw=0.0), 'manual')
+    assert manual.m7c is None
+    cmd = manual.step(Inputs(t=0.1, dist_mm=10.0, yaw=0.0, lane={'status': 'BOTH'}))
+    assert cmd.lane['mode'] == 'normal' and cmd.lane['speed'] == pytest.approx(manual.p['base_speed'])
+    off = _m1_from_m8(m1_corner_preview=False)
+    assert off.m7c is None
+
+
+def test_m8_corner_inner_mode_pushes_outward():
+    import math as _m
+    fsm = _m8_after_fork('B', True)
+    fsm.step(Inputs(t=0.1, dist_mm=5050.0, yaw=0.0, lane={'status': 'L'}))
+    cmd = fsm.step(Inputs(t=1.0, dist_mm=5400.0, yaw=0.0, lane={'status': 'BOTH'}))     # 코너 600 mm 앞 -> 안쪽 선
+    assert cmd.lane['mode'] == 'right_only' and cmd.lane['target_offset_mm'] == pytest.approx(30.0)
+
+
+def test_pedestrian_sign_seen_in_m6_arms_m3_stop():
+    """11/13 실차: 보행자 표지가 M6 끝 무렵 17번 보였지만 M6은 표지를 안 받아 버려졌고, M3는 도면 위치로만 섰다.
+    M6에서 확정된 보행자 표지를 기억해 M3 시작에 바로 정지 준비 (도면 위치가 없어도)."""
+    fsm = MissionFSM({'start_state': 'M5_BUMP'})
+    fsm._goto('M6_ZIGZAG', Inputs(t=0.0, dist_mm=0.0), 'bump done')
+    fsm.step(Inputs(t=0.1, dist_mm=100.0, confirmed_classes={'pedestrian'}))
+    assert fsm.ped_seen
+    fsm._goto('M3_PEDESTRIAN', Inputs(t=1.0, dist_mm=2000.0), 'zigzag done')
+    fsm.step(Inputs(t=1.1, dist_mm=2010.0, confirmed_classes=set()))          # 이제 표지는 안 보임
+    assert fsm.sub == 'approach'
+    assert any('pedestrian sign seen in M6' in x for x in fsm.log)
+
+
+def test_m3_without_sign_or_route_keeps_going():
+    fsm = MissionFSM({'start_state': 'M5_BUMP'})
+    fsm._goto('M6_ZIGZAG', Inputs(t=0.0, dist_mm=0.0), 'bump done')
+    fsm._goto('M3_PEDESTRIAN', Inputs(t=1.0, dist_mm=2000.0), 'zigzag done')
+    fsm.step(Inputs(t=1.1, dist_mm=2010.0, confirmed_classes=set()))
+    assert fsm.sub == ''

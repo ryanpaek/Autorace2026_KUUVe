@@ -53,6 +53,7 @@ mission_node:
     zigzag_len_mm: 1800.0
     leave_mm: 600.0
     state_max_mm: 10000.0
+    stop_target_mm: 30.0                   # 11/12: 앞바퀴를 정지선 3cm 앞에 세운다 (예전 0 = 선 가장자리에 딱 맞춤 -> 조금만 늦어도 선을 밟음). 판정 ±5cm
     stop_brake_mm: 30.0                    # TODO 실측
     ped_wait_sec: 3.5
     obstacle_source_ready: false           # obstacle 노드 완성 후 true
@@ -246,3 +247,14 @@ parking_node:
     stop_from_col5_mm: 300.0               # 11/13 캡틴 R: 앞범퍼 -> 5번 30cm면 정지 (리모·오늘 상자 기준 앞뒤 모두 칸 안, 22 -> 30)
     publish_lane_cfg: false                # 11/12: 차선 오프셋은 미션 노드가 보냄 (m4_target_offset_mm). 둘이 보내면 1초마다 덮어씀
     guard_stop_mm: 20.0                    # 재정렬 끈 상태에서 꺾는 중 리모에 2cm보다 가까우면 박기 전에 정지
+    # 11/13 실차 (캡틴): 앞 15cm 안 물체면 멈춤, 후진 15cm, 전진<->후진 0.5초 멈춤, 양옆 리모 정중앙에 세우기
+    front_stop_mm: 150.0                   # 앞범퍼 앞 이 안 물체 = 막힘 -> 멈추고 후진 (예전 60)
+    back_mm: 150.0                         # 막혔을 때 후진 거리 (예전 50: 5cm씩 4번 왔다갔다)
+    switch_pause_sec: 0.5                  # 전진 <-> 후진 바꿀 때 멈춤
+    center_on_sides: true                  # 양옆 리모가 보이면 그 정중앙 선을 따라 들어감 (예전엔 깊이에만 씀)
+    center_check: true                     # 끝에서 양옆 리모 정중앙에서 center_tol_mm 넘게 벗어났으면 45cm 빼서 정중앙 선 따라 다시 (최대 2번)
+    center_retries: 2
+    center_tol_mm: 15.0                    # 시뮬레이션 18개: 끝 옆 오차 평균 19 -> 8mm, 최대 35 -> 13mm
+    center_pullout_mm: 450.0
+    guard_back: true                       # 옆 2cm 감시에 걸리면 그 자리에서 끝내지 말고 15cm 후진 뒤 다시 (최대 3번)
+    guard_back_max: 3

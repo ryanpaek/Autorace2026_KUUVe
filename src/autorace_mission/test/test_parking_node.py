@@ -5,6 +5,7 @@
 """
 import math
 import os
+import pytest
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -555,3 +556,81 @@ def test_path_done_logs_once_flag():
     """주차 완료 로그는 한 번만 (노드가 done_logged로 막음)."""
     logic = pn.ParkingV2(dict(pn.DEFAULTS))
     assert logic.done_logged is False
+
+
+# --- 11/13 실차: 양옆 정중앙, 앞 15cm, 후진 15cm, 전진<->후진 0.5초, 옆 감시에 걸리면 후진 뒤 다시 -----------------
+
+def _yaml_parking():
+    import yaml
+    path = os.path.join(os.path.dirname(__file__), '..', '..', 'autorace_bringup', 'config', 'params.yaml')
+    d = yaml.safe_load(open(path, encoding='utf-8'))['parking_node']['ros__parameters']
+    return {k: v for k, v in d.items() if k in pn.DEFAULTS}
+
+
+def test_corridor_mid_between_inner_faces():
+    pts = [(100.0, 410.0), (120.0, 430.0), (90.0, -410.0), (110.0, -420.0), (100.0, -415.0)]
+    x, y = pn.corridor_mid(pts, 0.0, 170.0)
+    assert x == 85.0 and y == pytest.approx(0.0)
+    assert pn.corridor_mid([(100.0, 410.0), (110.0, 420.0)], 0.0, 170.0) is None          # 한쪽만
+    assert pn.corridor_mid([(100.0, 120.0), (110.0, 130.0), (100.0, -410.0), (110.0, -420.0)], 0.0, 170.0) is None  # 폭 530: 다른 물체
+
+
+def test_params_yaml_values_from_captain():
+    p = _yaml_parking()
+    assert p['front_stop_mm'] == 150.0 and p['back_mm'] == 150.0 and p['switch_pause_sec'] == 0.5
+    assert p['center_on_sides'] and p['center_check'] and p['guard_back']
+
+
+def _step_inp(t, dist, blocked=False, yaw=0.0):
+    return {'t': t, 'dist_mm': dist, 'yaw': yaw, 'lane_v': 0.18, 'lane_w': 0.0, 'stoplines_mm': [], 'clusters': [],
+            'blocked': blocked, 'end_lines_mm': [], 'points': [], 'clusters_pair': [], 'clusters_box': []}
+
+
+def test_blocked_pauses_then_backs_back_mm_then_pauses_again():
+    p = dict(pn.DEFAULTS, switch_pause_sec=0.5, back_mm=150.0)
+    lg = pn.ParkingV2(p)
+    lg._enter('TURN', _step_inp(0.0, 0.0))
+    lg.yaw_turn0 = 0.0
+    v, _, _ = lg.step(_step_inp(0.05, 0.0, blocked=True))
+    assert lg.phase == 'SWITCH' and v == 0.0
+    v, _, _ = lg.step(_step_inp(0.30, 0.0))
+    assert lg.phase == 'SWITCH' and v == 0.0                       # 0.5초 전: 아직 멈춤
+    v, _, _ = lg.step(_step_inp(0.56, 0.0))
+    assert lg.phase == 'BACK' and v < 0.0
+    v, _, _ = lg.step(_step_inp(1.5, 100.0))
+    assert lg.phase == 'BACK' and v < 0.0                          # 15cm 전
+    v, _, _ = lg.step(_step_inp(2.0, 151.0))
+    assert lg.phase == 'SWITCH' and v == 0.0                       # 15cm 후진 끝 -> 다시 멈춤
+    lg.step(_step_inp(2.6, 151.0))
+    assert lg.phase == 'TURN'
+
+
+def test_side_guard_backs_up_instead_of_ending():
+    """11/13 실차: 꺾는 중 옆 리모 1.9cm -> GUARD_STOP으로 칸에 걸친 채 끝. 이제 후진 뒤 다시 (3번까지)."""
+    p = dict(pn.DEFAULTS, guard_stop_mm=20.0, max_realign=0, guard_back=True, guard_back_max=3, switch_pause_sec=0.5)
+    lg = pn.ParkingV2(p)
+    lg._enter('TURN', _step_inp(0.0, 0.0))
+    lg.yaw_turn0 = 0.0
+    lg._cell = lambda: (0.0, 0.0, 1.0, 0.0)
+    lg._side_gap = lambda inp: 19.0
+    lg.step(_step_inp(0.1, 0.0, yaw=math.radians(30)))
+    assert lg.phase == 'SWITCH' and lg.switch_to == 'BACK' and lg.err[0] == 'guard_back'
+    lg.guard_backs = 3
+    lg._enter('TURN', _step_inp(1.0, 0.0))
+    lg.step(_step_inp(1.1, 0.0, yaw=math.radians(30)))
+    assert lg.result == 'GUARD_STOP'                               # 횟수를 다 쓰면 예전처럼
+
+
+@pytest.mark.parametrize('lead', [153.0, 193.0, 353.0, 433.0])
+def test_centers_between_side_limos_even_with_mistimed_turn(lead):
+    """꺾는 시점이 틀려도(실차 조정 전) 양옆 리모 정중앙에 다시 맞춰 네 모서리 안, 충돌 없음.
+    예전(params 11/13 오전): 옆 오차 최대 95mm, 433이면 모서리 3개만."""
+    o = _yaml_parking()
+    o['turn_lead_lidar_mm'] = lead
+    out = {}
+    n_in, hit, result = drive(FIVE, 2, o, fov_deg=210.0, camera=True, out=out)
+    x, y, th = out['pose']
+    x0, x1, _, _ = cell(2)
+    lat = x + 105.0 * math.cos(th) - (x0 + x1) / 2.0
+    assert (n_in, hit) == (4, False) and result.startswith('PARKED'), (lead, n_in, result)
+    assert abs(lat) <= 35.0, (lead, lat)
