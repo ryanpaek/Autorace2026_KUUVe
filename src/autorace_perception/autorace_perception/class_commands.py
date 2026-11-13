@@ -19,7 +19,7 @@ MODE_CLASSES = {
     'M3_PEDESTRIAN': ('pedestrian',),
     'M4_PARKING': ('parking',),
     'M5_BUMP': ('slow', 'bump'),
-    'M6_ZIGZAG': (),
+    'M6_ZIGZAG': ('pedestrian',),    # 11/13 실차: 보행자 표지는 지그재그 끝 무렵에 보이고 M3 시작 땐 이미 시야 밖 -> M6에서 미리 받음
     'M7_OBSTACLE': ('fork_a', 'fork_b'),
     'M8_CONES': (),
 }
