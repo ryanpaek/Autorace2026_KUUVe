@@ -347,7 +347,11 @@ class ParkingV2:
         """앞 두 띠의 통로 가운데로 차 기준 칸 가운데 선 (앞바퀴 기준 mx, my, ux, uy). 띠 하나만 되면 방향은 칸 추정선."""
         p = self.p
         pts = inp.get('points', [])
-        b = p.get('center_bands_mm', ((40.0, 170.0), (230.0, 420.0)))
+        f_ = list(p.get('center_bands_mm', [0.0, 170.0, 230.0, 420.0]))
+        # ROS 파라미터는 숫자 목록만 받음 -> [시작1, 끝1, 시작2, 끝2] (예전 ((a,b),(c,d)) 모양도 받음)
+        if f_ and isinstance(f_[0], (list, tuple)):
+            f_ = [x for band in f_ for x in band]
+        b = ((float(f_[0]), float(f_[1])), (float(f_[2]), float(f_[3])))
         m1 = corridor_mid(pts, b[0][0], b[0][1], gap_min_mm=p.get('center_gap_min_mm', 650.0),
                           gap_max_mm=p.get('center_gap_max_mm', 1000.0))
         m2 = corridor_mid(pts, b[1][0], b[1][1], gap_min_mm=p.get('center_gap_min_mm', 650.0),
@@ -1278,7 +1282,7 @@ DEFAULTS = {
     'center_on_sides': False,  # 11/13: 양옆 리모가 보이면(stop_min_turn_deg 이상 돈 뒤) 그 정중앙 선을 따라 조향 (params true)
     'center_smooth': 0.5,      #   정중앙 선 갱신 비율 (1 = 매번 새 값)
     'center_min_turn_deg': 70.0,   #   이만큼 돈 뒤부터 (덜 돌면 통로가 비스듬)
-    'center_bands_mm': ((0.0, 170.0), (230.0, 420.0)),   #   통로 가운데를 재는 앞 두 띠 (앞바퀴 기준)
+    'center_bands_mm': [0.0, 170.0, 230.0, 420.0],   # [시작1, 끝1, 시작2, 끝2]. 11/13: ((..),(..))였을 때 ROS가 못 받아 노드가 켜지자마자 죽음.   #   통로 가운데를 재는 앞 두 띠 (앞바퀴 기준)
     'center_gap_min_mm': 650.0,    #   1·3번 사이 통로 폭 (도면: 칸 두 개 1040 - 리모 폭 220 = 820)
     'center_gap_max_mm': 1000.0,
     'center_max_dir_deg': 25.0,    #   두 띠로 구한 방향이 차와 이보다 틀어지면 안 믿음
