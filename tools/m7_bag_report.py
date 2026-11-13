@@ -41,6 +41,13 @@ def cdr_bool(data: bytes) -> bool:
 
 
 def open_bag(path):
+    path = os.path.expanduser(path.rstrip('/'))
+    if not os.path.exists(path):
+        # 11/12 밤: 없는 경로를 주면 sqlite3가 빈 파일을 만들어 다음부터 'no such table' 오류가 났다
+        near = sorted(glob.glob(os.path.join(os.path.dirname(path) or '.', '*')))[-8:]
+        sys.exit(f'없는 경로: {path}\n최근 녹화 폴더:\n  ' + '\n  '.join(near))
+    if os.path.isfile(path) and (not path.endswith('.db3') or os.path.getsize(path) == 0):
+        sys.exit(f'녹화 폴더(또는 .db3)가 아님: {path} (크기 {os.path.getsize(path)} B). 빈 파일이면 지우고 폴더 이름을 다시 확인')
     dbs = sorted(glob.glob(os.path.join(path, '*.db3'))) if os.path.isdir(path) else [path]
     if not dbs:
         mc = glob.glob(os.path.join(path, '*.mcap'))
@@ -52,7 +59,7 @@ def read(dbs):
     """-> {topic: [(t_sec, value)]}  String은 JSON이면 dict, Bool은 bool, 나머지는 None (주기만 셈)."""
     out = {}
     for db in dbs:
-        con = sqlite3.connect(db)
+        con = sqlite3.connect(f'file:{db}?mode=ro', uri=True)     # 읽기 전용 (없으면 새로 만들지 않음)
         topics = {tid: name for tid, name in con.execute('SELECT id, name FROM topics')}
         want = {tid: n for tid, n in topics.items() if n in STR_TOPICS + BOOL_TOPICS + RATE_TOPICS}
         for tid, ts, data in con.execute('SELECT topic_id, timestamp, data FROM messages ORDER BY timestamp'):
@@ -175,6 +182,7 @@ def main():
                         '라이다 각도·장착 위치(laser_yaw, laser_x_mm) 또는 장애물 위치 확인 (예비 위치로 켜졌을 것)')
         # 회피 노드
         rec, em = 0, 0
+        last_tg = None
         for t, s in d.get('/avoid/state', []):
             if t0 <= t <= t1 and isinstance(s, dict):
                 if s.get('recover_n', 0) > rec:
@@ -186,6 +194,16 @@ def main():
                     if s.get('obs_near') is not None:
                         print(f'             앞 장애물 [앞 m, 옆 y 범위 m]: {s["obs_near"]}  (차로 중심 y = +0.52 / 0 / -0.52)')
                 em += bool(s.get('emergency'))
+                # 11/12 밤: 목표 차로가 바뀔 때마다 왜 바꿨나 (차로별 판단, 출구 계획, 방향)
+                tg = s.get('target')
+                if tg != last_tg:
+                    print(f'{ts(t)}  [avoid] 목표 {last_tg} -> {tg}  x={s.get("x")} y={s.get("y")} psi={s.get("psi_deg")}° '
+                          f'출구={s.get("exit_pref")} 계획={s.get("exit_plan")} 남은={s.get("exit_rem_m")}m 필요={s.get("exit_need_m")}m')
+                    if s.get('lane_why'):
+                        print(f'             차로 판단: {s["lane_why"]}')
+                    if s.get('obs_near') is not None:
+                        print(f'             앞 장애물 [앞 m, 옆 y 범위 m]: {s["obs_near"]}')
+                    last_tg = tg
         if rec >= 3:
             warn.append(f'M7에서 탈출(후진) {rec}번: 막힘 반복')
         # 주기

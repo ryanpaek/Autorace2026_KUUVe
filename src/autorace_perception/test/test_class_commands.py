@@ -292,3 +292,21 @@ class TemporalVoteTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def test_fork_confirmed_early_without_full_window():
+    """11/12 밤: 갈림길(M2·M7)은 10프레임 창이 다 차기 전에도 need(3)번 보면 바로 SELECT_ROUTE."""
+    from autorace_perception.class_commands import ClassCommandRouter
+    r = ClassCommandRouter(vote_window=10, vote_need=7)
+    need = dict.fromkeys(r.mode_need, 0)
+    need.update({'M2_FORK': 3, 'M7_OBSTACLE': 3})
+    r.configure(0.5, 'none', 10, 7, mode_need=need)
+    r.early_modes = {'M2_FORK', 'M7_OBSTACLE'}
+    r.set_mode('M7_OBSTACLE')
+    outs = [r.route({'stamp': float(k + 1), 'detections': [{'cls': 'fork_a', 'conf': 0.9}]}) for k in range(3)]
+    assert not any(c['command'] == 'SELECT_ROUTE' for c in outs[1]['commands'])
+    assert any(c['command'] == 'SELECT_ROUTE' and c['route'] == 'A' for c in outs[2]['commands'])
+    r2 = ClassCommandRouter(vote_window=10, vote_need=3)       # early 없으면 예전처럼 창이 찰 때까지
+    r2.set_mode('M1_TRAFFIC')
+    outs = [r2.route({'stamp': float(k + 1), 'detections': [{'cls': 'red', 'conf': 0.9}]}) for k in range(3)]
+    assert 'red' not in outs[2]['confirmed_classes']

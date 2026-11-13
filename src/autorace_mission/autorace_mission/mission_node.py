@@ -419,11 +419,24 @@ class MissionNode(Node):
         if not self.manual:
             self.cmd_pub.publish(out)
         rs = self.route_s_map if self.route_active else None
+        # 11/12 밤: M7 직전 코너는 IMU로 지킨 코너 곡률을 도면 곡률 대신 넣는다 (도면 위치를 잃어도)
+        ck = self.fsm.m7_corner_k(self.dist_mm, self.yaw)
+        # 11/12 밤: 코너 보완이 켜지고 꺼지는 걸 로그로 (예전엔 FSM 안에서만 남아 실차에서 확인할 수 없었음)
+        on = ck is not None
+        if on != getattr(self, '_corner_on', False):
+            self._corner_on = on
+            self.get_logger().info(f'[코너 보완] {"켜짐" if on else "꺼짐"} ({self.fsm.state}) '
+                                   + (f'k={ck[0]:+.2f}..{ck[-1]:+.2f}' if on else (self.fsm.log[-1] if self.fsm.log else '')))
+        if rs is None and ck is not None:
+            self.preview_pub.publish(String(data=json.dumps(
+                {'step_mm': 100.0, 'k': ck, 'lost': False, 'm7_corner': True})))
         if rs is not None:
             step = 100.0
             ks = [round(self.route.curvature(rs + i * step), 4) for i in range(14)]
             msg = {'s': round(rs), 'step_mm': step, 'k': ks,
                    'lost': bool(self.tracker.lost), 'dir': self.move_dir, 'rev_src': self.rev_src}
+            if ck is not None:
+                msg['k'], msg['lost'], msg['m7_corner'] = ck, False, True
             mp = self.mappose
             if mp is not None:
                 # 좌우 d는 _on_odom에서 걸음마다 mp.advance()로 적분한다 (후진·방향 반영)
@@ -452,6 +465,7 @@ class MissionNode(Node):
                  'estop': self.estop, 'note': cmd.note,
                  'parking_sign': self.fsm.parking_sign, 'parking_armed': self.fsm.parking_armed,
                  'm7_exit_lane': (self.m7_exit_lane or {}).get('lane'),
+                 'corner_preview': bool(getattr(self, '_corner_on', False)),
                  'route': self.tracker.state() if self.route_active else None}
         self.state_pub.publish(String(data=json.dumps(state)))
         if (self.fsm.state, self.fsm.sub) != self._last_state:
