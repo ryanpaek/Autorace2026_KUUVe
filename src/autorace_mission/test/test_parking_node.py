@@ -597,3 +597,13 @@ def test_centers_between_side_limos_even_with_mistimed_turn(lead):
     lat = x + 105.0 * math.cos(th) - (x0 + x1) / 2.0
     assert (n_in, hit) == (4, False) and result.startswith('PARKED'), (lead, n_in, result)
     assert abs(lat) <= 35.0, (lead, lat)
+
+
+def test_all_defaults_are_ros_parameter_types():
+    """11/13: 기본값이 ROS 파라미터로 등록 가능한 모양이어야 함 (((a,b),(c,d))면 노드가 켜지자마자 죽음)."""
+    ok_scalar = (bool, int, float, str)
+    for k, v in pn.DEFAULTS.items():
+        if isinstance(v, list):
+            assert v and len({type(x) for x in v}) == 1 and isinstance(v[0], ok_scalar), k
+        else:
+            assert isinstance(v, ok_scalar), k
