@@ -398,6 +398,14 @@ def test_cones_corner_guard_off_for_practice_start():
     assert not fsm.m8_corner.active
 
 
+def test_parking_direct_hands_over_at_m4_start():
+    """11/12 m4_direct: 표지도 없고 도면상 앞 선에서 멀어도 M4 들어오자마자 주차 노드에 넘긴다."""
+    fsm = MissionFSM({'start_state': 'M4_PARKING', 'route_points': {'m4_pre_line': 5000.0}, 'm4_direct': True})
+    cmd = fsm.step(Inputs(t=0.0, dist_mm=0.0, route_s=3000.0, confirmed_classes={}))
+    assert cmd.source == 'parking' and fsm.parking_armed
+    assert cmd.lane['speed'] == fsm.p['slow_speed']
+
+
 def test_m7_corner_preview_from_crosswalk_only():
     """11/12 밤: 횡단보도에서 넘어온 M7은 코너를 IMU로 다 돌 때까지 R640 오른쪽 곡률을 미리보기로 낸다. 연습 set_state M7은 안 냄."""
     import math as _m

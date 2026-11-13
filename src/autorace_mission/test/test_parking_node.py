@@ -348,3 +348,173 @@ def test_pair_ignores_small_objects():
     big = pn.scan_clusters(rng, amin, ainc, 0.05, 8.0, 0.0, 0.0, min_size_mm=pn.DEFAULTS['car_min_size_mm'])
     assert len(small) == 2 and len(big) == 1
     assert big[0][0] > 700.0
+
+
+def test_sign_post_does_not_trigger_early_turn():
+    """11/12 실차: 입구 오른쪽 주차 표지판이 옆을 지나가도 EXTRA(일찍 꺾기)로 가지 않는다."""
+    logic = pn.ParkingV2(dict(pn.DEFAULTS))
+    base = {'yaw': 0.0, 'lane_v': 0.2, 'lane_w': 0.0, 'end_lines_mm': [], 'blocked': False, 'armed': True}
+    logic.step({**base, 't': 0.0, 'dist_mm': 0.0, 'stoplines_mm': [], 'clusters': []})
+    _, _, info = logic.step({**base, 't': 0.1, 'dist_mm': 400.0, 'stoplines_mm': [200.0], 'clusters': []})
+    assert info['phase'] == 'FOLLOW'
+    phases = set()
+    for i in range(40):                       # 표지판: 앞 300mm -> 뒤로 지나감 (오른쪽 400mm)
+        x = 300.0 - i * 20.0
+        _, _, info = logic.step({**base, 't': 0.2 + i * 0.1, 'dist_mm': 400.0 + i * 20.0, 'stoplines_mm': [],
+                                 'clusters': [(x, -400.0)], 'clusters_pair': [], 'clusters_single': []})
+        phases.add(info['phase'])
+    assert phases == {'FOLLOW'}
+
+
+def test_single_fallback_ignores_small_objects_when_enabled():
+    """예비 규칙을 켜도 리모보다 작은 덩어리(clusters_single에 없음)로는 꺾지 않는다."""
+    p = dict(pn.DEFAULTS); p['single_fallback'] = True
+    logic = pn.ParkingV2(p)
+    base = {'yaw': 0.0, 'lane_v': 0.2, 'lane_w': 0.0, 'end_lines_mm': [], 'blocked': False, 'armed': True}
+    logic.step({**base, 't': 0.0, 'dist_mm': 0.0, 'stoplines_mm': [], 'clusters': []})
+    logic.step({**base, 't': 0.1, 'dist_mm': 400.0, 'stoplines_mm': [200.0], 'clusters': []})
+    phases = set()
+    for i in range(40):
+        x = 300.0 - i * 20.0
+        _, _, info = logic.step({**base, 't': 0.2 + i * 0.1, 'dist_mm': 400.0 + i * 20.0, 'stoplines_mm': [],
+                                 'clusters': [(x, -400.0)], 'clusters_pair': [], 'clusters_single': []})
+        phases.add(info['phase'])
+    assert 'EXTRA' not in phases
+
+
+def _direct_logic(**over):
+    p = dict(pn.DEFAULTS); p['skip_wait_line'] = True; p.update(over)
+    return pn.ParkingV2(p)
+
+
+def test_skip_wait_line_goes_follow_without_line():
+    """11/12: skip_wait_line이면 흰 선·짝 없이 바로 FOLLOW (trigger=direct), 왼쪽 붙기 시작."""
+    logic = _direct_logic()
+    base = {'yaw': 0.0, 'lane_v': 0.2, 'lane_w': 0.0, 'end_lines_mm': [], 'blocked': False, 'armed': False,
+            'stoplines_mm': [], 'clusters': []}
+    _, _, info = logic.step({**base, 't': 0.0, 'dist_mm': 0.0})
+    assert info['phase'] == 'FOLLOW' and info['trigger'] == 'direct'
+    assert logic.lane_cfg == {'target_offset_mm': pn.DEFAULTS['target_offset_mm']}
+
+
+def test_direct_no_pair_stops_after_follow_max_direct():
+    """짝 없이 follow_max_direct_mm(3.5m)를 가면 FAIL_NO_CAR. 그 전(2.5m)에는 안 멈춤."""
+    logic = _direct_logic()
+    base = {'yaw': 0.0, 'lane_v': 0.2, 'lane_w': 0.0, 'end_lines_mm': [], 'blocked': False,
+            'stoplines_mm': [], 'clusters': []}
+    info = None
+    for i in range(0, 200):
+        d = i * 20.0
+        _, _, info = logic.step({**base, 't': i * 0.1, 'dist_mm': d})
+        if d == 3000.0:
+            assert info['phase'] == 'FOLLOW'
+        if info['phase'] == 'DONE':
+            break
+    assert info['result'] == 'FAIL_NO_CAR' and 3480.0 <= d <= 3560.0
+
+
+def test_blocked_before_pair_waits_instead_of_ending():
+    """짝 찾기 전에 앞이 막히면 BLOCKED로 끝내지 않고 서서 기다렸다가 다시 감."""
+    logic = _direct_logic()
+    base = {'yaw': 0.0, 'lane_v': 0.2, 'lane_w': 0.0, 'end_lines_mm': [], 'stoplines_mm': [], 'clusters': []}
+    logic.step({**base, 't': 0.0, 'dist_mm': 0.0, 'blocked': False})
+    for i in range(1, 10):
+        v, _, info = logic.step({**base, 't': i * 0.1, 'dist_mm': 100.0, 'blocked': True})
+        assert info['phase'] == 'FOLLOW' and v == 0.0
+    v, _, info = logic.step({**base, 't': 1.1, 'dist_mm': 100.0, 'blocked': False})
+    assert info['phase'] == 'FOLLOW' and v > 0.0
+
+
+def test_empty_filtered_pair_list_does_not_fall_back_to_raw():
+    """11/12 버그: 크기로 거른 목록(clusters_pair)이 비면 거르기 전 목록으로 돌아가 기둥 + 1번이 짝이 됐음."""
+    logic = _direct_logic()
+    base = {'yaw': 0.0, 'lane_v': 0.2, 'lane_w': 0.0, 'end_lines_mm': [], 'stoplines_mm': [], 'blocked': False}
+    raw = [(200.0, -420.0), (1240.0, -420.0)]      # 기둥(작음) + 1번, 사이 1040mm -> 거르기 전이면 짝
+    for i in range(10):
+        _, _, info = logic.step({**base, 't': i * 0.1, 'dist_mm': i * 10.0, 'clusters': raw, 'clusters_pair': []})
+    assert info['phase'] == 'FOLLOW' and logic.pair_line is None
+
+
+# ---------------------------------------------------------------- 11/12 1번 모서리 기준 꺾기 + 5번 앞 22cm 정지
+NEW_1112 = {'skip_wait_line': True, 'car_min_size_mm': 150.0, 'turn_ref': 'corner', 'turn_from_corner_mm': 140.0,
+            'stop_from_col5_mm': 220.0, 'max_realign': 0, 'guard_stop_mm': 20.0, 'pullout_mm': 500.0, 'pause_sec': 0.3}
+
+
+def test_corner_turn_and_col5_stop_parks_in_one_go():
+    """1번 모서리로 꺾는 시점을 잡고 5번 앞 22cm에 서면, 재정렬 없이 한 번에 2번 칸 안 (대회 배치, 시야 ±105도)."""
+    log, out = [], {}
+    n_in, hit, res = drive([1, 3, 4, 5, 6], 2, NEW_1112, fov_deg=210.0, log=log, out=out)
+    assert (n_in, hit, res) == (4, False, 'PARKED')
+    assert any(i.get('turn_ref') == 'corner' for i in log)
+    assert log[-1]['realigns'] == 0 and log[-1]['stop_how'] == 'col5'
+    x, y, th = out['pose']
+    bumper_y = y + (105.0 + 161.0) * math.sin(th)            # 앞범퍼 (차가 -y로 들어감)
+    assert bumper_y > -620.0 + 30.0                           # 칸 끝 선(-620)보다 3cm 이상 앞
+
+
+def test_corner_turn_point_ignores_lidar_mount_error():
+    """라이다 위치 값이 5cm 틀려도 모서리 기준이면 꺾는 위치가 같다 (짝 중점 평균은 5cm 넘게 달라짐)."""
+    def turn_x(ov):
+        seen = []
+        orig = pn.ParkingV2._enter
+
+        def rec(self, phase, inp):
+            if phase == 'PAUSE' and not seen:
+                seen.append(self.px)                          # 꺾기 직전 차 위치 (출발점 기준 실제 이동 거리)
+            orig(self, phase, inp)
+        pn.ParkingV2._enter = rec
+        try:
+            drive([1, 3, 4, 5, 6], 2, ov, fov_deg=210.0)
+        finally:
+            pn.ParkingV2._enter = orig
+        return seen[0] if seen else None
+    a = turn_x(NEW_1112)
+    b = turn_x(dict(NEW_1112, front_axle_from_lidar_mm=-97.0))
+    c = turn_x(dict(NEW_1112, turn_ref='pair'))
+    d = turn_x(dict(NEW_1112, turn_ref='pair', front_axle_from_lidar_mm=-97.0))
+    assert None not in (a, b, c, d)
+    assert abs(a - b) <= 20.0 < abs(c - d)
+
+
+def test_measure_corner_from_points():
+    """1번 상자 차로 쪽 면 점들의 진행 방향 끝 = 모서리 (칸 가운데 기준 약 -410)."""
+    logic = pn.ParkingV2(dict(pn.DEFAULTS, turn_ref='corner'))
+    logic.px, logic.py = 0.0, 0.0
+    logic.pair_line = (1000.0, -600.0, 0.0, -1.0)              # 2번 칸 가운데 (1000, -600), 깊이 방향 -y
+    # 앞바퀴 = (210, 0). 1번 중심 x = 480, 차로 쪽 면 y = -600 + 161 = -439, 폭 220 -> x 370~590
+    pts = [(x - 210.0, -439.0) for x in range(380, 591, 15)] + [(590.0 - 210.0, -439.0 - d) for d in range(20, 200, 30)]
+    sc = logic._measure_corner({'yaw': 0.0, 'points': pts})
+    assert sc is not None and abs(sc - (-410.0)) <= 15.0
+
+
+def test_mission_sends_parking_lane_offset():
+    """11/12: 미션 노드가 주차 노드에 넘긴 뒤 차선 설정에 왼쪽 오프셋을 넣는다 (1초마다 다시 보내도 유지)."""
+    from autorace_mission.fsm import Inputs, MissionFSM
+    fsm = MissionFSM({'start_state': 'M4_PARKING', 'm4_direct': True, 'm4_target_offset_mm': 50.0})
+    cmd = fsm.step(Inputs(t=0.0, dist_mm=0.0))
+    assert cmd.source == 'parking' and cmd.lane.get('target_offset_mm') == 50.0
+
+
+def test_target_turn_parks_and_ignores_lidar_mount_error():
+    """11/13 target: 목표 = 1·3번 중심선 ∩ 5번 중심선. 한 번에 주차, 라이다 위치 값이 5cm 틀려도 꺾는 위치 같음."""
+    ov = dict(NEW_1112, turn_ref='target', pair_tol_mm=230.0)
+    log = []
+    n_in, hit, res = drive([1, 3, 4, 5, 6], 2, ov, fov_deg=210.0, log=log)
+    assert (n_in, hit, res) == (4, False, 'PARKED')
+    assert any(str(i.get('turn_ref', '')).startswith('target_') for i in log)
+    orig = pn.ParkingV2._enter
+
+    def turn_px(o):
+        seen = []
+
+        def rec(self, phase, inp):
+            if phase == 'PAUSE' and not seen:
+                seen.append(self.px)
+            orig(self, phase, inp)
+        pn.ParkingV2._enter = rec
+        try:
+            drive([1, 3, 4, 5, 6], 2, o, fov_deg=210.0)
+        finally:
+            pn.ParkingV2._enter = orig
+        return seen[0]
+    assert abs(turn_px(ov) - turn_px(dict(ov, front_axle_from_lidar_mm=-97.0))) <= 20.0
