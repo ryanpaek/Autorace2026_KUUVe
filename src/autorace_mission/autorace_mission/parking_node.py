@@ -276,6 +276,8 @@ class ParkingV2:
         self.trig_n = 0            # WAIT_LINE에서 짝을 연속으로 본 횟수
         self.corner_s = None       # 1번 상자 '2번 칸 쪽 + 차로 쪽' 모서리: 칸 가운데 선에서 차로 방향으로 몇 mm (보통 약 -410)
         self.corner_n = 0
+        self.corner_hist = []
+        self.turn_at = None        # 꺾을 때 (모서리 s, 라이다 s, 잰 횟수) — 실차 확인용
         self.turn_ref_used = None  # 꺾은 기준: 'corner' | 'pair'
         self.trigger = None        # 주차 모드 시작 이유: 'line' | 'pair'
         self.pair_side_mm = None   # 짝 중점까지 옆 거리 (앞줄 약 0.5m, 뒷줄 약 1.1m) -> row
@@ -428,6 +430,7 @@ class ParkingV2:
         반환: 칸 가운데 기준 차로 방향 위치 s (mm) 또는 None.
         """
         p = self.p
+        self._face_center = None
         if self.pair_line is None or inp['yaw'] is None:
             return None
         cx, cy, ux, uy = self.pair_line
@@ -436,20 +439,32 @@ class ParkingV2:
         c, sn = math.cos(yaw), math.sin(yaw)
         fx, fy = self.px + p['wheelbase_mm'] * c, self.py + p['wheelbase_mm'] * sn
         b1 = -p['cell_pitch_mm']                     # 1번 중심 (차로 방향, 칸 가운데 기준)
+        lx = -p['front_axle_from_lidar_mm']           # 라이다 (앞바퀴 기준 앞 47)
         pts = []
         for x, y in inp.get('points', []):
             wx, wy = fx + x * c - y * sn, fy + x * sn + y * c
             s_ = (wx - cx) * vx + (wy - cy) * vy
             d_ = (wx - cx) * ux + (wy - cy) * uy
-            if abs(s_ - b1) <= 260.0 and abs(d_) <= 330.0:
-                pts.append((s_, d_))
+            if abs(s_ - b1) <= p['corner_window_mm'] and abs(d_) <= 330.0:
+                pts.append((s_, d_, math.hypot(x - lx, y)))
         if len(pts) < p['corner_min_pts']:
             return None
-        face = min(d for _, d in pts)                 # 차로 쪽 면 = 가장 얕은 깊이
-        face_pts = [s_ for s_, d in pts if d <= face + 40.0]
+        face = min(d for _, d, _ in pts)              # 차로 쪽 면 = 가장 얕은 깊이
+        face_pts = [(s_, r) for s_, d, r in pts if d <= face + 40.0]
         if len(face_pts) < p['corner_min_pts']:
             return None
-        sc = max(face_pts)
+        sc, rc = max(face_pts)
+        smin = min(s_ for s_, _ in face_pts)
+        # 앞면 가운데 (상자 크기와 무관). 앞면 양 끝이 다 보여야 함: 위쪽 끝이 창 경계에 잘리지 않고 앞면 폭 15cm 이상
+        # 라이다가 앞면 옆을 지나는 중일 때만 (양 끝이 다 보이고 가까움). 멀면 일부만 보여 틀림 (11/13 실차)
+        ls = self._lidar_s(inp)
+        self._face_center = ((smin + sc) / 2.0
+                             if (smin > b1 - p['corner_window_mm'] + 20.0 and sc - smin >= 150.0
+                                 and smin - 50.0 <= ls <= sc + 50.0) else None)
+        # 11/13 실차: 멀리서는 앞면 일부만 보여(점은 700mm 안만) 모서리를 1번 쪽으로 잘못 잡고, 그 값으로 꺾어
+        # 매번 수십 cm씩 다른 곳으로 들어감 -> 모서리가 라이다에서 corner_max_range_mm 안일 때 잰 값만 쓴다
+        if rc > p['corner_max_range_mm']:
+            return None
         expect = b1 + p['body_width_mm'] / 2.0        # 리모 폭 220 -> 1번 중심 + 110
         if abs(sc - expect) > p['corner_gate_mm']:
             return None
@@ -672,13 +687,39 @@ class ParkingV2:
                     self.pair_line = tuple((a * n + b) / (n + 1) for a, b in zip(self.pair_line, line))
                 self.pair_n += 1
             if self.pair_line is not None and self.pair_n >= p['pair_min_frames']:
+                if p['turn_ref'] == 'center1':
+                    # 11/13: 1번 앞면 가운데 기준 (상자 크기와 무관). 2번 가운데 = 1번 가운데 + 칸 간격.
+                    # 라이다가 1번 가운데 + turn_from_center1_mm 지나면 꺾기 (247 = 짝 방식 turn_lead 320과 같은 위치)
+                    self._measure_corner(inp)
+                    fc = self._face_center
+                    if fc is not None and abs(fc - (-p['cell_pitch_mm'])) <= p['corner_gate_mm']:
+                        self.corner_hist.append(fc)
+                        self.corner_n += 1
+                        h = sorted(self.corner_hist[-p['corner_median_n']:])
+                        self.corner_s = h[len(h) // 2]
+                    if self.corner_s is not None and self.corner_n >= p['corner_min_frames']:
+                        if self._lidar_s(inp) - self.corner_s >= p['turn_from_center1_mm'] - p['brake_mm']:
+                            cx, cy, ux, uy = self.pair_line
+                            vx, vy = self._lane_dir()
+                            sh = self.corner_s + p['cell_pitch_mm']
+                            self.pair_line = (cx + sh * vx, cy + sh * vy, ux, uy)
+                            self.line = self.pair_line
+                            self.turn_ref_used = 'center1'
+                            self.turn_at = (round(self.corner_s), round(self._lidar_s(inp)), self.corner_n)
+                            self._enter('PAUSE', inp)
+                            return self._out(0.0, 0.0)
+                        return self._out(inp['lane_v'], None)
                 if p['turn_ref'] == 'corner':
                     # 11/12: 1번 모서리를 가까이서 계속 다시 재고(최신 값), 라이다가 모서리 선 + turn_from_corner_mm를
                     # 지나면 꺾는다. 짝 중점 평균은 멀리서 본 쏠린 값이 섞여 꺾는 위치가 매번 달랐음.
                     sc = self._measure_corner(inp)
                     if sc is not None:
-                        self.corner_s, self.corner_n = sc, self.corner_n + 1
-                    if self.corner_s is not None:
+                        # 가까이서 잰 값들의 중앙값 (한 프레임 튀는 값 무시)
+                        self.corner_hist.append(sc)
+                        self.corner_n += 1
+                        h = sorted(self.corner_hist[-p['corner_median_n']:])
+                        self.corner_s = h[len(h) // 2]
+                    if self.corner_s is not None and self.corner_n >= p['corner_min_frames']:
                         if self._lidar_s(inp) - self.corner_s >= p['turn_from_corner_mm'] - p['brake_mm']:
                             # 칸 가운데도 모서리 기준으로 맞춤: 2번 가운데 = 모서리 + (칸 간격 - 리모 반폭)
                             cx, cy, ux, uy = self.pair_line
@@ -687,6 +728,7 @@ class ParkingV2:
                             self.pair_line = (cx + sh * vx, cy + sh * vy, ux, uy)
                             self.line = self.pair_line
                             self.turn_ref_used = 'corner'
+                            self.turn_at = (round(self.corner_s), round(self._lidar_s(inp)), self.corner_n)
                             self._enter('PAUSE', inp)
                             return self._out(0.0, 0.0)
                         return self._out(inp['lane_v'], None)
@@ -903,7 +945,7 @@ class ParkingV2:
         """/parking/state에 실을 내용."""
         return {'phase': self.phase, 'done': self.phase == 'DONE', 'result': self.result,
                 'backs': self.backs, 'realigns': self.realigns, 'last_err': self.err,
-                'row': self.row, 'stop_how': self.stop_how, 'trigger': self.trigger, 'turn_ref': self.turn_ref_used,
+                'row': self.row, 'stop_how': self.stop_how, 'trigger': self.trigger, 'turn_ref': self.turn_ref_used, 'corner_s': None if self.corner_s is None else round(self.corner_s), 'corner_n': self.corner_n, 'turn_at': self.turn_at,
                 'end_mm': None if self.end_d is None else round(self.end_d)}
 
 
@@ -922,12 +964,18 @@ DEFAULTS = {
     'skip_wait_line': False,   # 11/12: true면 WAIT_LINE 건너뛰고 바로 FOLLOW(짝 찾기). 미션 노드 m4_direct와 같이 켬 (params)
     'follow_max_direct_mm': 3500.0,  # 바로 시작했을 때 짝 없이 이만큼 가면 멈춤. 도면: M4 시작 약 3.8m -> 꺾는 곳 6.56m, 차선 끝 8.13m
     'wait_blocked_before_pair': True,  # 짝 찾기 전 앞이 막히면 BLOCKED로 끝내지 말고 서서 기다림
-    'turn_ref': 'pair',        # 꺾는 기준: 'pair'(짝 중점, turn_lead_mm) | 'corner'(1번 모서리, 11/12, params에서 켬)
+    'turn_ref': 'pair',        # 꺾는 기준: 'pair'(짝 중점) | 'corner'(1번 모서리, 리모 폭 가정) | 'center1'(1번 앞면 가운데, 11/13)
     'turn_from_corner_mm': 140.0,  # corner: 라이다가 1번 모서리 선을 이만큼 지나면 꺾기.
                                #   = turn_lead 320 을 바꾼 값: 2번 가운데 = 모서리 + 410 (칸 52 - 리모 반폭 11), 앞바퀴 = 가운데 - 320,
                                #   라이다 = 앞바퀴 + 47 -> 모서리 + 137. 실차로 맞출 것
+    'turn_from_center1_mm': 247.0,  # center1: 라이다가 1번 앞면 가운데를 이만큼 지나면 꺾기.
+                               #   = 2번 가운데(1번 + 520) - turn_lead 320 + 라이다 47. 실차로 맞출 것
     'corner_min_pts': 4,       # 모서리 잴 때 필요한 차로 쪽 면 점 수
-    'corner_gate_mm': 150.0,   # 모서리가 짝으로 예상한 위치(1번 중심 + 110)에서 이보다 멀면 버림
+    'corner_gate_mm': 250.0,   # 모서리가 짝으로 예상한 위치(1번 중심 + 110)에서 이보다 멀면 버림 (11/13: 150 -> 250, 칸 폭만 한 상자)
+    'corner_window_mm': 300.0, # 1번 중심에서 차로 방향으로 이 안의 점만 1번으로 봄 (11/13: 260 -> 300)
+    'corner_max_range_mm': 600.0,  # 11/13: 모서리가 라이다에서 이 안일 때 잰 값만 씀 (멀면 앞면 일부만 보여 틀림)
+    'corner_min_frames': 3,    # 가까이서 이만큼 잰 뒤에야 모서리 기준으로 꺾음
+    'corner_median_n': 7,      # 최근 이만큼의 중앙값
     'stop_from_col5_mm': 0.0,  # 11/12: 꺾은 뒤(col5_min_turn_deg 이상) 앞범퍼 -> 정면 물체(5번) 이 거리면 정지. 0 = 끔
                                #   220: 리모가 칸 가운데면 5번 앞면 = 칸 가운데 + 459 -> 앞범퍼 239 (칸 끝 선 300 전 약 6cm)
     'guard_stop_mm': 0.0,      # 재정렬을 다 썼거나 끈 경우, 꺾는 중 리모에 이보다 가까우면 GUARD_STOP 정지. 0 = 끔
