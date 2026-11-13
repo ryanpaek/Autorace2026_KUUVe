@@ -589,7 +589,12 @@ class ParkingV2:
         if fp is not None:
             mx, my, pvx, pvy = fp
             near = (mx - pvx * p['pair_dist_mm'] / 2.0, my - pvy * p['pair_dist_mm'] / 2.0)
-            if math.hypot(*near) <= p['target_max_range_mm']:
+            far = (mx + pvx * p['pair_dist_mm'] / 2.0, my + pvy * p['pair_dist_mm'] / 2.0)
+            # 11/13: 먼 쪽(3번)이 덩어리 거리 1.5m 끝에 걸리면 먼 끝이 잘려 중심이 가까운 쪽으로 쏠림 -> 중점 5cm 앞쪽
+            # (꺾기가 4~6cm 일찍, 끝에서 1번 쪽으로 치우침). 3번 전체가 보일 때만, 1번이 시야(±105도) 뒤로 빠지기 전만
+            far_ok = math.hypot(*far) <= p['target_far_max_mm']
+            near_ok = math.degrees(math.atan2(near[1], near[0] + p['front_axle_from_lidar_mm'])) >= -p['target_near_max_deg']
+            if math.hypot(*near) <= p['target_max_range_mm'] and far_ok and near_ok:
                 s_, _ = to_sd(mx, my)
                 if abs(s_) <= p['target_gate_mm']:
                     self.tgt_pm.append(s_)
@@ -1258,7 +1263,9 @@ DEFAULTS = {
     'move_q_max_mm': 800.0,    # path: Q까지 이보다 많이 움직여야 하면 FAIL_Q
     'turn_lead_lidar_mm': 273.0,  # target: 라이다가 목표 이만큼 전에 오면 꺾기 (= turn_lead 320 - 라이다 47, 실차로 맞출 것)
     'target_max_range_mm': 1300.0,  # target: 5번·1번이 라이다에서 이 안일 때 잰 값만 (멀면 일부만 보임)
-    'target_gate_mm': 250.0,   # target: 짝으로 예상한 칸 가운데에서 차로 방향으로 이 안만
+    'target_gate_mm': 250.0,
+    'target_far_max_mm': 1300.0,  # target/path: 먼 쪽(3번) 중심이 이 안일 때만 짝 중점 사용 (덩어리 1.5m 끝에서 잘림)
+    'target_near_max_deg': 95.0,  # target/path: 가까운 쪽(1번)이 라이다에서 이 각도 안일 때만 (시야 ±105도 끝에서 잘림)   # target: 짝으로 예상한 칸 가운데에서 차로 방향으로 이 안만
     'corner_min_pts': 4,       # 모서리 잴 때 필요한 차로 쪽 면 점 수
     'corner_gate_mm': 250.0,   # 모서리가 짝으로 예상한 위치(1번 중심 + 110)에서 이보다 멀면 버림 (11/13: 150 -> 250, 칸 폭만 한 상자)
     'corner_window_mm': 300.0, # 1번 중심에서 차로 방향으로 이 안의 점만 1번으로 봄 (11/13: 260 -> 300)
