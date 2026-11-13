@@ -578,7 +578,8 @@ def test_corridor_mid_between_inner_faces():
 def test_params_yaml_values_from_captain():
     p = _yaml_parking()
     assert p['front_stop_mm'] == 150.0 and p['back_mm'] == 150.0 and p['switch_pause_sec'] == 0.5
-    assert p['center_on_sides'] and p['center_check'] and p['guard_back']
+    assert p['center_on_sides'] and p['guard_back']
+    assert p['center_check'] is False      # 11/13 15:49 캡틴: 경로 방식은 한 번에 넣기, 정중앙 다시 맞추기(후진·재진입) 끔
 
 
 def _step_inp(t, dist, blocked=False, yaw=0.0):

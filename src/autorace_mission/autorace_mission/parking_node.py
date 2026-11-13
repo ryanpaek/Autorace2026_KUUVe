@@ -1034,7 +1034,9 @@ class ParkingV2:
             if self.pair_line is not None and side is not None:
                 # 짝을 알고 양옆 리모 옆면이 보이면: 옆면으로 구한 선에서 차체 중심이 칸 가운데 오면 멈춤.
                 # (차선에서 본 짝은 리모의 차선 쪽 끝면만 보여 깊이가 8~17cm 얕게 나온다 -> 깊이는 옆면으로)
-                if not p.get('center_on_sides', False):
+                if not p.get('center_on_sides', False) or self.side_line is None:
+                    # 11/13: center_on_sides인데 정중앙 선을 아직 못 구했으면(통로 폭 조건 등) 옆면 선으로.
+                    # 예전엔 None을 그대로 칸 선에 넣어 TURN에서 노드가 죽었음 (시뮬레이션: 1·3 간격 좁은 배치)
                     self.side_line = self._line_to_world(side, inp)
                 self.line = self.side_line
                 self.side_seen = True

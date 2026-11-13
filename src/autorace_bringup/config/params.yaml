@@ -252,7 +252,7 @@ parking_node:
     back_mm: 150.0                         # 막혔을 때 후진 거리 (예전 50: 5cm씩 4번 왔다갔다)
     switch_pause_sec: 0.5                  # 전진 <-> 후진 바꿀 때 멈춤
     center_on_sides: true                  # 양옆 리모가 보이면 그 정중앙 선을 따라 들어감 (예전엔 깊이에만 씀)
-    center_check: true                     # 끝에서 양옆 리모 정중앙에서 center_tol_mm 넘게 벗어났으면 45cm 빼서 정중앙 선 따라 다시 (최대 2번)
+    center_check: false                    # 11/13 캡틴: 끔 (경로 방식은 한 번에 넣기, 후진·재진입 안 함). true면 끝에서 양옆 리모 정중앙에서 center_tol_mm 넘게 벗어났으면 45cm 빼서 정중앙 선 따라 다시 (최대 2번)
     center_retries: 2
     center_tol_mm: 15.0                    # 시뮬레이션 18개: 끝 옆 오차 평균 19 -> 8mm, 최대 35 -> 13mm
     center_pullout_mm: 450.0
