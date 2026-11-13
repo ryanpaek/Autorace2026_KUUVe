@@ -277,6 +277,10 @@ class ParkingV2:
         self.corner_s = None       # 1번 상자 '2번 칸 쪽 + 차로 쪽' 모서리: 칸 가운데 선에서 차로 방향으로 몇 mm (보통 약 -410)
         self.corner_n = 0
         self.corner_hist = []
+        self.tgt_c5 = []           # 5번 중심 (차로 방향 s, 가까이서 잰 값)
+        self.tgt_pm = []           # 1·3번 중점 (가까이서 잰 값)
+        self.target_s = None       # 목표 = 1·3번 중심선 ∩ 5번 중심선 (칸 가운데 선 기준 s)
+        self.target_src = None
         self.turn_at = None        # 꺾을 때 (모서리 s, 라이다 s, 잰 횟수) — 실차 확인용
         self.turn_ref_used = None  # 꺾은 기준: 'corner' | 'pair'
         self.trigger = None        # 주차 모드 시작 이유: 'line' | 'pair'
@@ -469,6 +473,45 @@ class ParkingV2:
         if abs(sc - expect) > p['corner_gate_mm']:
             return None
         return sc
+
+    def _measure_target(self, inp):
+        """목표(2번 칸 가운데) 차로 방향 위치 = 5번 중심 (없으면 1·3번 중점). 가까이서 잰 값만, 중앙값 (11/13 캡틴).
+
+        상자 크기·간격과 무관: 리모든 넓은 상자든 실제로 잰 중심을 쓴다.
+        """
+        p = self.p
+        cx, cy, ux, uy = self.pair_line
+        vx, vy = self._lane_dir()
+        yaw = inp['yaw'] or 0.0
+        c, sn = math.cos(yaw), math.sin(yaw)
+        fx, fy = self.px + p['wheelbase_mm'] * c, self.py + p['wheelbase_mm'] * sn
+
+        def to_sd(x, y):
+            wx, wy = fx + x * c - y * sn, fy + x * sn + y * c
+            return (wx - cx) * vx + (wy - cy) * vy, (wx - cx) * ux + (wy - cy) * uy
+        # 5번: 뒷줄(깊이 + row_pitch), 차로 방향으로 칸 가운데 근처, 가까울 때
+        for x, y in inp.get('clusters_box', []):
+            if math.hypot(x, y) > p['target_max_range_mm']:
+                continue
+            s_, d_ = to_sd(x, y)
+            if abs(s_) <= p['target_gate_mm'] and abs(d_ - p['row_pitch_mm']) <= 250.0:
+                self.tgt_c5.append(s_)
+                break
+        # 1·3번 중점: 이번 프레임 짝, 1번(가까운 쪽)이 target_max_range_mm 안일 때
+        fp = find_pair(self._pair_src(inp), p['side_far_mm'], p['pair_dist_mm'], p['pair_tol_mm'])
+        if fp is not None:
+            mx, my, pvx, pvy = fp
+            near = (mx - pvx * p['pair_dist_mm'] / 2.0, my - pvy * p['pair_dist_mm'] / 2.0)
+            if math.hypot(*near) <= p['target_max_range_mm']:
+                s_, _ = to_sd(mx, my)
+                if abs(s_) <= p['target_gate_mm']:
+                    self.tgt_pm.append(s_)
+        n = p['corner_median_n']
+        for hist, src in ((self.tgt_c5, 'col5'), (self.tgt_pm, 'pair')):
+            if len(hist) >= p['corner_min_frames']:
+                h = sorted(hist[-n:])
+                self.target_s, self.target_src = h[len(h) // 2], src
+                return
 
     def _lidar_s(self, inp):
         """라이다 위치: 칸 가운데 선 기준 차로 방향 mm."""
@@ -687,6 +730,36 @@ class ParkingV2:
                     self.pair_line = tuple((a * n + b) / (n + 1) for a, b in zip(self.pair_line, line))
                 self.pair_n += 1
             if self.pair_line is not None and self.pair_n >= p['pair_min_frames']:
+                if p['turn_ref'] == 'target':
+                    # 11/13 캡틴: 목표 = 1·3번 중심선 ∩ 5번 중심선. 1번 꼭짓점은 '언제 꺾을지' 기준점:
+                    # 꼭짓점 -> 꺾기 시작점 거리 d = (목표 - 라이다 기준 앞당김) - 꼭짓점 을 매번 계산 (고정값 아님)
+                    self._measure_target(inp)
+                    sc = self._measure_corner(inp)
+                    if sc is not None:
+                        self.corner_hist.append(sc)
+                        self.corner_n += 1
+                        h = sorted(self.corner_hist[-p['corner_median_n']:])
+                        self.corner_s = h[len(h) // 2]
+                    if self.target_s is not None:
+                        # 라이다 기준 꺾기 시작점. 라이다 위치 값(front_axle_from_lidar_mm, 미측정)을 섞지 않는 상수라
+                        # 그 값이 틀려도 꺾는 실제 위치는 같다 (목표·라이다 위치가 같은 라이다 점에서 나옴)
+                        start = self.target_s - p['turn_lead_lidar_mm']
+                        ref = self.corner_s if self.corner_s is not None else 0.0
+                        d_from_ref = start - ref
+                        if self._lidar_s(inp) - ref >= d_from_ref - p['brake_mm']:
+                            cx, cy, ux, uy = self.pair_line
+                            vx, vy = self._lane_dir()
+                            self.pair_line = (cx + self.target_s * vx, cy + self.target_s * vy, ux, uy)
+                            self.line = self.pair_line
+                            self.turn_ref_used = 'target_' + self.target_src
+                            self.turn_at = (round(self.target_s), None if self.corner_s is None else round(self.corner_s),
+                                            round(d_from_ref), round(self._lidar_s(inp)))
+                            self._enter('PAUSE', inp)
+                            return self._out(0.0, 0.0)
+                        return self._out(inp['lane_v'], None)
+                    # 목표를 아직 못 잼: 짝 방식 꺾는 점을 15cm 넘게 지나면 짝 방식으로
+                    if self._ahead_of_front(self.pair_line, inp) > p['turn_lead_mm'] - 150.0:
+                        return self._out(inp['lane_v'], None)
                 if p['turn_ref'] == 'center1':
                     # 11/13: 1번 앞면 가운데 기준 (상자 크기와 무관). 2번 가운데 = 1번 가운데 + 칸 간격.
                     # 라이다가 1번 가운데 + turn_from_center1_mm 지나면 꺾기 (247 = 짝 방식 turn_lead 320과 같은 위치)
@@ -945,7 +1018,7 @@ class ParkingV2:
         """/parking/state에 실을 내용."""
         return {'phase': self.phase, 'done': self.phase == 'DONE', 'result': self.result,
                 'backs': self.backs, 'realigns': self.realigns, 'last_err': self.err,
-                'row': self.row, 'stop_how': self.stop_how, 'trigger': self.trigger, 'turn_ref': self.turn_ref_used, 'corner_s': None if self.corner_s is None else round(self.corner_s), 'corner_n': self.corner_n, 'turn_at': self.turn_at,
+                'row': self.row, 'stop_how': self.stop_how, 'trigger': self.trigger, 'turn_ref': self.turn_ref_used, 'corner_s': None if self.corner_s is None else round(self.corner_s), 'corner_n': self.corner_n, 'turn_at': self.turn_at, 'target_s': None if self.target_s is None else round(self.target_s), 'target_src': self.target_src, 'n_c5': len(self.tgt_c5), 'n_pm': len(self.tgt_pm),
                 'end_mm': None if self.end_d is None else round(self.end_d)}
 
 
@@ -964,12 +1037,15 @@ DEFAULTS = {
     'skip_wait_line': False,   # 11/12: true면 WAIT_LINE 건너뛰고 바로 FOLLOW(짝 찾기). 미션 노드 m4_direct와 같이 켬 (params)
     'follow_max_direct_mm': 3500.0,  # 바로 시작했을 때 짝 없이 이만큼 가면 멈춤. 도면: M4 시작 약 3.8m -> 꺾는 곳 6.56m, 차선 끝 8.13m
     'wait_blocked_before_pair': True,  # 짝 찾기 전 앞이 막히면 BLOCKED로 끝내지 말고 서서 기다림
-    'turn_ref': 'pair',        # 꺾는 기준: 'pair'(짝 중점) | 'corner'(1번 모서리, 리모 폭 가정) | 'center1'(1번 앞면 가운데, 11/13)
+    'turn_ref': 'pair',        # 꺾는 기준: 'pair'(짝 중점) | 'corner'(1번 모서리, 리모 폭 가정) | 'center1'(1번 앞면 가운데) | 'target'(1·3 중심선 ∩ 5번 중심선, 꼭짓점 기준 꺾기, 11/13)
     'turn_from_corner_mm': 140.0,  # corner: 라이다가 1번 모서리 선을 이만큼 지나면 꺾기.
                                #   = turn_lead 320 을 바꾼 값: 2번 가운데 = 모서리 + 410 (칸 52 - 리모 반폭 11), 앞바퀴 = 가운데 - 320,
                                #   라이다 = 앞바퀴 + 47 -> 모서리 + 137. 실차로 맞출 것
     'turn_from_center1_mm': 247.0,  # center1: 라이다가 1번 앞면 가운데를 이만큼 지나면 꺾기.
                                #   = 2번 가운데(1번 + 520) - turn_lead 320 + 라이다 47. 실차로 맞출 것
+    'turn_lead_lidar_mm': 273.0,  # target: 라이다가 목표 이만큼 전에 오면 꺾기 (= turn_lead 320 - 라이다 47, 실차로 맞출 것)
+    'target_max_range_mm': 1300.0,  # target: 5번·1번이 라이다에서 이 안일 때 잰 값만 (멀면 일부만 보임)
+    'target_gate_mm': 250.0,   # target: 짝으로 예상한 칸 가운데에서 차로 방향으로 이 안만
     'corner_min_pts': 4,       # 모서리 잴 때 필요한 차로 쪽 면 점 수
     'corner_gate_mm': 250.0,   # 모서리가 짝으로 예상한 위치(1번 중심 + 110)에서 이보다 멀면 버림 (11/13: 150 -> 250, 칸 폭만 한 상자)
     'corner_window_mm': 300.0, # 1번 중심에서 차로 방향으로 이 안의 점만 1번으로 봄 (11/13: 260 -> 300)

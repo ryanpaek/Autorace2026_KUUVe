@@ -209,6 +209,7 @@ parking_node:
     pair_trigger: true                     # 흰 선을 못 봐도 오른쪽 1·3번 짝을 연속으로 보면 주차 시작 (주차 표지/armed일 때만)
     pair_trigger_frames: 3
     pair_dist_mm: 1040.0                   # 정차 리모 두 대 사이 = 칸 2개 (500 + 20 + 500 + 20)
+    pair_tol_mm: 230.0                     # 11/13: 150 -> 230. 실차 시험 상자 1·3번 간격 94cm (리모면 104)가 범위 끝이었음
     turn_lead_mm: 320.0                    # 칸 가운데가 앞바퀴보다 이만큼 앞일 때 꺾기 (회전반경 530 - 축거 210)
     straighten_yaw_deg: 87.0               # 이만큼 돌면 바퀴 펴기 (정지 후 2~4도 더 돎, calib 3번)
     max_realign: 0                         # 재정렬 최대 횟수 (0 = 끔). 11/12: 2 -> 0 (만점 자리에서도 후진·재진입 반복, 고쳐지지도 않음)
@@ -225,7 +226,9 @@ parking_node:
     skip_wait_line: true                   # 11/12: 흰 선 안 기다리고 바로 1·3번 짝 찾기 (mission_node m4_direct와 같이 켬/끔)
     follow_max_direct_mm: 3500.0           # 짝 없이 이만큼 가면 멈춤 (도면: M4 시작 ~3.8m, 꺾는 곳 ~6.56m, 차선 끝 8.13m)
     wait_blocked_before_pair: true         # 짝 찾기 전 앞이 막히면 주차를 끝내지 말고 서서 기다림
-    turn_ref: corner                       # 11/12: 꺾는 기준 = 1번 상자 '2번 칸 쪽 + 차로 쪽' 모서리 (pair = 예전 짝 중점 평균)
+    turn_ref: target                       # 11/13: 목표 = 1·3번 중심선 ∩ 5번 중심선(가까이서 잰 중앙값), 1번 꼭짓점 기준으로 꺾는 시점 계산.
+                                           #   상자 크기·간격과 무관 (corner = 리모 폭 가정, pair = 예전 짝 중점 평균)
+    turn_lead_lidar_mm: 273.0              # target: 라이다가 목표 27.3cm 전에 오면 꺾기 (= turn_lead 320 - 라이다 47). 실차로 맞출 것
     turn_from_corner_mm: 140.0             #   라이다가 모서리 선을 이만큼 지나면 꺾기 (turn_lead 320 환산. 실차로 맞출 것)
     stop_from_col5_mm: 220.0               # 11/12: 꺾은 뒤 앞범퍼 -> 5번 22cm면 정지 (리모가 칸 가운데면 칸 끝 선 약 6cm 전)
     publish_lane_cfg: false                # 11/12: 차선 오프셋은 미션 노드가 보냄 (m4_target_offset_mm). 둘이 보내면 1초마다 덮어씀

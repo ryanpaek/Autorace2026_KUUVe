@@ -493,3 +493,28 @@ def test_mission_sends_parking_lane_offset():
     fsm = MissionFSM({'start_state': 'M4_PARKING', 'm4_direct': True, 'm4_target_offset_mm': 50.0})
     cmd = fsm.step(Inputs(t=0.0, dist_mm=0.0))
     assert cmd.source == 'parking' and cmd.lane.get('target_offset_mm') == 50.0
+
+
+def test_target_turn_parks_and_ignores_lidar_mount_error():
+    """11/13 target: 목표 = 1·3번 중심선 ∩ 5번 중심선. 한 번에 주차, 라이다 위치 값이 5cm 틀려도 꺾는 위치 같음."""
+    ov = dict(NEW_1112, turn_ref='target', pair_tol_mm=230.0)
+    log = []
+    n_in, hit, res = drive([1, 3, 4, 5, 6], 2, ov, fov_deg=210.0, log=log)
+    assert (n_in, hit, res) == (4, False, 'PARKED')
+    assert any(str(i.get('turn_ref', '')).startswith('target_') for i in log)
+    orig = pn.ParkingV2._enter
+
+    def turn_px(o):
+        seen = []
+
+        def rec(self, phase, inp):
+            if phase == 'PAUSE' and not seen:
+                seen.append(self.px)
+            orig(self, phase, inp)
+        pn.ParkingV2._enter = rec
+        try:
+            drive([1, 3, 4, 5, 6], 2, o, fov_deg=210.0)
+        finally:
+            pn.ParkingV2._enter = orig
+        return seen[0]
+    assert abs(turn_px(ov) - turn_px(dict(ov, front_axle_from_lidar_mm=-97.0))) <= 20.0
