@@ -518,3 +518,40 @@ def test_target_turn_parks_and_ignores_lidar_mount_error():
             pn.ParkingV2._enter = orig
         return seen[0]
     assert abs(turn_px(ov) - turn_px(dict(ov, front_axle_from_lidar_mm=-97.0))) <= 20.0
+
+
+# ---------------------------------------------------------------- 11/13 캡틴 경로 (path)
+PATH_1113 = dict(NEW_1112, turn_ref='path', pair_tol_mm=230.0, stop_from_col5_mm=300.0, stop_turn_deg=85.0,
+                 stop_hard_mm=200.0)
+
+
+def test_path_parks_with_settle_and_move_to_q():
+    """인식 -> SETTLE(정지) -> MOVE_Q -> PAUSE -> TURN -> 앞범퍼 R에서 정지, 칸 안, 재정렬 없음."""
+    log, out = [], {}
+    n_in, hit, res = drive([1, 3, 4, 5, 6], 2, PATH_1113, fov_deg=210.0, log=log, out=out)
+    assert (n_in, hit, res) == (4, False, 'PARKED')
+    phases = [i['phase'] for i in log]
+    for ph in ('SETTLE', 'MOVE_Q', 'PAUSE', 'TURN'):
+        assert ph in phases
+    assert phases.index('SETTLE') < phases.index('MOVE_Q') < phases.index('PAUSE') < phases.index('TURN')
+    assert str(log[-1]['turn_ref']).startswith('path_') and log[-1]['realigns'] == 0
+    x, y, th = out['pose']
+    assert y + (105.0 + 161.0) * math.sin(th) > -620.0 + 30.0        # 앞범퍼가 칸 끝 선 3cm 이상 앞
+
+
+def test_path_move_q_reverses_when_past_q():
+    """Q를 지나쳐 섰으면 후진으로 돌아온다."""
+    logic = pn.ParkingV2(dict(pn.DEFAULTS, **PATH_1113))
+    logic.pair_line = (0.0, -600.0, 0.0, -1.0)                       # 칸 가운데 선: x = 0, 깊이 -y
+    logic.q_s = -529.0
+    logic.px, logic.py = -300.0, 0.0                                 # 뒷바퀴 s = -300 -> Q보다 229mm 지나침
+    logic.phase, logic.t_phase, logic.d_phase = 'MOVE_Q', 0.0, 0.0
+    v, k, info = logic.step({'t': 0.1, 'dist_mm': 0.0, 'yaw': 0.0, 'lane_v': 0.2, 'lane_w': 0.0, 'stoplines_mm': [],
+                             'end_lines_mm': [], 'clusters': [], 'blocked': False})
+    assert info['phase'] == 'MOVE_Q' and v < 0 and k == 0.0
+
+
+def test_path_done_logs_once_flag():
+    """주차 완료 로그는 한 번만 (노드가 done_logged로 막음)."""
+    logic = pn.ParkingV2(dict(pn.DEFAULTS))
+    assert logic.done_logged is False
