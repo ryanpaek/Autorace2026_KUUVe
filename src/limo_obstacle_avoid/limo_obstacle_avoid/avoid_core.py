@@ -123,6 +123,18 @@ class AvoidParams:
     edge_trust_k: float = 0.0         # 꺼 둠: 0.3·0.5면 노란 실선까지 최소 여유 12.5 -> 3.5 cm (시뮬레이션), 조향 반대 횟수는 그대로. 회피 조향이 이미 안쪽으로 최대 곡률의 이만큼 넘게 꺾고 있으면 노란선 지킴(끝까지 꺾기)이 안 끼어듦. 0 = 예전
     yellow_cam_guard: bool = True     # 11/14: 카메라(/lane/status)가 노란 실선 이탈 위험을 알리면 즉시 안쪽으로 최대 조향
     yellow_cam_offset_mm: float = 70.0
+    # 11/14 밤 실차 '차로 바꾸는 중 좌우로 6~7번 지그재그': 카메라 노란선 지킴이 카메라 행(앞 0.55 m)의 옆 위치로 판단해
+    #   바깥 차로로 비스듬히 들어갈 때(차체는 아직 안쪽) 끝까지 안쪽으로 꺾고 -> 회피 조향이 다시 바깥으로 -> 반복.
+    #   시뮬레이션(가짜 카메라): 20판 조향 뒤집힘 60번 중 노란선 지킴 <-> 회피 29번.
+    #   true: 카메라 선으로 '차체' 앞 모서리 위치·방향을 계산해 노란선(차로 반폭)에 실제로 닿거나 edge_look 안에 닿을 때만 지킴
+    yellow_cam_body: bool = True
+    yellow_cam_half: float = 0.25     # 차로 반폭 (선 사이 500 mm)
+    # 11/14 밤: 차선 노드 조향 섞기는 차가 목표 차로 방향으로 거의 펴진 뒤(이 각 안)에만. 비스듬한 채 섞으면
+    #   차선 노드(지금 보이는 차로 중심으로 감)와 회피 조향(목표 차로 중심)이 번갈아 이김. 0 = 예전(각 상관없이)
+    lane_blend_max_psi_deg: float = 8.0
+    # 11/14 밤: 차로를 옮기는 중(목표 차로 중심 밖)에는 카메라로 위치를 고치지 않음 (정한 차로로 끝까지 감, 도착하면 다시 고침).
+    #   옮기는 중엔 카메라 행이 이미 옆 차로를 봐서 고침이 위치를 앞뒤로 흔들었다. false = 예전 (반만 반영)
+    lane_fix_commit: bool = True
     better_margin: float = 0.3        # 옮길 차선이 지금보다 이만큼 더 비어야 옮김
     rechoose_dy: float = 0.12         # 차로를 옮기기 시작했어도 원래 차로 중심에서 이만큼 안이면, 새로 확정된
                                       #   장애물로 다른 차로가 더 비어 보일 때 목표를 바꿈 (켜자마자 고른 쪽이 다음 줄에서 막힘 방지)
@@ -188,6 +200,7 @@ class AvoidParams:
     stop_dist: float = 0.20           # 11/15 실차 요청 0.30 -> 0.20 (장애물이 복잡하면 전혀 못 감). 지금 조향대로 이만큼 더 가면 차체가 부딪힐 때만 정지(→ 후진). 옆 차로·옆에 붙은 장애물은 안 봄
     # 11/12: 막혔을 때 바로 서서 후진하지 말고 먼저 조향을 끝까지 꺾어 빠져 본다. 끝까지 꺾은 길로도
     #   squeeze_min_dist 안에서 부딪히면(장애물이 0.2 m까지 붙음) 그때만 서고 예전처럼 후진·탈출
+    squeeze_target_only: bool = True  # 11/14 밤 실차 요청 '차로를 정했으면 그 차로로': 막혀 끝까지 꺾을 때 정한 차로 쪽으로만 (반대쪽 빈 공간으로 안 감, 목표 안 바꿈)
     squeeze: bool = True
     squeeze_min_dist: float = 0.10    # 끝까지 꺾은 길로 이만큼 더 가도 안 부딪혀야 꺾어서 감 [m]. 11/12 밤 0.2 -> 0.1 (후진 없앰)
     squeeze_speed: float = 0.30   # 끝까지 꺾어 빠질 때 속도. 11/12 0.12 -> 0.30
@@ -853,6 +866,9 @@ class AvoidPlanner:
         # 11/12: 차로를 옮기는 중(목표 차로 중심 밖)이거나 10~20°로 틀어져 있어도 양쪽 선이 잡히면 반만 반영 (늘 차선을 봄).
         #   20° 넘으면 안 씀. 다른 차로를 본 것 같으면(gate) 안 씀은 그대로
         changing = abs(self.pose.y - self.center(self.target)) >= p.reach_tol
+        if p.lane_fix_commit and (self.target != self.nearest_lane(self.pose.y)
+                                  or (changing and abs(math.degrees(self.pose.psi)) > p.lane_blend_max_psi_deg)):
+            return False                               # 정한 차로로 옮기는 중: 위치 고치지 않음 (도착하면 다시)
         if deg > (p.lane_fix_change_deg if p.lane_fix_while_changing else p.lane_fix_max_deg):
             return False
         scale = p.lane_fix_change_scale if (changing or deg > p.lane_fix_max_deg) else 1.0
@@ -1311,7 +1327,8 @@ class AvoidPlanner:
             elif p.creep_search and t - self.block_t0 >= p.creep_search_after:
                 toward = 1.0 if self.center(self.target) - y >= 0 else -1.0
                 lim = math.radians(p.creep_search_deg)
-                for side in (toward, -toward):
+                sides = (toward,) if (p.squeeze_target_only and self.target != self.nearest_lane(y)) else (toward, -toward)
+                for side in sides:                      # 11/14 밤: 차로를 옮기는 중이면 정한 차로 쪽으로만
                     if side * psi > lim:                # 이미 그쪽으로 30° 넘게 틀어짐
                         continue
                     if side * y > 0.5 * p.lane_width:
@@ -1441,7 +1458,10 @@ class AvoidPlanner:
         mh = math.radians(p.max_heading_deg)
         first = self._recover_side(obs)
         now = self.nearest_lane(self.pose.y)
-        for side in (first, -first):
+        sides = (first, -first)
+        if p.squeeze_target_only and self.target != now:
+            sides = (1 if self.target > now else -1,)    # 정한 차로 쪽으로만
+        for side in sides:
             if now + side not in self.lanes and self.target == now:
                 continue                               # 바깥 차로에서 바깥쪽으로는 안 꺾음 (트랙 밖)
             if side * self.pose.psi > mh:              # 이미 그쪽으로 많이 틀어짐 -> 더 꺾으면 차로 밖
@@ -1527,6 +1547,8 @@ class AvoidPlanner:
         ln = self.lane_last
         self.blend_used = False
         near_lane = abs(y - self.center(self.target)) < max(p.reach_tol, p.lane_blend_tol)
+        if p.lane_blend_max_psi_deg > 0 and abs(math.degrees(psi)) > p.lane_blend_max_psi_deg:
+            near_lane = in_lane = False                # 아직 비스듬함: 회피 조향으로 끝까지 (차선 노드와 번갈아 이기지 않게)
         if (p.lane_keep_blend > 0 and (in_lane or near_lane) and ln and t is not None and self.lane_t is not None
                 and t - self.lane_t <= p.lane_fresh_sec and ln.get('status') in ('BOTH', 'L', 'R')
                 and not ln.get('low_conf')
@@ -1550,6 +1572,8 @@ class AvoidPlanner:
                 and t - self.lane_t <= p.lane_fresh_sec):
             return 0
         yg = ln.get('yellow_guard')
+        if p.yellow_cam_body:
+            return self._cam_yellow_body(ln, yg)
         if yg == 'L':
             return 1
         if yg == 'R':
@@ -1562,6 +1586,35 @@ class AvoidPlanner:
             return 1
         if lr.get('color') == 'yellow' and not lr.get('dashed', False) and float(off) > p.yellow_cam_offset_mm:
             return -1
+        return 0
+
+    def _cam_yellow_body(self, ln, yg):
+        """카메라 선으로 본 차체 앞 모서리가 노란 실선(차로 반폭)에 닿았거나 edge_look 안에 닿으면 +1/-1, 아니면 0.
+        차로 기준 차 위치 y_l = -off cos h + row sin h, 차 방향 psi_l = -h (lane_fix 와 같은 식)."""
+        p = self.p
+        off, h = ln.get('offset_mm'), ln.get('heading_rad')
+        ll, lr = ln.get('line_left') or {}, ln.get('line_right') or {}
+        left_y = ll.get('color') == 'yellow' and not ll.get('dashed', False)
+        right_y = lr.get('color') == 'yellow' and not lr.get('dashed', False)
+        if off is None or h is None:
+            # 위치를 모르면 차선 노드 지킴 표시만, 그쪽으로 향하고 있을 때만
+            if yg == 'L' and self.pose.psi >= 0.0:
+                return 1
+            if yg == 'R' and self.pose.psi <= 0.0:
+                return -1
+            return 0
+        h = float(h)
+        psi_l = -h
+        y_l = -float(off) / 1000.0 * math.cos(h) + p.lane_row * math.sin(h)
+        lim = p.yellow_cam_half - p.edge_margin
+        for side, is_y in ((1, left_y or yg == 'L'), (-1, right_y or yg == 'R')):
+            if not is_y:
+                continue
+            out = side * psi_l                             # + 면 노란선 쪽으로 향함
+            corner = side * y_l + p.robot_half_width * math.cos(psi_l) + p.robot_front * max(0.0, math.sin(out))
+            pred = corner + p.edge_look * max(0.0, math.sin(out))
+            if corner > lim + 0.02 or (out > math.radians(2.0) and pred > lim):
+                return side
         return 0
 
     def _edge_danger(self, y, psi):

@@ -179,6 +179,14 @@ class ObstacleNode(Node):
         # 지금 몇 차선인지 늘 (회피 중: 회피 노드 / 그 밖: 차선 노드 선 종류). 알 때만, 바뀌거나 1초마다
         self.lane_pub = self.create_publisher(String, '/m7/lane', 10)
         self.lane_pub_last = (None, 0.0)
+        # 11/14 밤 확인용 실시간 토픽 2개 (M7 동안 10 Hz, 문자열 앞에 순번 #n):
+        #   /m7_1_now_lane    지금 몇 차선인지 + 어떻게 알았나
+        #   /m7_2_target_lane 어느 차선을 목표로 정했나 + 이유 (회피 노드 차로별 판단 / 코너 미리보기)
+        #   보기: ros2 topic echo /m7_1_now_lane  /  ros2 topic echo /m7_2_target_lane
+        self.m7_now_pub = self.create_publisher(String, '/m7_1_now_lane', 10)
+        self.m7_tgt_pub = self.create_publisher(String, '/m7_2_target_lane', 10)
+        self.m7_seq = 0
+        self.m7_pub_t = 0.0
         self.last_exit = None        # 마지막 /m7/exit_lane (M2 시작 때 다시 보냄)
         self.param_cli = self.create_client(
             SetParameters, g_name(g('m7_avoid_node').value) + '/set_parameters')
@@ -384,6 +392,11 @@ class ObstacleNode(Node):
                 ln['state'] = self.mstate
                 self.lane_pub.publish(String(data=json.dumps(ln, ensure_ascii=False)))
                 self.lane_pub_last = (key, now)
+        if (self.mstate == 'M7_OBSTACLE' or self.link.phase in ('armed', 'running')) and now - self.m7_pub_t >= 0.1:
+            self.m7_pub_t = now
+            self.m7_seq += 1
+            self.m7_now_pub.publish(String(data=f'#{self.m7_seq} {self.link.now_text()}'))
+            self.m7_tgt_pub.publish(String(data=f'#{self.m7_seq} {self.link.target_text()}'))
         rep = self.link.pop_report()
         if rep is not None:
             self.last_exit = rep

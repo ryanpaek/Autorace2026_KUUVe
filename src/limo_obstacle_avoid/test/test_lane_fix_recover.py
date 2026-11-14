@@ -34,6 +34,7 @@ def test_lane_fix_pulls_y_to_camera():
 def test_lane_fix_uses_nearest_lane_center():
     """오른쪽 차로(-0.52)에 있고 카메라상 차로 중앙 → y가 -0.52 쪽으로."""
     pl = running(-0.47)
+    pl.target = -1                                # 오른쪽 차로에 있음 (11/14 밤: 옮기는 중이면 안 고침)
     for _ in range(60):
         pl.lane_fix(lane(0.0))
     assert abs(pl.pose.y - (-0.52)) < 0.005
@@ -311,6 +312,7 @@ def test_lane_fix_half_while_changing_and_up_to_20deg():
     a = running(y0=0.0)
     a.lane_fix(lane(-60.0), 0.0)                  # 같은 차로, 똑바로 -> 전부
     b = running(y0=0.0)
+    b.p.lane_fix_commit = False                   # 예전 동작 (11/14 밤부터 기본: 옮기는 중엔 안 고침)
     b.target = 1                                  # 1차선으로 옮기는 중
     b.lane_fix(lane(-60.0), 0.0)
     assert b.pose.y == pytest.approx(0.5 * a.pose.y, rel=0.05) and b.pose.y > 0

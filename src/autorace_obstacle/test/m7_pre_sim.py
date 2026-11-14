@@ -71,7 +71,7 @@ def make_layout(rnd, x_range=(0.0, 1.0), side_p=0.5):
 
 
 def run(cars, seed, pre=True, turn_deg=60.0, map_err_mm=0.0, delay=0, noise=0.01, lidar_yaw_deg=0.0,
-        real_r=cs.R, odom_scale=1.0, lane_dy=0.0, link_kw=None):
+        real_r=cs.R, odom_scale=1.0, lane_dy=0.0, link_kw=None, cam=False, avoid_kw=None):
     """real_r: 실제 코너 반경 (모형 640과 다를 때), lidar_yaw_deg: 라이다 방향 오차, lane_dy: 차선 주행이 중심선에서 옆으로 치우침."""
     rnd = random.Random(seed)
     rects = sc.layout_rects(cars, 0.52, jitter=0.03, seed=seed)
@@ -80,13 +80,34 @@ def run(cars, seed, pre=True, turn_deg=60.0, map_err_mm=0.0, delay=0, noise=0.01
     cs.R = real_r                                   # 경로 모형만 바꿈 (m7_link 모형은 640 그대로)
     try:
         return _run(cars, rects, segs, rnd, seed, pre, turn_deg, map_err_mm, delay, noise, lidar_yaw_deg,
-                    odom_scale, lane_dy, link_kw or {})
+                    odom_scale, lane_dy, link_kw or {}, cam, avoid_kw or {})
     finally:
         cs.R = R0
 
 
+def fake_lane_status(car, rnd, lw=0.52, row=0.55, ld=0.6):
+    """차선 노드 /lane/status 흉내 (3차선 직선 구간): 카메라 행(기준점 앞 row)이 들어 있는 차로를 본다.
+    offset_mm = 그 차로 중심의 옆 위치(차 기준, 왼쪽 +), heading_rad = 차로 방향 - 차 방향, kappa = 그 차로 중심 pure pursuit,
+    lane_id = 그 차로, 선 종류 = 바깥 차로면 바깥쪽 노란 실선. 잡음: 옆 15 mm, 방향 1°."""
+    yr = car.y + row * math.sin(car.yaw)
+    lane = max(-1, min(1, int(round(yr / lw))))
+    c = lane * lw
+    psi = car.yaw
+    off = (c - yr) * math.cos(psi) + rnd.gauss(0, 0.015)
+    h = -psi + math.radians(rnd.gauss(0, 1.0))
+    dy = c - car.y
+    xr = ld * math.cos(psi) + dy * math.sin(psi)
+    yrr = -ld * math.sin(psi) + dy * math.cos(psi)
+    k = 2.0 * yrr / (xr * xr + yrr * yrr)
+    yellow = {'color': 'yellow', 'dashed': False}
+    white = {'color': 'white', 'dashed': True}
+    st = 'BOTH' if abs(math.degrees(psi)) < 25.0 else ('L' if psi < 0 else 'R')
+    return {'status': st, 'offset_mm': off * 1000.0, 'heading_rad': h, 'kappa': max(-1.9, min(1.9, k)),
+            'lane_id': lane, 'line_left': yellow if lane == 1 else white, 'line_right': yellow if lane == -1 else white}
+
+
 def _run(cars, rects, segs, rnd, seed, pre, turn_deg, map_err_mm, delay, noise, lidar_yaw_deg, odom_scale, lane_dy,
-         link_kw):
+         link_kw, cam=False, avoid_kw=None):
     u0 = 0.06
     fx, fy, fh = cs.path_point(u0)
     car = sc.SimCar(fx - ts.WHEELBASE * math.cos(fh), fy - ts.WHEELBASE * math.sin(fh), fh)
@@ -95,6 +116,9 @@ def _run(cars, rects, segs, rnd, seed, pre, turn_deg, map_err_mm, delay, noise, 
                       pre_enable=pre, pre_enable_turn_deg=turn_deg, **link_kw)
     link = M7Link(lp)
     pl, p = None, team_params()
+    for kk, vv in (avoid_kw or {}).items():
+        setattr(p, kk, vv)
+    cam_q = []
     a_min, a_inc = -math.pi, 2 * math.pi / ts.N_BEAM
     dt, t, dist = 0.05, 0.0, 0.0
     q = [(0.0, 0.0)] * delay
@@ -136,6 +160,10 @@ def _run(cars, rects, segs, rnd, seed, pre, turn_deg, map_err_mm, delay, noise, 
             handover_at = t + 0.10
         if pl is not None:
             pl.pose.update(car.odom_x, car.odom_y, car.imu_yaw, forward=last_v >= 0.0)
+            if cam and car.x > 0.0 and k % 2 == 0:              # 카메라 10 Hz, 0.1 s 늦게
+                cam_q.append(fake_lane_status(car, rnd))
+                if len(cam_q) > 1:
+                    pl.lane_fix(cam_q.pop(0), t)
             v_a, w_a = pl.step(t)
             link.on_avoid_active(True, t)
             if ev['first_target'] is None and pl.target != 0:

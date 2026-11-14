@@ -54,6 +54,12 @@ DEFAULT_PARAMS = {
     'stop_target_mm': 150.0,     # 11/15 저녁 실차: 100으로도 정지선 직전 -> 150. 실행 중 ros2 param set /mission_node stop_target_mm 으로 바로 조정
     'm3_stop_target_mm': 250.0,  # 11/15 저녁 실차 요청: M7 직전 횡단보도는 여유롭게 25 cm 앞 (신호등은 stop_target_mm). 0이면 stop_target_mm
     'stop_passed_mm': 120.0,
+    # 11/14 밤 실차 '횡단보도를 다 지난 다음 섬' (pretrack 뒤에도): 정지선 카메라·도면 위치가 다 틀려도 넘지 않게
+    #   지그재그 시작선(카메라로 지난 순간)부터 달린 거리로 정지선을 센다. 도면: 지그재그 시작선 -> 정지선 1983 mm
+    #   이 거리 - m3_zz_cap_target_mm - stop_brake_mm 를 달리면 다른 판단과 상관없이 정지 (넘기 전 마지막 안전장치)
+    'm3_zz_cap': True,
+    'm3_zz_to_stop_mm': 1983.0,  # 도면 (지그재그 시작선 앞 가장자리 -> 정지선 앞 가장자리). 도면 위치가 있으면 그 값으로 다시 계산
+    'm3_zz_cap_target_mm': 100.0,  # 이 안전장치로 설 때 정지선 앞 목표 (보통은 m3_stop_target_mm 으로 먼저 섬)
     'm3_pretrack': True,         # 11/15 밤: 지그재그(M6) 중에 횡단보도 정지선을 미리 재 둠 (M3 시작 때는 이미 카메라 사각)     # 11/15 저녁: 정지선을 이만큼 넘게 지났다고 보이면(남은 거리 < -이것) 그 자리에서 섬 (다음 흰 선=끝선까지 가지 않게)
     'stop_brake_mm': 30.0,       # TODO 실측: approach_speed에서 0 명령 후 밀려가는 거리
     'stop_lost_ok_mm': 400.0,    # 정지선이 카메라에서 사라진 뒤 오도메트리로 이어 가는 한계
@@ -84,8 +90,8 @@ DEFAULT_PARAMS = {
     # M8 라바콘 (obstacle 노드의 ConeFollower). false면 위 cones_len_mm 동안 차선 주행으로 통과
     'cones_source_ready': False,
     'cones_enter_before_mm': 0.0,    # 도면 위치 예비: 시작선 이만큼 앞(앞바퀴)에서 라바콘 모드 (1순위는 카메라로 선 통과)
-    'cones_enter_cone_mm': 400.0,    # 11/15 저녁: 150 -> 400 (15 cm면 지연 때문에 콘에 닿은 뒤 바뀜 -> 들이받음). 그 전까지는 차선
-    'cones_corner_close_mm': 250.0,  #   코너를 '다 돎'으로 보기 전이라도 70° 넘게 돌았고 콘이 이 안이면 콘 모드
+    'cones_enter_cone_mm': 150.0,    # 11/14 밤: 400 -> 150 원복 (d4d4c70 라바콘 변경 되돌림, 실차 '라바콘 인식 못 함')
+    'cones_corner_close_mm': 0.0,    # 11/14 밤: 250 -> 0 = 끔 (d4d4c70 원복). >0이면 70° 넘게 돌았고 콘이 이 안이면 콘 모드
     'cones_corner_min_deg': 70.0,
     'cones_approach_mm': 1550.0,     # 경로 지도 없을 때: M2 끝 -> 라바콘 모드 (도면 1854 - 300)
     # 11/11 코너 지킴: M2 끝 -> 좌하단 코너(90°) -> 시작선(코너 끝 + 240 mm). 도면 위치가 앞서거나 코너에서 콘이 보이면
@@ -131,7 +137,7 @@ DEFAULT_PARAMS = {
     'm8_corner_turn_deg': 75.0,      # 0 = 안 씀
     'm8_corner_straight_deg': 4.0,
     'm8_corner_window_mm': 150.0,
-    'm8_corner_fail_mm': 100.0,      # 11/15 저녁 300 -> 100. 도면상 시작선 + 이만큼인데 코너를 못 알아채면 예전 규칙 (300이면 콘 사이에 이미 들어감)
+    'm8_corner_fail_mm': 300.0,      # 11/14 밤: 100 -> 300 원복 (d4d4c70 되돌림). 예전 메모: 11/15 저녁 300 -> 100. 도면상 시작선 + 이만큼인데 코너를 못 알아채면 예전 규칙 (300이면 콘 사이에 이미 들어감)
     'cones_zone_mm': 2700.0,         # 라바콘 모드 최대 거리 (구간 2100 + 진입 300 + 여유)
     'cones_end_after_mm': 150.0,     # 끝선(앞바퀴)을 이만큼 지나면 obstacle 노드 판단과 상관없이 복귀
     'cones_handover_mm': 400.0,      # 차선을 다시 잡길 기다리는 최대 거리 (끝선 뒤 바로 코너)
@@ -385,6 +391,8 @@ class MissionFSM:
             self.m8_inner_mode = None
         if state == 'M6_ZIGZAG':
             self.pre_stop = None
+            self.zz_at = None
+            self.zz_capped = False
             self.ped_seen = False                        # M6~M3에서 본 보행자 표지 (상태가 바뀌면 투표는 지워지므로 따로 기억)
         if state == 'M1_TRAFFIC':
             use = (self.p.get('m1_corner_preview', True) and self.p.get('m7_corner_done_deg', 85.0) > 0
@@ -490,6 +498,15 @@ class MissionFSM:
         cfg = {'mode': mode, 'speed': round(float(speed), 3)}
         cfg.update(kw)
         return cfg
+
+    def _zz_cap(self, inp: Inputs) -> bool:
+        """지그재그 시작선부터 달린 거리로 정지선 직전인가 (m3_zz_cap). 기준점이 없으면 False."""
+        at = getattr(self, 'zz_at', None)
+        if not self.p.get('m3_zz_cap', True) or at is None:
+            return False
+        a, b = self._rp('m6_zigzag_line'), self._rp('m3_stop_line')
+        total = (b - a) if (a is not None and b is not None) else self.p['m3_zz_to_stop_mm']
+        return inp.dist_mm - at >= total - self.p['m3_zz_cap_target_mm'] - self.p['stop_brake_mm']
 
     def _crosswalk_near(self, inp: Inputs) -> bool:
         lines = inp.lane.get('crosswalk_lines_mm') or []
@@ -624,6 +641,9 @@ class MissionFSM:
             if not at:
                 return Command('lane', self._lane(self.p['base_speed']))
             self._sub('zigzag', inp, f'start line ({self.line.how or "route/distance"})')
+            # 정지선 안전장치 기준점: 카메라로 선을 지난 순간(가장 정확). 도면 위치로 지난 것도 씀, 거리로만 지난 것은 안 씀
+            self.zz_at = inp.dist_mm if self.line.how in ('camera', 'route') else None
+            self.zz_how = self.line.how
         self._remember_ped(inp)
         # 11/15 밤 실차 'M7 전 횡단보도를 지나서 섬 -> 다음 코너 탈선': M3는 정지선 266 mm 앞(지그재그 끝)에서 시작하는데
         #   카메라는 앞바퀴 350 mm 앞부터 보인다 -> M3가 시작할 때 정지선은 이미 사각이라 다음 흰 선(막대·끝선)을 잡았다.
@@ -638,6 +658,10 @@ class MissionFSM:
                 if self.pre_stop.should_stop(inp):
                     self._next(inp, 'stop line close (pre-tracked in zigzag)')
                     return Command('stop', self._lane(0.0))
+        if self._zz_cap(inp):
+            self.zz_capped = True
+            self._next(inp, f'stop line by zigzag-line distance {inp.dist_mm - self.zz_at:.0f}mm ({self.zz_how})')
+            return Command('stop', self._lane(0.0))
         _, dz = self._since(inp, sub=True)
         end = self._past(inp, 'm6_zigzag_end')
         if (dz >= self.p['zigzag_len_mm']) if end is None else end:
@@ -653,16 +677,25 @@ class MissionFSM:
             sign = self._vote(inp, 'pedestrian')
             early = getattr(self, 'ped_seen', False)
             pre = getattr(self, 'pre_stop', None) is not None
-            if sign or early or pre or self._stop_near(inp, 'm3_stop_line'):
+            cap = getattr(self, 'zz_capped', False) or self._zz_cap(inp)
+            if sign or early or pre or cap or self._stop_near(inp, 'm3_stop_line'):
                 self.log.append('M3 stop armed by ' + ('pedestrian sign' if sign else
                                                        'pedestrian sign seen in M6' if early else 'route/crosswalk'))
                 self._arm_stop(inp, 'm3_stop_line')
             else:
                 return Command('lane', self._lane(p['slow_speed']))    # 지그재그 서행 그대로 (재출발부터 일반 속도)
         if self.sub == 'approach':
-            if not self.stop.should_stop(inp):
+            capped = getattr(self, 'zz_capped', False) or self._zz_cap(inp)
+            normal = self.stop.should_stop(inp)
+            if not normal and not capped:
                 return Command('lane', self._lane(p['approach_speed']))
-            self._anchor(self.stop_line_name, self.stop, self.stop.remaining(inp))
+            if normal:
+                self._anchor(self.stop_line_name, self.stop, self.stop.remaining(inp))
+            else:
+                self.log.append(f'M3 stop by zigzag-line distance {inp.dist_mm - self.zz_at:.0f}mm '
+                                f'(stop line estimate {self.stop.how}: {self.stop.remaining(inp)})')
+            self.zz_capped = False
+            self.zz_at = None                       # 한 번 섰으면 끝 (재출발 뒤 다시 서지 않게)
             self._sub('stopped', inp)
         if self.sub == 'stopped':
             t, _ = self._since(inp, sub=True)
@@ -797,7 +830,7 @@ class MissionFSM:
                 self.log.append(f'{who} corner done (IMU {math.degrees(cw.turned):.0f}deg)')
         # 11/15 저녁 실차 '커브 끝나고 라바콘을 그냥 들이받음': 코너를 IMU로 '다 돎(75° + 다시 직진)'이 늦게 나면
         #   시작선 + 300 mm까지 콘 모드에 안 들어갔다 -> 70° 넘게 돌았고 차로 안 콘이 cones_corner_close_mm 안이면 들어감
-        late_close = (cw.active and not cw.done and ahead is not None
+        late_close = (cw.active and not cw.done and ahead is not None and p.get('cones_corner_close_mm', 0.0) > 0
                       and ahead <= p.get('cones_corner_close_mm', 0.0)
                       and math.degrees(cw.turned) >= p.get('cones_corner_min_deg', 70.0))
         if late_close:
