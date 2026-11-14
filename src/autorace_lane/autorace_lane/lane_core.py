@@ -239,6 +239,16 @@ class LaneParams:
     # 헤딩 유지 (IMU)
     yaw_kp: float = 1.5               # 헤딩 오차 1 rad당 요레이트 명령 (rad/s)
     # 정지선
+    # 11/15 바닥 갈림길 글자 A/B (흰 페인트): 차로 안 글자 크기 흰 덩어리의 구멍 수로 구분 (A = 구멍 1, B = 구멍 2).
+    #   표지판(YOLO)을 놓쳐도 갈림길에 들어간 뒤 어느 쪽(A/B)인지 안다. 크기는 실측 전 넉넉히
+    floor_letter: bool = True
+    floor_letter_min_h_mm: float = 120.0    # 진행 방향 글자 높이 범위
+    floor_letter_max_h_mm: float = 700.0
+    floor_letter_min_w_mm: float = 60.0     # 옆 폭 범위
+    floor_letter_max_w_mm: float = 450.0
+    floor_letter_max_off_mm: float = 260.0  # 글자 가운데가 차 중심에서 옆으로 이 안 (내 차로)
+    floor_letter_hole_mm2: float = 600.0    # 구멍으로 셀 최소 넓이 (점선·잡음 구멍 제외)
+    floor_letter_max_fill: float = 0.85     # 덩어리 상자 중 흰 비율이 이보다 크면 글자 아님 (가로선·막대)
     stopline_fill: float = 0.6        # 차로 안쪽 폭 중 흰 화소 비율이 이 이상이면 가로선
     stopline_min_mm: float = 8.0
     stopline_max_mm: float = 80.0
@@ -369,6 +379,9 @@ class LaneOutput:
     #   왼쪽 노란 실선 + 오른쪽 흰 점선 = +1, 양쪽 흰 점선 = 0, 왼쪽 흰 점선 + 오른쪽 노란 실선 = -1
     lane_id: Optional[int] = None
     yellow_guard: Optional[str] = None  # 노란 실선 이탈 방지 강제 조향 작동 여부 ('L' | 'R' | None)
+    floor_letter: Optional[str] = None  # 11/15 바닥 갈림길 글자 'A' | 'B' (내 차로 안, 구멍 수로 구분)
+    floor_letter_mm: Optional[float] = None    # 앞바퀴 -> 글자 가까운 끝
+    floor_letter_off_mm: Optional[float] = None  # 글자 가운데 옆 위치 (오른쪽 +)
     mem_pts: int = 0                    # 기억 점 수 (차선 기억이 켜졌을 때)
     ff_kappa: Optional[float] = None    # 도면 곡률 (왼쪽 +, 1/m). 미리 넣기가 켜졌을 때
     lookahead_mm: Optional[float] = None
@@ -380,7 +393,7 @@ class LaneOutput:
             'kappa', 'speed_scale', 'status', 'source', 'offset_mm',
             'heading_rad', 'path_kappa', 'low_conf', 'stoplines_mm',
             'crosswalk_lines_mm', 'end_lines_mm', 'line_left', 'line_right', 'lane_id',
-            'yellow_guard')}
+            'yellow_guard', 'floor_letter', 'floor_letter_mm', 'floor_letter_off_mm')}
         d['target_mm'] = list(self.target_mm) if self.target_mm else None
         cl = self.debug.get('centerline')
         d['model'] = ('circle' if cl.circle is not None else 'poly') if cl is not None else None
@@ -1187,6 +1200,45 @@ def path_geometry(cl: Centerline, y_eval: float) -> Tuple[float, float]:
 # ---------------------------------------------------------------------------
 # 정지선
 # ---------------------------------------------------------------------------
+def detect_floor_letter(bev_white: np.ndarray, cfg: 'BevConfig', p: 'LaneParams'):
+    """바닥 흰 글자 A/B. 글자 크기·내 차로 안·화면 가장자리에 안 잘린 흰 덩어리의 구멍 수: 1 = 'A', 2 = 'B'.
+    반환 (글자, 앞바퀴 -> 가까운 끝 mm, 옆 위치 mm 오른쪽 +) 또는 None (가장 가까운 것 하나)."""
+    img = (bev_white > 0).astype(np.uint8)
+    h, w = img.shape[:2]
+    cnts, hier = cv2.findContours(img, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+    if hier is None:
+        return None
+    hier = hier[0]
+    px_area = cfg.mm_per_px_x * cfg.mm_per_px_y
+    best = None
+    for i, c in enumerate(cnts):
+        if hier[i][3] != -1:
+            continue                                   # 바깥 윤곽만
+        x, y, bw, bh = cv2.boundingRect(c)
+        if x <= 0 or y <= 0 or x + bw >= w or y + bh >= h:
+            continue                                   # 화면 가장자리에 잘림 (글자 전체가 안 보임)
+        hh, ww = bh * cfg.mm_per_px_y, bw * cfg.mm_per_px_x
+        if not (p.floor_letter_min_h_mm <= hh <= p.floor_letter_max_h_mm
+                and p.floor_letter_min_w_mm <= ww <= p.floor_letter_max_w_mm):
+            continue
+        off = cfg.col_to_x_mm(x + bw / 2.0)
+        if abs(off) > p.floor_letter_max_off_mm:
+            continue
+        fill = float(img[y:y + bh, x:x + bw].sum()) / max(1.0, bw * bh)   # 흰 화소 비율 (구멍 빼고)
+        holes = 0
+        j = hier[i][2]
+        while j != -1:
+            if cv2.contourArea(cnts[j]) * px_area >= p.floor_letter_hole_mm2:
+                holes += 1
+            j = hier[j][0]
+        if holes not in (1, 2) or fill > p.floor_letter_max_fill:
+            continue
+        near = float(cfg.row_to_y_mm(y + bh) - cfg.ref_to_front_axle_mm)
+        if best is None or near < best[1]:
+            best = ('A' if holes == 1 else 'B', near, float(off))
+    return best
+
+
 def detect_stoplines(bev_white: np.ndarray, center_col: float, cfg: BevConfig,
                      p: LaneParams) -> List[Tuple[float, bool]]:
     """차로 안쪽을 가로지르는 흰 띠를 찾는다.
@@ -1722,6 +1774,10 @@ class LaneFollower:
             lines = detect_stoplines(bev_white, center_col, cfg, p)
             out.stoplines_mm = [d for d, _ in lines]
             out.crosswalk_lines_mm = [d for d, bars in lines if bars]
+            if p.floor_letter:
+                fl = detect_floor_letter(bev_white, cfg, p)
+                if fl is not None:
+                    out.floor_letter, out.floor_letter_mm, out.floor_letter_off_mm = fl
             # 주차 칸 끝 선: 흰+노란 마스크, 차 정면 기준 (칸 안에서는 차선 중심 추정이 엉뚱할 수 있음)
             both = bev_white if raw_lane is None else cv2.bitwise_or(bev_white, raw_lane)
             out.end_lines_mm = [d for d, _ in detect_stoplines(both, cfg.vehicle_col, cfg, p)]

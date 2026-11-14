@@ -79,7 +79,8 @@
     confirm_hits: 3
 
     # ── 판단 (5단계에서 튜닝) ──
-    trigger_dist: 1.8        # 11/15 저녁 1.5 -> 1.8: 앞 장애물 1.8 m에서 차로 변경 시작 (미리 피하기)
+    trigger_dist: 1.4        # 11/15 밤 1.8 -> 1.4 (앞범퍼 기준, 라이다 기준 1.5 m). tools/change_sweep.py: 1.8은 빈 곳에서 장애물 0.65 m 앞에 이미
+                             #   도착(너무 이름), 1.0~1.1은 장애물 옆을 아직 비스듬히 지남, 1.4는 장애물 5~13 cm 앞에서 똑바로 도착. 후진·성공 같음
     exit_wall_trigger: 1.5   #   출구 반대쪽 가상 벽만 막을 때는 1.5 m (1.8이면 옆 장애물 다 지나기 전에 반응해 A/B 출구를 포기)
     change_len: 1.0
     clear_back: 0.0
@@ -100,6 +101,16 @@
     center_force_rem_m: 2.07
     center_force_free: 1.0
     center_force_wait_m: 0.40  #   옆·앞에 장애물이 있으면 0.4 m 더 가서 다시 (섬 앞 1.6 m보다 가까워지면 안 함)
+    shift_arc: true          # 11/15 밤: 차로 옮길 때 '딱 중심에서 펴지는 최대 각'으로 꺾음 (pure pursuit는 비스듬히 도착해 바깥으로 넘침)
+    shift_r_scale: 1.25      #   펴는 원 = 최소 회전반경 x 1.25 (조향 지연 여유)
+    shift_r_scale_outer: 1.4 #   바깥 차로(1·3)로 들어갈 때는 더 일찍 펴기 (노란 실선 물기 방지)
+    outer_entry_bias: 0.03   #   바깥 차로로 들어갈 때 중심보다 3 cm 안쪽 겨냥
+    shift_turn_len: 0.12
+    island_sign_zone: 0.6    # 11/15 실차: 섬 앞 끝 가운데 갈림길 표지판을 2차선 장애물로 봐서 장애물 없는데 1차선으로 감 -> 섬 앞 0.6 m ~ 섬 끝, 2차선 ±15 cm 덩어리는 뺌
+    island_sign_half_w: 0.15
+    center_guard: true       # 11/15: 2차선으로 모으는 중 길이 막히면 정지·후진 대신 원래 차로로 돌아가 0.4 m 더 가서 다시
+    center_guard_look: 0.15
+    center_guard_free: 0.35
     cont_change: true        # 11/12: 옮기는 도중 가던 차로 앞이 막히면 다음 차로까지 이어서 한 번에 (안전 조건 아래)
     cont_min_free: 1.80      #   다음 차로 앞 1.8 m 넘게 비어야 (11/12 밤 1.3 -> 1.8: 두 차로 한 번에는 줄임)
     cont_island_m: 2.00      #   섬까지 2.0 m 넘게 남아야 (그리고 40° 안, 지나갈 길 빔, 한 번 옮길 때 한 번만)

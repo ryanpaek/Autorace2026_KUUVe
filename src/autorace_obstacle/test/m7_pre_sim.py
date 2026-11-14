@@ -71,7 +71,7 @@ def make_layout(rnd, x_range=(0.0, 1.0), side_p=0.5):
 
 
 def run(cars, seed, pre=True, turn_deg=60.0, map_err_mm=0.0, delay=0, noise=0.01, lidar_yaw_deg=0.0,
-        real_r=cs.R, odom_scale=1.0, lane_dy=0.0, link_kw=None, cam=False, avoid_kw=None):
+        real_r=cs.R, odom_scale=1.0, lane_dy=0.0, link_kw=None, cam=False, avoid_kw=None, car_min_r=0.53):
     """real_r: 실제 코너 반경 (모형 640과 다를 때), lidar_yaw_deg: 라이다 방향 오차, lane_dy: 차선 주행이 중심선에서 옆으로 치우침."""
     rnd = random.Random(seed)
     rects = sc.layout_rects(cars, 0.52, jitter=0.03, seed=seed)
@@ -80,7 +80,7 @@ def run(cars, seed, pre=True, turn_deg=60.0, map_err_mm=0.0, delay=0, noise=0.01
     cs.R = real_r                                   # 경로 모형만 바꿈 (m7_link 모형은 640 그대로)
     try:
         return _run(cars, rects, segs, rnd, seed, pre, turn_deg, map_err_mm, delay, noise, lidar_yaw_deg,
-                    odom_scale, lane_dy, link_kw or {}, cam, avoid_kw or {})
+                    odom_scale, lane_dy, link_kw or {}, cam, avoid_kw or {}, car_min_r)
     finally:
         cs.R = R0
 
@@ -107,10 +107,10 @@ def fake_lane_status(car, rnd, lw=0.52, row=0.55, ld=0.6):
 
 
 def _run(cars, rects, segs, rnd, seed, pre, turn_deg, map_err_mm, delay, noise, lidar_yaw_deg, odom_scale, lane_dy,
-         link_kw, cam=False, avoid_kw=None):
+         link_kw, cam=False, avoid_kw=None, car_min_r=0.53):
     u0 = 0.06
     fx, fy, fh = cs.path_point(u0)
-    car = sc.SimCar(fx - ts.WHEELBASE * math.cos(fh), fy - ts.WHEELBASE * math.sin(fh), fh)
+    car = sc.SimCar(fx - ts.WHEELBASE * math.cos(fh), fy - ts.WHEELBASE * math.sin(fh), fh, min_r=car_min_r)
     car.odom_yaw = car.imu_yaw = car.yaw
     lp = M7LinkParams(enable_mode='obstacle', trigger_front_mm=1800.0, off_mode='none',
                       pre_enable=pre, pre_enable_turn_deg=turn_deg, **link_kw)
@@ -128,6 +128,7 @@ def _run(cars, rects, segs, rnd, seed, pre, turn_deg, map_err_mm, delay, noise, 
     first_x = min([x for x, lane in cars if lane == 0] or [None], key=lambda v: 9e9 if v is None else v)
     min_gap = 9.9
     depart_n, was_out = 0, False
+    over = -1.0
     for k in range(int(90 / dt)):
         if k % 2 == 0:
             lx, ly = car.x + ts.LIDAR_X * math.cos(car.yaw), car.y + ts.LIDAR_X * math.sin(car.yaw)
@@ -194,6 +195,7 @@ def _run(cars, rects, segs, rnd, seed, pre, turn_deg, map_err_mm, delay, noise, 
         if pos_true > 0.3:
             for (_, cy) in sc.rect_corners(*car.footprint()):
                 off_edge = max(off_edge, abs(cy) - 1.5 * 0.52)
+                over = max(over, abs(cy) - (1.5 * 0.52 - 0.03))   # 바깥 노란 실선(두께 20 mm) 안쪽 가장자리를 차체가 넘음
         out_now = departed(car)
         depart_n += int(out_now and not was_out)
         was_out = out_now
@@ -201,7 +203,7 @@ def _run(cars, rects, segs, rnd, seed, pre, turn_deg, map_err_mm, delay, noise, 
             break
     done = pl is not None and pl.state == 'DONE'
     return dict(ok=done and not collided and off_edge <= 0, done=done, collided=collided, off=off_edge > 0,
-                depart=depart_n,
+                depart=depart_n, over=over,
                 rev=rev, stop_t=stop_t, t=t, first_x=first_x, min_gap=min_gap, **ev)
 
 

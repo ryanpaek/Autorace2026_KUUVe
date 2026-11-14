@@ -545,7 +545,7 @@ class MissionNode(Node):
                  'auto_cmd': [round(out.linear.x, 3), round(out.angular.z, 3)],
                  'lane_cfg': cmd.lane, 'stop': self._stop_info(),
                  'manual': self.manual, 'dir': self.move_dir, 'reverse_mm': round(self.reverse_mm),
-                 'fork_choice': self.fsm.fork_choice, 'dist_mm': round(self.dist_mm),
+                 'fork_choice': self.fsm.fork_choice, 'floor_fork': getattr(self.fsm, 'floor_fork', None), 'dist_mm': round(self.dist_mm),
                  'estop': self.estop, 'note': cmd.note,
                  'parking_sign': self.fsm.parking_sign, 'parking_armed': self.fsm.parking_armed,
                  'parking_result': getattr(self.fsm, 'parking_result', None),
