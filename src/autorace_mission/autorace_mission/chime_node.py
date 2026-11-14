@@ -18,6 +18,7 @@ import struct
 import subprocess
 import tempfile
 import wave
+from typing import Optional
 
 RATE = 44100
 # (주파수 Hz, 시작 s): 아래 음 -> 위 음 두 번 '띠링'. 배음(2배)을 조금 섞어 맑게
@@ -56,8 +57,12 @@ def player_command(path: str, player: str = 'auto', device: str = ''):
     return None
 
 
-def parked(prev: str, cur: str) -> bool:
-    return prev == 'M4_PARKING' and cur == 'FINISHED'
+def parked(prev: str, cur: str, result: Optional[str] = None) -> bool:
+    """M4_PARKING -> FINISHED 이고 주차 결과가 성공(PARKED...)일 때만. result가 없으면(옛 미션 노드) 예전처럼.
+    11/14: 주차 실패(FAIL_NO_CAR)에도 FINISHED라 띠링이 울려 성공한 줄 착각했다."""
+    if not (prev == 'M4_PARKING' and cur == 'FINISHED'):
+        return False
+    return result is None or str(result).startswith('PARKED')
 
 
 def main(args=None):
@@ -85,11 +90,14 @@ def main(args=None):
 
         def _on_state(self, msg):
             try:
-                cur = json.loads(msg.data).get('state')
+                d = json.loads(msg.data)
+                cur = d.get('state')
             except (ValueError, AttributeError):
                 return
-            if parked(self.prev, cur):
+            if parked(self.prev, cur, d.get('parking_result')):
                 self.play('parked')
+            elif self.prev == 'M4_PARKING' and cur == 'FINISHED':
+                self.get_logger().warning(f"주차 실패 ({d.get('parking_result')}) -> 띠링 안 울림")
             self.prev = cur
 
         def play(self, why):

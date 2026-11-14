@@ -21,6 +21,7 @@ MODE_CLASSES = {
     'M5_BUMP': ('slow', 'bump'),
     'M6_ZIGZAG': ('pedestrian',),    # 11/13 실차: 보행자 표지는 지그재그 끝 무렵에 보이고 M3 시작 땐 이미 시야 밖 -> M6에서 미리 받음
     'M7_OBSTACLE': ('fork_a', 'fork_b'),
+    'M2_EXIT': (),                   # 11/14: 합류 끝 ~ 라바콘 시작선 (받는 표지 없음)
     'M8_CONES': (),
 }
 

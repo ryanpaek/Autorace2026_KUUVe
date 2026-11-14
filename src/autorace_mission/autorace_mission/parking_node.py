@@ -1136,7 +1136,9 @@ class ParkingV2:
         if self.phase == 'CHECK':           # (재정렬) 칸 가운데에 반듯하게 들어갔나
             rel = cell_line_from_neighbors(
                 in_view(inp['clusters'], p['front_axle_from_lidar_mm'], p['side_view_deg']), p['side_max_mm'])
-            if p.get('center_on_sides', False):
+            if p.get('center_on_sides', False) or p.get('center_check', False):
+                # 11/14: center_check만 켜도(center_on_sides 끔 = 원은 접선까지) 끝에서 양옆 정중앙을 잰다.
+                #   예전엔 center_on_sides일 때만 재서 center_check가 아무 일도 안 했다
                 cr = self._corridor_rel(inp)
                 if cr is not None:
                     self.side_line = self._side_mid(cr, inp)

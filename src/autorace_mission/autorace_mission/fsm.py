@@ -26,7 +26,7 @@ from typing import Dict, Optional
 from autorace_mission.corner import CornerWatch
 
 SEQUENCE = ['WAIT_START', 'M5_BUMP', 'M6_ZIGZAG', 'M3_PEDESTRIAN', 'M7_OBSTACLE',
-            'M2_FORK', 'M8_CONES', 'M1_TRAFFIC', 'M4_PARKING', 'FINISHED']
+            'M2_FORK', 'M2_EXIT', 'M8_CONES', 'M1_TRAFFIC', 'M4_PARKING', 'FINISHED']
 EXTRA_STATES = ['LANE_ONLY']
 
 DEFAULT_PARAMS = {
@@ -93,6 +93,12 @@ DEFAULT_PARAMS = {
     'm7_corner_start_mm': 330.0,     # M7 진입(횡단보도 끝 + 약 6 cm) -> 코너 시작
     'm7_corner_done_deg': 85.0,      # IMU로 이만큼 돌면 끝 (0이면 이 기능 끔)
     'm7_corner_lead_mm': 300.0,
+    # 11/14: M2_EXIT (합류 끝 ~ 라바콘 시작선) = 차선 인식 모드만 (양쪽 노란 선, 한쪽 선 모드 안 씀) + 좌하단 코너 도면 곡률 보조.
+    #   11/14 실차(1114_01): 한쪽 선 모드(left_only -> right_only)가 화면에 보이는 반대쪽 선을 버려 코너 6초 동안 선 없음(도면 곡률만).
+    #   False면 예전처럼 M2 끝에서 바로 M8 (M8 접근에서 한쪽 선 모드)
+    'm2_exit': True,
+    'm2_exit_after_island_mm': 200.0,  # M2_EXIT 시작 = 섬 왼쪽 끝(m2_island_end) + 이만큼 (도면 위치). 도면에 없으면 예전처럼 합류 끝
+    #   1114_01 리플레이(차선 노드에 실제 영상): 섬 끝부터 normal이면 M2 뒤쪽 선 없음 128 -> 104프레임, 코너 161 -> 0프레임
     'm8_corner_preview': True,       # 11/12 밤: M2 끝 뒤 좌하단 코너도 같은 IMU 코너 미리보기
     'm8_keep_fork_mm': 2500.0,       # 11/12 밤 실차: M2 끝(합류 테이퍼)에서 normal로 바꾸자마자 선을 놓쳐 차선 무시하고 감.
                                      #   M2에서 넘어오면 한쪽 선 모드를 코너를 다 돌 때까지 유지 (이 거리는 안전 상한, 0이면 끔):
@@ -293,6 +299,7 @@ class MissionFSM:
         self.log = []
         self.parking_sign = False                    # 주차 표지를 봤나 (M1~M4 동안 투표, 상태가 바뀌어도 유지)
         self.parking_armed = False                   # 주차 노드에 앞 선을 받으라고 알림 (/mission/state)
+        self.parking_result = None                   # 주차 노드 결과 (PARKED / FAIL_... ), 끝난 뒤에만
         self.bump_at = None                          # 방지턱을 느낀 누적 거리
         self.line = None                             # 지그재그·라바콘 시작선 통과 감시 (StopApproach)
         self.cones_seen = False
@@ -312,6 +319,7 @@ class MissionFSM:
         if state not in SEQUENCE and state not in EXTRA_STATES:
             raise ValueError(f'unknown state {state}')
         self.log.append(f'{self.state or "-"} -> {state} {why}'.strip())
+        prev_state = self.state
         self.state = state
         self.enter_t, self.enter_dist = inp.t, inp.dist_mm
         if state == 'M7_OBSTACLE':
@@ -320,7 +328,33 @@ class MissionFSM:
             self.m7c = (inp.yaw, inp.dist_mm, 'M7_OBSTACLE', self.p['m7_corner_start_mm']) if use else None
             # 3차선·갈림길 직선 방향 = 코너 진입 방향에서 90° 돈 방향 (M2·합류에서 선을 놓쳤을 때 붙잡을 방향)
             self.axis_yaw = (inp.yaw + self.p['m7_corner_dir'] * math.pi / 2.0) if use else None
-        if state == 'M8_CONES':
+        from_exit = state == 'M8_CONES' and prev_state == 'M2_EXIT' and self.p.get('m2_exit', True)
+        if state == 'M2_EXIT':
+            # 11/14: 합류 끝 ~ 라바콘 시작선. M8 접근에 있던 좌하단 코너 IMU 미리보기·코너 지킴을 여기로 옮김
+            use = (self.p.get('m8_corner_preview', True) and self.p.get('m7_corner_done_deg', 85.0) > 0
+                   and why not in ('manual', 'init') and inp.yaw is not None)
+            # 섬 끝에서 시작하므로 합류 끝까지 남은 거리만큼 코너 시작·거리 예비값을 늦춘다
+            me = self._rp('m2_merge_end')
+            self.m2x_extra = (max(0.0, me - inp.route_s) if me is not None and inp.route_s is not None
+                              else max(0.0, 554.0 - self.p.get('m2_exit_after_island_mm', 200.0)))
+            self.m7c = (inp.yaw, inp.dist_mm, 'M2_EXIT', self.p['m8_corner_start_mm'] + self.m2x_extra) if use else None
+            use = self.p.get('m8_corner_turn_deg', 75.0) > 0 and why not in ('manual', 'init')
+            self.m8_corner.start(inp.yaw if use else None, inp.dist_mm)
+            self.m8_fork_hold = False
+            self.m8_inner_on = False
+            self.m8_inner_mode = None
+            self.m8_from_exit = False
+        if state == 'M8_CONES' and from_exit:
+            # M2_EXIT가 시작선까지 데려옴 -> 접근 단계 없이 바로 콘 따라가기 (코너 미리보기·한쪽 선 모드 없음)
+            self.m7c = None
+            self.m8_corner.start(None, inp.dist_mm)
+            self.m8_fork_hold = False
+            self.m8_both_n = 0
+            self.m8_inner_on = False
+            self.m8_inner_mode = None
+            self.m8_from_exit = True
+        elif state == 'M8_CONES':
+            self.m8_from_exit = False
             # 11/12 밤 실차: M2 끝(합류) 뒤 좌하단 코너(R640 오른쪽 90°)에서도 차선을 놓치고(NONE->hold->stop) 멋대로 감
             #   -> M7 직전 코너와 같은 IMU 코너 미리보기 (M2에서 넘어올 때만)
             use = (self.p.get('m8_corner_preview', True) and self.p.get('m7_corner_done_deg', 85.0) > 0
@@ -381,7 +415,7 @@ class MissionFSM:
             self.log.append(f'{self.state[:2]} corner preview off (turned {math.degrees(turned):.0f} deg, {since:.0f}mm)')
             return None
         k = p['m7_corner_dir'] * 1000.0 / r
-        if self.state == 'M8_CONES':
+        if self.state in ('M8_CONES', 'M2_EXIT'):
             k *= p.get('m8_corner_k_gain', 1.0)
         elif self.state == 'M1_TRAFFIC':
             k *= p.get('m1_corner_k_gain', 1.0)
@@ -681,11 +715,75 @@ class MissionFSM:
                                 if isinstance(tip, (int, float)) else 0.0)
         mode = 'left_only' if self.fork_choice == 'A' else 'right_only'
         _, db = self._since(inp, sub=True)
-        end = self._past(inp, 'm2_merge_end')
+        end = None
+        if self.p.get('m2_exit', True):
+            # 11/14: 갈림길 직후(섬 끝)부터 M2_EXIT 차선 인식 모드
+            end = self._past(inp, 'm2_island_end', self.p.get('m2_exit_after_island_mm', 200.0))
+        if end is None:
+            end = self._past(inp, 'm2_merge_end')
         if (db >= self.p['fork_len_mm'] + self.fork_adj_mm) if end is None else end:
             self._next(inp, f'fork {self.fork_choice} done')
             return Command('lane', self._lane(self.p['base_speed']))
         return Command('lane', self._lane(self.p['approach_speed'], mode, **self._fork_cfg(inp, mode)))
+
+    def _cones_entry(self, inp, who: str) -> Optional[str]:
+        """라바콘 시작선에 왔나 (들어갈 이유 문자열) / 아직이면 None. M2_EXIT와 (연습) M8 접근이 같이 씀.
+
+        1순위: 시작 흰 선을 앞바퀴가 지나는 순간 (서지 않음). 2순위: 도면 위치. 3순위: 거리.
+        좌하단 코너를 IMU로 다 돌기 전에는 카메라로 시작선을 넘은 것만 받는다."""
+        p = self.p
+        near = self._line_crossed(inp, 'm8_start_line')
+        cam_near = bool(near) and self.line is not None and self.line.seen_d is not None
+        if near and self.line.seen_d is None:
+            near = self._past(inp, 'm8_start_line', -p['cones_enter_before_mm'])
+        if near is None:
+            _, d = self._since(inp)
+            if self.state == 'M2_EXIT':
+                d -= getattr(self, 'm2x_extra', 0.0)        # 섬 끝에서 시작 -> 합류 끝 기준으로
+            near = d >= p['cones_approach_mm']
+            armed = d >= p['cones_approach_mm'] - 500.0
+        else:
+            armed = bool(self._past(inp, 'm8_start_line', -800.0))
+        ahead = inp.obstacle.get('cone_ahead_mm')
+        close = ahead is not None and ahead <= p['cones_enter_cone_mm']
+        cw = self.m8_corner
+        if cw.active and not cw.done:
+            cw.update(inp.yaw, inp.dist_mm)
+            if cw.done:
+                self.log.append(f'{who} corner done (IMU {math.degrees(cw.turned):.0f}deg)')
+        if cw.active and not cw.done and not cam_near:
+            fail = self._past(inp, 'm8_start_line', p['m8_corner_fail_mm'])
+            if fail is None:
+                extra = getattr(self, 'm2x_extra', 0.0) if self.state == 'M2_EXIT' else 0.0
+                fail = self._since(inp)[1] - extra >= p['cones_approach_mm'] + p['m8_corner_fail_mm']
+            if not fail:
+                return None
+            cw.yaw0 = None                  # IMU로 코너를 못 알아챔 -> 예전 규칙
+            self.log.append(f'{who} corner not detected by IMU ({math.degrees(cw.turned):.0f}deg) -> route/distance')
+        if near or (armed and close):
+            return f'start line ({self.line.how or "route/distance"})' if near else f'cone ahead {ahead:.0f}mm'
+        return None
+
+    def _s_M2_EXIT(self, inp):
+        """11/14: 갈림길 합류 끝 ~ 라바콘 시작선. 차선 인식 모드만 (양쪽 노란 선, 보통 차로 폭) + 좌하단 코너 도면 곡률 보조.
+
+        코너 곡률은 미션 노드가 /route/preview로 넘기고(m7_corner_k), 차선 노드는 선이 약하거나 없을 때 그 곡률을 섞는다.
+        한쪽 선 모드(left_only/right_only)는 쓰지 않는다 (보이는 선이 반대쪽이면 버려 선 없음이 됨, 1114_01).
+        시작선에 오면 M8_CONES로 넘기고 M8은 바로 콘 따라가기(cones)로 시작한다."""
+        p = self.p
+        if not p.get('m2_exit', True):
+            self._next(inp, 'm2_exit off')
+            self.m8_from_exit = False
+            return Command('lane', self._lane(p['slow_speed']))
+        how = self._cones_entry(inp, 'M2_EXIT')
+        if how is not None:
+            self.m2x_how = how
+            self._next(inp, f'cones start: {how}')
+            return Command('lane', self._lane(p['slow_speed']))
+        c = getattr(self, 'm7c', None)
+        corner_on = c is not None and c[2] == 'M2_EXIT'
+        speed = min(p['slow_speed'], p.get('m8_hold_speed', p['slow_speed'])) if corner_on else p['slow_speed']
+        return Command('lane', self._lane(speed))
 
     def _s_M8_CONES(self, inp):
         """라바콘: 접근(차선) -> cones(obstacle 노드가 콘 사이 경로 추종) -> handover -> M1.
@@ -707,41 +805,16 @@ class MissionFSM:
             mode = self._m8_fork_mode(inp)
             return Command('lane', self._lane(self._m8_speed(p['slow_speed']), mode, **self._m8_cfg(inp, mode)))
 
+        if self.sub == '' and getattr(self, 'm8_from_exit', False):
+            self.m8_from_exit = False
+            self._sub('cones', inp, f'from M2_EXIT ({getattr(self, "m2x_how", "")})')
         if self.sub == '':
-            # M2 직후: 합류 테이퍼에서 양쪽 선이 다시 잡힐 때까지 갈림길 바깥선 한쪽 모드 유지 (m8_keep_fork_mm 설명)
+            # 연습(set_state M8)이거나 m2_exit 끔: 예전 접근 (M2 직후 갈림길 바깥선 한쪽 모드 유지, m8_keep_fork_mm 설명)
             m8_mode = self._m8_fork_mode(inp)
-            # 1순위: 시작 흰 선을 앞바퀴가 지나는 순간 (서지 않음). 2순위: 도면 위치. 3순위: 거리
-            near = self._line_crossed(inp, 'm8_start_line')
-            cam_near = bool(near) and self.line is not None and self.line.seen_d is not None
-            if near and self.line.seen_d is None:
-                near = self._past(inp, 'm8_start_line', -p['cones_enter_before_mm'])
-            if near is None:
-                _, d = self._since(inp)
-                near = d >= p['cones_approach_mm']
-                armed = d >= p['cones_approach_mm'] - 500.0
-            else:
-                armed = bool(self._past(inp, 'm8_start_line', -800.0))
-            ahead = inp.obstacle.get('cone_ahead_mm')
-            close = ahead is not None and ahead <= p['cones_enter_cone_mm']
-            cw = self.m8_corner
-            if cw.active and not cw.done:
-                cw.update(inp.yaw, inp.dist_mm)
-                if cw.done:
-                    self.log.append(f'M8 corner done (IMU {math.degrees(cw.turned):.0f}deg)')
-            if cw.active and not cw.done and not cam_near:
-                # 아직 코너 안: 도면 위치·콘 가까움으로는 안 들어감 (카메라로 시작선을 넘은 것만 받음)
-                fail = self._past(inp, 'm8_start_line', p['m8_corner_fail_mm'])
-                if fail is None:
-                    fail = self._since(inp)[1] >= p['cones_approach_mm'] + p['m8_corner_fail_mm']
-                if not fail:
-                    return Command('lane', self._lane(self._m8_speed(p['slow_speed']), m8_mode, **self._m8_cfg(inp, m8_mode)))
-                cw.yaw0 = None                  # IMU로 코너를 못 알아챔 -> 예전 규칙
-                self.log.append(f'M8 corner not detected by IMU ({math.degrees(cw.turned):.0f}deg) -> route/distance')
-            if near or (armed and close):
-                how = f'start line ({self.line.how or "route/distance"})' if near else f'cone ahead {ahead:.0f}mm'
-                self._sub('cones', inp, how)
-            else:
+            how = self._cones_entry(inp, 'M8')
+            if how is None:
                 return Command('lane', self._lane(self._m8_speed(p['slow_speed']), m8_mode, **self._m8_cfg(inp, m8_mode)))
+            self._sub('cones', inp, how)
         if self.sub == 'cones':
             _, d = self._since(inp, sub=True)
             # 1순위: 라바콘이 더 안 보임 (앞 cones_gone_mm 안 구간 폭 안 콘 0개가 cones_gone_sec 동안)
@@ -894,7 +967,12 @@ class MissionFSM:
     def _s_M4_PARKING(self, inp):
         """주차는 parking 노드가 맡는다. 끝나면 /parking/state에 done=true."""
         if inp.parking.get('done', False):
-            self._next(inp, 'parked')
+            # 11/14: 주차 노드는 성공·실패 모두 done=true. 결과(result)를 보고 성공(PARKED...)일 때만 'parked'
+            #   (1114_01: FAIL_NO_CAR인데 'parked' + 띠링 -> 성공한 줄 착각)
+            res = str(inp.parking.get('result') or '')
+            self.parking_result = res or 'UNKNOWN'
+            ok = res.startswith('PARKED')
+            self._next(inp, f'parked ({res})' if ok else f'parking failed ({res or "no result"})')
             return Command('stop', self._lane(0.0))
         if not self.parking_armed and self.p.get('m4_direct', False):
             self.parking_armed = True

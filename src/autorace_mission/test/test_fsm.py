@@ -584,3 +584,72 @@ def test_m3_without_sign_or_route_keeps_going():
     fsm._goto('M3_PEDESTRIAN', Inputs(t=1.0, dist_mm=2000.0), 'zigzag done')
     fsm.step(Inputs(t=1.1, dist_mm=2010.0, confirmed_classes=set()))
     assert fsm.sub == ''
+
+
+# ---------------------------------------------------------------- 11/14 M2_EXIT · 주차 결과 · 신호등 초록 통과
+def test_m2_exit_lane_mode_only_with_corner_preview():
+    """11/14: M2 끝(합류) -> M2_EXIT. 한쪽 선 모드 없이 normal(양쪽 노란 선) + 코너 곡률 미리보기, 코너 동안 0.15 m/s.
+    라바콘 시작선(도면 위치)에 오면 M8_CONES로 넘기고 M8은 바로 cones (접근 단계 없음)."""
+    import math as _m
+    for choice in ('A', 'B'):
+        fsm = MissionFSM({'start_state': 'M2_FORK', 'cones_source_ready': True, 'odom_jump_mm': 1e9,
+                          'route_points': {'m8_start_line': 7000.0}})
+        fsm.fork_choice = choice
+        fsm._next(Inputs(t=0.0, dist_mm=5000.0, yaw=0.0), f'fork {choice} done')
+        assert fsm.state == 'M2_EXIT'
+        cmd = fsm.step(Inputs(t=0.1, dist_mm=5050.0, yaw=0.0, route_s=5050.0, lane={'status': 'L'}))
+        assert cmd.source == 'lane' and cmd.lane['mode'] == 'normal' and cmd.lane['speed'] == pytest.approx(0.15)
+        assert 'lane_width_mm' not in cmd.lane and 'lane_color' not in cmd.lane
+        k = fsm.m7_corner_k(5050.0, 0.0)
+        assert k is not None and min(k) < -1.0                     # 코너 미리보기 (오른쪽)
+        cmd = fsm.step(Inputs(t=2.0, dist_mm=6000.0, yaw=_m.radians(-45.0), route_s=6000.0, lane={'status': 'R'}))
+        assert cmd.lane['mode'] == 'normal'
+        fsm.m7_corner_k(6700.0, _m.radians(-88.0))                # 다 돎 -> 미리보기 끝
+        cmd = fsm.step(Inputs(t=3.0, dist_mm=6700.0, yaw=_m.radians(-88.0), route_s=6700.0, lane={'status': 'BOTH'}))
+        assert fsm.state == 'M2_EXIT' and cmd.lane['speed'] == pytest.approx(fsm.p['slow_speed'])
+        fsm.step(Inputs(t=4.0, dist_mm=6900.0, yaw=_m.radians(-90.0), route_s=6900.0, lane={'status': 'BOTH'}))
+        assert fsm.state == 'M2_EXIT'                              # 시작선 100 mm 전
+        fsm.step(Inputs(t=4.5, dist_mm=7010.0, yaw=_m.radians(-90.0), route_s=7010.0, lane={'status': 'BOTH'}))
+        assert fsm.state == 'M8_CONES'
+        cmd = fsm.step(Inputs(t=4.6, dist_mm=7020.0, yaw=_m.radians(-90.0), route_s=7020.0, lane={'status': 'BOTH'}))
+        assert fsm.sub == 'cones' and cmd.source == 'obstacle'
+        assert fsm.m7_corner_k(7020.0, _m.radians(-90.0)) is None
+
+
+def test_m2_exit_off_keeps_old_m8_approach():
+    fsm = MissionFSM({'start_state': 'M2_FORK', 'm2_exit': False})
+    fsm.fork_choice = 'A'
+    fsm._next(Inputs(t=0.0, dist_mm=5000.0, yaw=0.0), 'fork A done')
+    fsm.step(Inputs(t=0.1, dist_mm=5010.0, yaw=0.0, lane={'status': 'L'}))
+    assert fsm.state == 'M8_CONES' and fsm.sub == ''
+    cmd = fsm.step(Inputs(t=0.2, dist_mm=5050.0, yaw=0.0, lane={'status': 'L'}))
+    assert cmd.lane['mode'] == 'left_only'
+
+
+def test_parking_failure_is_not_reported_as_parked():
+    """11/14 (1114_01): 주차 노드 FAIL_NO_CAR(done=true)인데 'parked' + 띠링이었다."""
+    for res, ok in (('PARKED', True), ('PARKED_NOT_ALIGNED', True), ('FAIL_NO_CAR', False), ('', False)):
+        fsm = MissionFSM({'start_state': 'M4_PARKING', 'm4_direct': True})
+        fsm.step(Inputs(t=0.0, dist_mm=0.0, parking={'done': False}))
+        fsm.step(Inputs(t=1.0, dist_mm=100.0, parking={'done': True, 'result': res}))
+        assert fsm.state == 'FINISHED'
+        assert any(('parked (' in x) == ok and ('parking failed' in x) == (not ok) for x in fsm.log if 'FINISHED' in x)
+        assert fsm.parking_result == (res or 'UNKNOWN')
+
+
+def test_green_on_arrival_passes_without_stopping():
+    """11/14: stop_on_green_arrival false -> 초록이 확정돼 있으면 정지선에서 안 섬. 아무것도 못 봤으면 서서 초록을 기다림."""
+    fsm = MissionFSM({'start_state': 'M1_TRAFFIC', 'stop_on_green_arrival': False,
+                      'route_points': {'m1_stop_line': 3000.0}})
+    srcs = []
+    for i in range(40):
+        d = 2000.0 + 40.0 * i
+        cmd = fsm.step(Inputs(t=0.1 * i, dist_mm=d, route_s=d, confirmed_classes={'green': 1}))
+        srcs.append(cmd.source)
+    assert 'stop' not in srcs and fsm.state == 'M4_PARKING'
+    wait = MissionFSM({'start_state': 'M1_TRAFFIC', 'stop_on_green_arrival': False,
+                       'route_points': {'m1_stop_line': 3000.0}})
+    for i in range(60):
+        d = min(2000.0 + 40.0 * i, 3000.0)
+        cmd = wait.step(Inputs(t=0.1 * i, dist_mm=d, route_s=d, confirmed_classes={}))
+    assert wait.sub == 'stopped' and cmd.source == 'stop'

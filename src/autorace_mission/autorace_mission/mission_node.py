@@ -52,6 +52,7 @@ STATE_START_POINT = {
     'M3_PEDESTRIAN': ('m6_zigzag_end', 0.0),
     'M7_OBSTACLE': ('m7_start_line', -300.0),
     'M2_FORK': ('m7_island_tip', -300.0),
+    'M2_EXIT': ('m2_merge_end', 0.0),
     'M8_CONES': ('m8_start_line', -500.0),
     'M1_TRAFFIC': ('m1_pre_line', -500.0),
     'M4_PARKING': ('m4_pre_line', -300.0),
@@ -464,6 +465,7 @@ class MissionNode(Node):
                  'fork_choice': self.fsm.fork_choice, 'dist_mm': round(self.dist_mm),
                  'estop': self.estop, 'note': cmd.note,
                  'parking_sign': self.fsm.parking_sign, 'parking_armed': self.fsm.parking_armed,
+                 'parking_result': getattr(self.fsm, 'parking_result', None),
                  'm7_exit_lane': (self.m7_exit_lane or {}).get('lane'),
                  'corner_preview': bool(getattr(self, '_corner_on', False)),
                  'route': self.tracker.state() if self.route_active else None}
