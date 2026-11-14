@@ -302,6 +302,12 @@ class LaneParams:
     yellow_guard_three_lane_only: bool = True
     # 11/15 실차 '커브마다 아슬아슬': 차선이 커브라고 할 때(|곡률| > corner_gain_from) 조향을 corner_kappa_gain 배.
     #   직선·작은 보정에는 안 걸림. 1.0 = 끔
+    # 11/15 저녁 실차: 차가 차선과 크게 틀어지면(직각에 가까우면) 노란 차선이 가로 선으로 보여 정지선처럼 지워지거나 놓침.
+    #   일반 구간(lane_color yellow)에서 선을 놓쳤는데 크게 기운(realign_deg 이상) 노란 선 덩어리가 보이면 '내 방향이 틀렸다'로 보고
+    #   그 선과 나란해지는 쪽으로 돈다 (정지선은 흰색이라 노란 마스크에 없음). 0 = 끔
+    realign_deg: float = 0.0           # 꺼 둠 (11/15 시험): 45°로 켜면 코너의 휘는 선을 가로선으로 착각해 코너 시뮬레이션 선 밟음 0 -> 15/15, 크게 틀어진 직선에선 효과 없음(카메라 사각 0.55 m)
+    realign_min_mm: float = 200.0      # 이보다 짧은 덩어리는 안 씀 (노이즈)
+    realign_speed: float = 0.6         # 그동안 속도 비율
     corner_kappa_gain: float = 1.1     # 코너 시뮬레이션: 바깥 36 -> 26 mm, 안쪽 112 -> 120 mm (안쪽 선까지 17 mm). 1.2면 안쪽 여유 10 mm
     corner_gain_from: float = 0.6
     yellow_guard_look_mm: float = 600.0   # 노란 실선까지 거리를 잴 때 이 앞까지만 (400으로 줄이면 M7 1차로 시뮬레이션 흔들림 37 -> 89 mm)
@@ -380,6 +386,7 @@ class LaneOutput:
         d['model'] = ('circle' if cl.circle is not None else 'poly') if cl is not None else None
         d['circle_r_mm'] = round(cl.circle[2]) if cl is not None and cl.circle is not None else None
         d['inner'] = self.debug.get('inner')      # 코너 안쪽 선 기준이면 'L'/'R'
+        d['realign_deg'] = self.debug.get('realign_deg')   # 크게 기운 노란 선으로 방향 바로잡는 중이면 그 선 각도
         return d
 
 
@@ -1591,6 +1598,11 @@ class LaneFollower:
             kappa_raw, source = self._heading_kappa(yaw, self.yaw_ref, speed), 'heading'
         elif source == 'coast':
             kappa_raw = self.kappa_cmd
+        elif ((kappa_raw is None or (out.status in ('L', 'R') and source == 'lane'))
+              and self._realign(raw_lane, yaw, speed, out) is not None):
+            # 놓쳤거나, 한쪽 선만 보이는데 크게 기운 노란 선이 있으면 그 선은 '가로지르는 차선' (따라가면 뚫고 나감)
+            kappa_raw, source = self._realign_k, 'realign'
+            out.speed_scale = p.realign_speed
         elif kappa_raw is None:
             # 차선을 놓침
             self.lost_frames += 1
@@ -1835,6 +1847,42 @@ class LaneFollower:
         ds = np.arange(len(ks)) * self.route_step_mm
         q = np.linspace(d_mm - half_win_mm, d_mm + half_win_mm, 7)
         return float(np.mean(np.interp(q, ds, ks)))
+
+    def _realign(self, raw_lane, yaw, speed, out) -> Optional[float]:
+        """선을 놓쳤을 때 크게 기운 노란 선이 보이면 그 선과 나란해지는 곡률 (realign_deg 설명). 없으면 None."""
+        p, cfg = self.p, self.cfg
+        if p.realign_deg <= 0.0 or p.lane_color != 'yellow' or self.mode != 'normal' or raw_lane is None:
+            return None
+        m = (raw_lane > 0).astype(np.uint8)
+        n, lab, stats, _ = cv2.connectedComponentsWithStats(m, connectivity=8)
+        best = None
+        for i in range(1, n):
+            ys, xs = np.nonzero(lab == i)
+            if len(xs) < 20:
+                continue
+            xmm = (xs - cfg.vehicle_col) * cfg.mm_per_px_x                  # 오른쪽 +
+            ymm = cfg.row_to_y_mm(ys)                                       # 앞 +
+            if math.hypot(np.ptp(xmm), np.ptp(ymm)) < p.realign_min_mm:
+                continue
+            pts = np.stack([xmm, ymm], 1).astype(np.float32)
+            vx, vy, _, _ = cv2.fitLine(pts, cv2.DIST_L2, 0, 0.01, 0.01).ravel()
+            if vy < 0:
+                vx, vy = -vx, -vy
+            a = math.atan2(float(vx), float(vy))                            # 선 방향, 오른쪽 + (차 진행 방향 0)
+            d = float(np.min(np.hypot(xmm, ymm)))
+            if abs(a) >= math.radians(p.realign_deg) and (best is None or d < best[1]):
+                best = (a, d)
+        if best is None:
+            return None
+        a = best[0]
+        out.debug['realign_deg'] = round(math.degrees(a), 1)
+        if yaw is not None:
+            k = self._heading_kappa(yaw, yaw - a, speed)                    # 오른쪽으로 a 돌면 선과 나란함
+        else:
+            k = -math.copysign(min(p.kappa_max, abs(a) * 2.0), a)
+        self._realign_k = float(max(-p.kappa_max, min(p.kappa_max, k)))
+        self.lost_frames = 0
+        return self._realign_k
 
     def _lost_search(self, yaw, dist_mm, speed) -> Optional[float]:
         """선을 오래 놓쳤을 때 찾기 조향 (lost_search 설명). 다 찾아봤으면 None (-> 정지)."""

@@ -82,8 +82,9 @@ def generate_launch_description():
         DeclareLaunchArgument('fork_params', default_value=_fork_params()),
         # 위치 확인용 수동 주행: mission_node가 /cmd_vel을 내지 않는다 (teleop으로 조종, 11/11)
         DeclareLaunchArgument('manual', default_value='false'),
+        # 11/15: 브리지가 params.yaml(wheelbase 0.222)을 받게 함. 예전엔 안 넘겨 기본 0.2로 돌아 모든 회전이 약 11% 덜 꺾임
         Node(package='autorace_mission', executable='ackermann_bridge', name='ackermann_bridge',
-             output='screen', condition=IfCondition(use_bridge)),
+             parameters=[params], output='screen', condition=IfCondition(use_bridge)),
         Node(package='autorace_lane', executable='lane_node', name='lane_node',
              parameters=[params, {'bev_config': bev}], output='screen'),
         Node(package='autorace_mission', executable='mission_node', name='mission_node',
