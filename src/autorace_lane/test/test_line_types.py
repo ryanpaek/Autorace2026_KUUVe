@@ -46,17 +46,46 @@ def test_lane_id_rules():
     assert lane_id_from_types(Y, Y) is None and lane_id_from_types(None, W) is None
 
 
+def _scene(left_mm, right_mm, yellow_side='L'):
+    """노란 실선 하나 + 흰 점선 하나 (차 중심 기준 옆 위치 mm). yellow_side 쪽이 노란 실선"""
+    h, w = CFG.bev_h, CFG.bev_w
+    lane, white = np.zeros((h, w), np.uint8), np.zeros((h, w), np.uint8)
+    hw = max(1, int(10 / CFG.mm_per_px_x))
+    period = int(200 / CFG.mm_per_px_y)
+    cols = {'L': int(round(CFG.vehicle_col + left_mm / CFG.mm_per_px_x)),
+            'R': int(round(CFG.vehicle_col + right_mm / CFG.mm_per_px_x))}
+    for side, c in cols.items():
+        for r in range(h):
+            if side != yellow_side and (r // (period // 2)) % 2:
+                continue                                  # 흰 선은 점선
+            lane[r, c - hw:c + hw + 1] = 255
+            if side != yellow_side:
+                white[r, c - hw:c + hw + 1] = 255
+    return lane, white
+
+
+def _run_scene(left_mm, right_mm, yellow_side='L', frames=6, **kw):
+    from autorace_lane.lane_core import LaneFollower
+    p = LaneParams(lane_width_mm=520.0, lane_color='both', **kw)
+    f = LaneFollower(CFG, p)
+    lane, white = _scene(left_mm, right_mm, yellow_side)
+    out = None
+    for _ in range(frames):
+        out = f.process_bev(lane.copy(), white.copy(), yaw=0.0, speed=0.2)
+    return out, p
+
+
 def test_yellow_solid_guard_steers_strongly_away_from_yellow_boundary():
-    """11/14: 3차선 M7(또는 일반 구간)에서 노란 실선에 가까워지면 강하게 안쪽으로 조향해 이탈을 막는다."""
-    cfg = BevConfig()
-    p = LaneParams(lane_width_mm=520.0, lane_color='both', yellow_solid_guard=True,
-                   yellow_guard_margin_mm=200.0, yellow_guard_hard_mm=140.0)
-    f = LaneFollower(cfg, p)
-    img = np.zeros((cfg.bev_h, cfg.bev_w, 3), np.uint8)
-    draw_line(img, cfg, -120.0, (0, 220, 240), dashed=False)
-    draw_line(img, cfg, +400.0, (240, 240, 240), dashed=True)
-    lane, white = color_masks(img, p)
-    out = f.process_bev(lane, white, speed=0.2, raw_lane=lane)
-    assert out.yellow_guard == 'L'
-    assert out.kappa == pytest.approx(-p.kappa_max, abs=1e-3)
+    """11/14: 3차선 M7(또는 일반 구간)에서 노란 실선에 가까워지면 강하게 안쪽으로 조향해 이탈을 막는다.
+    (11/15: 처음 올라온 시험은 없는 함수를 써서 한 번도 돌지 않았음 -> 다시 씀)"""
+    out, p = _run_scene(-260.0, 260.0)                    # 차로 가운데: 지킴 안 함
+    assert out.yellow_guard is None and abs(out.kappa) < 0.2
+    out, p = _run_scene(-190.0, 330.0)                    # 왼쪽 노란 실선 19 cm: 안쪽(오른쪽)으로
+    assert out.yellow_guard == 'L' and out.kappa < -1.0
+    out, p = _run_scene(-120.0, 400.0, frames=1)          # 12 cm: 변화율 제한 없이 첫 프레임부터 최대 조향
+    assert out.yellow_guard == 'L' and abs(out.kappa + p.kappa_max) < 1e-3
+    out, p = _run_scene(-400.0, 120.0, yellow_side='R', frames=1)   # 오른쪽 노란 실선도 같게 (3차로)
+    assert out.yellow_guard == 'R' and abs(out.kappa - p.kappa_max) < 1e-3
+    out, p = _run_scene(-120.0, 400.0, frames=3, yellow_solid_guard=False)   # 끄면 예전대로
+    assert out.yellow_guard is None and out.kappa > -p.kappa_max + 0.3
 
