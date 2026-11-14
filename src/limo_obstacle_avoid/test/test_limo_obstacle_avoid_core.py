@@ -449,6 +449,7 @@ def test_search_both_sides_when_stuck_long():
     pl.obs = [g]
     pl.last_clusters = [(1.45, 1.78, -0.30, -0.08)]
     pl.p.squeeze = False                                # 지도 기준 끝까지 꺾기는 빼고 찾기만 봄
+    pl.p.stop_dist = 0.30                               # 이 배치(앞 0.25 m)는 예전 정지 거리 기준
     v, w = pl.step(10.0)
     assert v == 0.0                                     # 처음엔 정지 (똑바로는 막힘)
     v, w = pl.step(11.2)
@@ -488,3 +489,19 @@ def test_outer_entry_lookahead_only_last_half_into_outer_lane():
     pl.pose.y = -0.40
     pl.sharp = True                                       # 후진 뒤 크게 꺾기가 먼저
     assert pl._ld() == pl.p.recover_lookahead
+
+
+def test_no_reversal_before_arriving_in_new_lane():
+    """11/15 실차: M7에서 한 방향으로 정했다가 도착 전에 반대로 감. 1.5초가 지나도 새 차로에 도착하기 전엔 떠난 차로로 안 돌아감
+    (지금 차로 앞이 0.5 m 안으로 정말 막혔으면 예외)"""
+    for until_arrive, want in ((True, -1), (False, 0)):
+        pl = _pl_center()
+        pl.p.flip_until_arrive = until_arrive
+        pl.p.side_wait = False
+        pl.pose.x, pl.pose.y = 1.0, -0.25                       # 2차로(0) -> 3차로(-1)로 옮기는 중 (아직 도착 전)
+        pl.target, pl.flip_from = -1, 0
+        pl.last_switch = 5.0                                    # 3초 전에 정함 (1.5초 지남)
+        xf = pl.pose.x + pl.p.robot_front
+        pl.obs = [_confirmed(Obstacle(xf + 1.2, xf + 1.53, -0.62, -0.42))]   # 3차로 앞 1.2 m (기준 1.5 m 안)
+        pl.step(8.0)
+        assert pl.target == want, (until_arrive, pl.target)

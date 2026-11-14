@@ -238,6 +238,7 @@ def _diag(y=0.10, deg=-40.0, band=True):
     pl = running(y, math.radians(deg))
     pl.target = 0                                                  # 1차선에서 2차선으로 들어오는 중
     pl.p.emerg_lane_band = band
+    pl.p.stop_dist = 0.30                                          # 이 시험들의 점 위치는 예전 비상 박스(0.30 m) 기준
     return pl
 
 
@@ -384,7 +385,10 @@ def test_no_flip_back_to_lane_just_left():
     pl.step(10.0)
     assert pl.target == 0                                       # 예전: 바로 -1로 되돌아감
     pl.step(11.5)
-    assert pl.target == -1                                      # 1.5초 지나면 허용
+    assert pl.target == 0                                       # 11/15: 1.5초 지나도 새 차로(0)에 도착 전이면 안 돌아감
+    pl.pose.y = -0.05                                           # 0 차로에 도착
+    pl.step(12.0)
+    assert pl.target == -1                                      # 도착했고 1.5초 지났으면 허용
 
 
 def test_target_lane_beside_obstacle_does_not_flip_back():

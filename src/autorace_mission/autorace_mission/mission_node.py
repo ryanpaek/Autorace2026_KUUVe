@@ -44,6 +44,7 @@ from std_msgs.msg import Bool, Empty, Float32, String
 from autorace_mission.command_inbox import CommandInbox
 from autorace_mission.fsm import DEFAULT_PARAMS, SEQUENCE, Inputs, MissionFSM
 from autorace_mission.route import MapPose, RouteMap, RouteTracker, motion_sign
+from autorace_mission.stage import stage_info
 
 # /mission/set_state로 점프할 때 차를 놓는 곳 (도면 경로 지점 + 오프셋 mm)
 STATE_START_POINT = {
@@ -190,6 +191,8 @@ class MissionNode(Node):
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.cfg_pub = self.create_publisher(String, '/lane/config', 10)
         self.state_pub = self.create_publisher(String, '/mission/state', 10)
+        # 11/15: 지금 몇 번 미션인지 (확실하지 않으면 mission null). autorace_mission/stage.py
+        self.stage_pub = self.create_publisher(String, '/mission/stage', 10)
         # 차선 노드의 도면 곡률 미리 넣기용: 앞바퀴에서 0~1300mm 앞 곡률 (왼쪽 +, 1/m)
         self.preview_pub = self.create_publisher(String, '/route/preview', 10)
         self.create_timer(1.0 / float(self.get_parameter('tick_hz').value), self._tick)
@@ -470,6 +473,11 @@ class MissionNode(Node):
                  'corner_preview': bool(getattr(self, '_corner_on', False)),
                  'route': self.tracker.state() if self.route_active else None}
         self.state_pub.publish(String(data=json.dumps(state)))
+        sure_s = (self.route_s_map if (self.route_active and self.tracker is not None and not self.tracker.lost)
+                  else None)
+        self.stage_pub.publish(String(data=json.dumps(
+            stage_info(self.fsm.state, sure_s, self.route.points if self.route is not None else {}),
+            ensure_ascii=False)))
         if (self.fsm.state, self.fsm.sub) != self._last_state:
             self.get_logger().info(f'[{self.fsm.state}/{self.fsm.sub}] {self.fsm.log[-1]}')
             if self.fsm.state != 'M2_FORK':

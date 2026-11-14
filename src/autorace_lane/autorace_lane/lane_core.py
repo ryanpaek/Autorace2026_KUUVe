@@ -300,6 +300,10 @@ class LaneParams:
     #   '노란선에 붙었다'로 보고 코너 0.6 m 전부터 끝까지 꺾음 (코너 시뮬레이션: 안쪽 35 cm 밀려 선 밟음, 끄면 11 cm).
     #   M2 한쪽 선 모드도 휘어 나가는 바깥선을 '붙었다'로 보고 섬 쪽으로 밀어냄. 3차선(M7, lane_color both) 직선 구간에서만 지킴
     yellow_guard_three_lane_only: bool = True
+    # 11/15 실차 '커브마다 아슬아슬': 차선이 커브라고 할 때(|곡률| > corner_gain_from) 조향을 corner_kappa_gain 배.
+    #   직선·작은 보정에는 안 걸림. 1.0 = 끔
+    corner_kappa_gain: float = 1.1     # 코너 시뮬레이션: 바깥 36 -> 26 mm, 안쪽 112 -> 120 mm (안쪽 선까지 17 mm). 1.2면 안쪽 여유 10 mm
+    corner_gain_from: float = 0.6
     yellow_guard_look_mm: float = 600.0   # 노란 실선까지 거리를 잴 때 이 앞까지만 (400으로 줄이면 M7 1차로 시뮬레이션 흔들림 37 -> 89 mm)
     yellow_guard_min_urg: float = 0.35    # 지킴이 걸리는 순간 최소 세기 (0이면 margin에서 0부터 hard까지 서서히)
 
@@ -1635,6 +1639,10 @@ class LaneFollower:
                 w = p.route_ff_weight_lost
             kappa_raw = kappa_raw + w * (k_ff - kappa_raw)
         out.source = source
+
+        if (p.corner_kappa_gain != 1.0 and source in ('lane', 'memory') and kappa_raw is not None
+                and abs(kappa_raw) > p.corner_gain_from):
+            kappa_raw = kappa_raw * p.corner_kappa_gain           # 커브: 조금 더 크게 (위 corner_kappa_gain 설명)
 
         # 11/14: 노란 실선 이탈 방지 강제 조향 (M7 3차선 바깥 노란 실선 및 일반 구간 노란 실선 경계 보호)
         hard_guard = False

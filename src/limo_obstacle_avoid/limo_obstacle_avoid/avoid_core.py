@@ -133,7 +133,7 @@ class AvoidParams:
     #   옆 차로(1·3)에서 장애물을 지난 뒤 가운데 앞이 center_return_free 넘게 비고(옆에 지나가는 것도 없음) 갈 길이 비면
     #   가운데로 돌아옴. 섬 앞 center_from_m 안(출구·표지 판단 구간)에서는 안 함. 차로를 바꾼 뒤 center_return_sec 지나서만
     center_return: bool = True
-    center_return_free: float = 1.6
+    center_return_free: float = 2.6   # 11/15: 1.6 -> 2.6. 차로 바꾸는 기준(1.5 m)과 겹쳐 가운데로 돌아오다 바로 다시 나가던 것
     center_return_sec: float = 1.0
     center_before_island: bool = True  # 11/12 밤: 표지를 모르면 섬 앞에서 가능하면 2차로로 모아 표지를 보게 함
     center_from_m: float = 2.6        #   섬 앞 끝까지 이 거리 안에서
@@ -150,6 +150,8 @@ class AvoidParams:
     rollback_need_sharp: bool = True  # 후진을 멈출 '틀 공간'을 크게 꺾는 기준(recover_lookahead)으로 잼
     hold_time: float = 0.4   # 차선 바꾼 뒤 최소 유지 시간 [s]. 11/12 0.8 -> 0.4 (옮기는 중에도 다음 판단을 빨리)
     flip_block_sec: float = 1.5       # 11/12 밤: 방금 떠난 차로로 이 시간 안에는 안 돌아감 (실차 -1 <-> 0 왔다갔다)
+    flip_until_arrive: bool = True    # 11/15: 위 막기를 새 차로에 도착할 때까지 유지
+    flip_arrive_tol: float = 0.10     #   새 차로 중심에서 이 안이면 도착
     flip_ok_free: float = 0.5         #   지금 가는 차로 앞이 이보다 짧으면(정말 막힘) 예외로 허용 [m]
     flip_ok_if_clear: bool = True     # 11/12 밤: 떠난 차로가 이미 비었으면(옆·앞 trigger_dist 안에 장애물 없음) 바로 돌아가도 됨.
                                       #   옮기자마자 새 차로에 장애물이 나타났는데 0.5 m까지 붙어야 반응하던 것
@@ -176,7 +178,7 @@ class AvoidParams:
     creep_search: bool = True
     creep_search_after: float = 1.0
     creep_search_deg: float = 30.0
-    stop_dist: float = 0.30           # 지금 조향대로 이만큼 더 가면 차체가 부딪힐 때만 정지(→ 후진). 옆 차로·옆에 붙은 장애물은 안 봄
+    stop_dist: float = 0.20           # 11/15 실차 요청 0.30 -> 0.20 (장애물이 복잡하면 전혀 못 감). 지금 조향대로 이만큼 더 가면 차체가 부딪힐 때만 정지(→ 후진). 옆 차로·옆에 붙은 장애물은 안 봄
     # 11/12: 막혔을 때 바로 서서 후진하지 말고 먼저 조향을 끝까지 꺾어 빠져 본다. 끝까지 꺾은 길로도
     #   squeeze_min_dist 안에서 부딪히면(장애물이 0.2 m까지 붙음) 그때만 서고 예전처럼 후진·탈출
     squeeze: bool = True
@@ -238,6 +240,9 @@ class AvoidParams:
     # 차로 안에서 똑바로 갈 때 조향 = (1-a) x 회피 pure pursuit + a x 차선 노드 곡률 (양쪽 선 보임 + 같은 차로일 때만)
     lane_keep_blend: float = 1.0      # 11/10 오후 0.5 -> 1.0: 차로 안 직진은 팀 차선 주행과 완전히 같은 조향 (v x kappa)
     lane_keep_blend_single: float = 0.7   # 11/12 밤: 한쪽 선(L/R)만 보일 때 차선 노드 조향 비율 (예전 0 = 안 섞음)
+    # 11/15 실차 'M7에서 차선을 거의 안 봄': 차선 조향은 위치 추정상 차로 중심 8 cm(reach_tol) 안에서만 섞었다 ->
+    #   위치 추정이 조금만 어긋나도 안 씀. 목표 차로 중심에서 이 안이면 섞음 (같은 차로·카메라 차로 번호 조건은 그대로)
+    lane_blend_tol: float = 0.12      # 시뮬레이션(위치 정확)에선 0.08~0.16 차이 없음(차선 조향 75%). 실차 위치 오차 몫으로 조금 넓힘
     lane_fresh_sec: float = 0.3
     lane_fix_gate: float = 0.15       # 지금 추정과 이만큼 넘게 다르면 다른 차로를 본 것 → 안 씀 [m]
     lane_fix_max_deg: float = 10.0    # 차선 방향이 이보다 틀어져 보이면 안 씀 (차로 변경 중·3차선 입구 사선)
@@ -1032,11 +1037,17 @@ class AvoidPlanner:
                     obs = obs2
             # 11/12 밤 실차: 방금 떠난 차로로 0.4초마다 되돌아가는 왔다갔다(-1 <-> 0)가 있었다 -> 그 차로로는
             #   flip_block_sec 동안 안 돌아감 (지금 가는 차로가 flip_ok_free 안으로 정말 막혔을 때만 허용)
-            if (nxt is not None and nxt == self.flip_from and t - self.last_switch < p.flip_block_sec
-                    and f_cur >= p.flip_ok_free
-                    and not (p.flip_ok_if_clear
-                             and self.free_ahead(nxt, obs, skip_beside=False) >= p.trigger_dist)):
-                nxt = None
+            # 11/15 실차 'M7에서 한 방향으로 정했다가 반대로 갔다가 반복': 1.5초는 속도 0.2에서 옮기기 전에 풀림 ->
+            #   새 차로에 도착(flip_arrive_tol)할 때까지 막음
+            arrived = abs(y - self.center(cur)) < p.flip_arrive_tol
+            #   도착 전에는 '떠난 차로가 비었으면 바로 돌아감'(flip_ok_if_clear)보다 이 막기가 우선 (정했으면 끝까지)
+            if nxt is not None and nxt == self.flip_from and f_cur >= p.flip_ok_free:
+                if p.flip_until_arrive and not arrived:
+                    nxt = None
+                elif (t - self.last_switch < p.flip_block_sec
+                      and not (p.flip_ok_if_clear
+                               and self.free_ahead(nxt, obs, skip_beside=False) >= p.trigger_dist)):
+                    nxt = None
             if nxt is not None:
                 self.events.append((x, f'차선 {cur:+d} → {nxt:+d}  (앞 {f_cur:.2f}m)'))
                 self.flip_from = cur
@@ -1481,7 +1492,8 @@ class AvoidPlanner:
         # 차로 안에서 똑바로 갈 때는 팀 차선 노드 곡률을 섞는다 (양쪽 선 보임, 같은 차로, 최근 값)
         ln = self.lane_last
         self.blend_used = False
-        if (p.lane_keep_blend > 0 and in_lane and ln and t is not None and self.lane_t is not None
+        near_lane = abs(y - self.center(self.target)) < max(p.reach_tol, p.lane_blend_tol)
+        if (p.lane_keep_blend > 0 and (in_lane or near_lane) and ln and t is not None and self.lane_t is not None
                 and t - self.lane_t <= p.lane_fresh_sec and ln.get('status') in ('BOTH', 'L', 'R')
                 and not ln.get('low_conf')
                 and ln.get('kappa') is not None and self.target == self.nearest_lane(y)
