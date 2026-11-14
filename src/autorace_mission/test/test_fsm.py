@@ -531,7 +531,7 @@ def test_m1_corner_after_cones_slow_inner_outward_then_normal():
     """11/13 실차: 라바콘 뒤 좌상단 코너에서 0.3 m/s 보통 차선으로 직진하다 늦게 꺾어 안쪽 선을 밟음.
     M8에서 넘어오면 코너 미리보기 + 0.2 m/s + 안쪽(오른쪽) 선 모드 + 바깥쪽(왼쪽) 3 cm, 다 돌면 보통 차선."""
     import math as _m
-    fsm = _m1_from_m8(route_s=24300.0)
+    fsm = _m1_from_m8(route_s=24300.0, m1_force_corner=False)   # 11/15부터 기본은 강제 원호 (test_m1_forced_corner_*)
     assert fsm.m7c is not None and fsm.m7c[3] == pytest.approx(206.0)          # 도면: 코너까지 206 mm
     lane = {'status': 'BOTH'}
     cmd = fsm.step(Inputs(t=2.1, dist_mm=9010.0, yaw=-_m.pi, lane=lane))
@@ -550,7 +550,7 @@ def test_m1_corner_after_cones_slow_inner_outward_then_normal():
 def test_m1_corner_counts_turn_already_done_in_cones():
     """라바콘 끝에서 이미 30° 돈 채로 M1에 들어와도 기준은 라바콘 세로 직선: 55° 더 돌면 끝 (85° 넘게 더 돌지 않음)."""
     import math as _m
-    fsm = _m1_from_m8()
+    fsm = _m1_from_m8(m1_force_corner=False)
     fsm.m7c = (fsm.m7c[0], 9000.0, 'M1_TRAFFIC', fsm.m7c[3])
     assert fsm.m7_corner_k(9100.0, -_m.pi - _m.radians(30)) is not None       # 30°: 아직
     assert fsm.m7_corner_k(9500.0, -_m.pi - _m.radians(86)) is None           # 세로 직선 기준 86°: 끝
@@ -755,3 +755,159 @@ def test_crosswalk_camera_stop_wins_over_cap():
     left, fsm = _zigzag_blind(cap=True, cam_lines=True)
     assert left is not None and left >= 200.0
     assert not any('M3 stop by zigzag-line distance' in m for m in fsm.log)
+
+
+# ---------------------------------------------------------------- 11/15 M2 합류 강제 S자
+def _merge_sim(choice, axis_err_deg=0.0, delay_ticks=2, y0_err=0.0):
+    """직선 좌표(진행 방향 +x = 도면 서쪽, 왼쪽 +y)에서 M2 -> 합류. 차선 노드 heading 모드 흉내:
+    곡률 = -1.5 x 방향오차 / v (최소 회전반경 0.53 m로 제한), 명령은 delay_ticks 늦게.
+    도면: 섬 왼쪽 끝 S_e, 섬은 S_e-253부터 좁아짐(반폭 260 -> 0), 바깥 선은 S_e+47부터 S_e+554까지 780 -> 250."""
+    import math as _m
+    S_e = 20000.0
+    pts = {'m2_island_end': S_e, 'm2_merge_end': S_e + 554.0, 'm7_island_tip': S_e - 1745.0}
+    fsm = MissionFSM({'start_state': 'M2_FORK', 'route_points': pts, 'm2_exit': True})
+    fsm.fork_choice = choice
+    side = 1.0 if choice == 'A' else -1.0
+    x, y, yaw = S_e - 1500.0, side * 520.0 + y0_err, 0.0
+    fsm.axis_yaw = _m.radians(axis_err_deg)        # 직선 방향을 이만큼 틀리게 앎
+    dist, q, worst_edge, worst_island, log = 0.0, [], 9e9, 9e9, []
+    for i in range(400):
+        cmd = fsm.step(Inputs(t=i * 0.05, dist_mm=dist, route_s=x, yaw=yaw, confirmed_classes=set()))
+        q.append(cmd.lane)
+        lane = q.pop(0) if len(q) > delay_ticks else {'mode': 'left_only'}
+        v = 180.0                                   # mm/s
+        if lane.get('mode') == 'heading':
+            k = -1.5 * _m.atan2(_m.sin(yaw - lane['yaw_ref']), _m.cos(yaw - lane['yaw_ref'])) / 0.18 / 1000.0
+        else:
+            k = (side * 520.0 - y) * 2.0 / 350.0 ** 2 if x < S_e else -y * 2.0 / 350.0 ** 2   # 차선 주행 흉내
+        k = max(-1 / 530.0, min(1 / 530.0, k))
+        ds = v * 0.05
+        yaw += k * ds
+        x += ds * _m.cos(yaw)
+        y += ds * _m.sin(yaw)
+        dist += ds
+        # 차체 네 모서리 (뒤 160, 앞 200, 반폭 120 mm; 기준점 뒤차축)
+        c, s_ = _m.cos(yaw), _m.sin(yaw)
+        for a, b in ((200, 120), (200, -120), (-160, 120), (-160, -120)):
+            cx, cy = x + a * c - b * s_, y + a * s_ + b * c
+            u = cx - S_e
+            edge = 780.0 if u < 47.0 else (250.0 if u > 554.0 else 780.0 - (u - 47.0) / 507.0 * 530.0)
+            worst_edge = min(worst_edge, edge - abs(cy))
+            if -253.0 <= u <= 0.0:
+                worst_island = min(worst_island, side * cy - 260.0 * (-u) / 253.0)
+        if fsm.state == 'M2_EXIT' and getattr(fsm, 'm2m', None) and fsm.m2m['done']:
+            break
+    return fsm, x - S_e, y, _m.degrees(yaw), worst_edge, worst_island
+
+
+def test_m2_merge_forced_s_curve_a_and_b():
+    """A(왼쪽 차로)면 오른쪽으로, B면 왼쪽으로 강제 S자. 합류 차로 안(바깥 선·섬 안 밟음), 코너(합류 끝 + 609 mm) 전에 끝."""
+    for ch in ('A', 'B'):
+        for ax_err, y_err in ((0.0, 0.0), (3.0, 0.0), (-3.0, 0.0), (0.0, 30.0), (0.0, -30.0)):
+            fsm, u_end, y_end, yaw_end, edge, isl = _merge_sim(ch, ax_err, y0_err=y_err)
+            assert any('M2 merge start' in m for m in fsm.log), ch
+            assert fsm.m2m['done'], (ch, ax_err, y_err)
+            assert u_end < 554.0 + 609.0, (ch, u_end)                   # 좌하단 코너 전에 끝
+            assert abs(y_end) < 110.0 + abs(y_err), (ch, ax_err, y_err, y_end)
+            assert abs(yaw_end - ax_err) < 10.0, (ch, yaw_end)
+            assert edge > 0.0, (ch, ax_err, y_err, edge)                 # 바깥 선 밖으로 안 나감 (차체)
+            assert isl > 0.0, (ch, isl)                                  # 섬 안 밟음
+        fsm, *_ = _merge_sim(ch)
+        st = [m for m in fsm.log if 'M2 merge start' in m][0]
+        assert ('오른쪽' in st) == (ch == 'A')
+
+
+def test_m2_merge_off_keeps_lane_mode():
+    fsm = MissionFSM({'start_state': 'M2_FORK', 'm2_merge': False,
+                      'route_points': {'m2_island_end': 20000.0, 'm2_merge_end': 20554.0}})
+    fsm.fork_choice = 'A'
+    fsm.axis_yaw = 0.0
+    cmd = fsm.step(Inputs(t=0.0, dist_mm=0.0, route_s=19900.0, yaw=0.0, confirmed_classes=set()))
+    assert cmd.lane['mode'] == 'left_only'
+
+
+def test_m2_merge_starts_from_camera_offset():
+    """시작할 때 차선 노드 offset(차로 중심이 차 왼쪽 +)으로 옆 위치를 잡음."""
+    fsm = MissionFSM({'start_state': 'M2_FORK', 'route_points': {'m2_island_end': 20000.0, 'm2_merge_end': 20554.0}})
+    fsm.fork_choice, fsm.axis_yaw = 'A', 0.0
+    fsm.step(Inputs(t=0.0, dist_mm=0.0, route_s=19600.0, yaw=0.0, confirmed_classes=set(),
+                    lane={'status': 'L', 'offset_mm': 40.0}))
+    assert fsm.m2m is not None and fsm.m2m['y'] == 480.0
+
+
+def test_floor_letter_decides_fork_over_sign_and_m7_exit():
+    """11/15 실차: 표지를 못 보거나 잘못 보고 B로 들어감 -> 바닥 글자로 실제 갈림길을 알고 그쪽 모드·합류 방향."""
+    fsm = MissionFSM({'start_state': 'M2_FORK', 'route_points': {'m2_island_end': 20000.0, 'm2_merge_end': 20554.0}})
+    fsm.fork_choice, fsm.axis_yaw = 'A', 0.0                           # 표지는 A로 읽음
+    cmd = None
+    for i in range(6):
+        cmd = fsm.step(Inputs(t=0.05 * i, dist_mm=10.0 * i, route_s=18500.0 + 10.0 * i, yaw=0.0,
+                              confirmed_classes=set(), obstacle={'m7_exit': 'A'},
+                              lane={'floor_letter': 'B' if i % 2 == 0 else None}))
+    assert fsm.floor_fork == 'B' and fsm.fork_choice == 'B'
+    assert cmd.lane['mode'] == 'right_only'
+    assert any('floor letter B' in m for m in fsm.log)
+    cmd = fsm.step(Inputs(t=1.0, dist_mm=100.0, route_s=19600.0, yaw=0.0, confirmed_classes=set(), lane={}))
+    assert fsm.m2m['side'] == -1.0                                      # B -> 왼쪽으로 합류
+
+
+def test_floor_letter_single_frame_not_enough():
+    fsm = MissionFSM({'start_state': 'M2_FORK'})
+    fsm.fork_choice = 'A'
+    for i, ch in enumerate(['B', None, None, None, 'A', None]):
+        fsm.step(Inputs(t=0.05 * i, dist_mm=10.0 * i, confirmed_classes=set(), lane={'floor_letter': ch}))
+    assert getattr(fsm, 'floor_fork', None) is None and fsm.fork_choice == 'A'
+
+
+def _m1_corner_sim(y0=0.0, ax_err_deg=0.0, delay_ticks=2, start_mm=280.0):
+    """라바콘 끝(직선, 북쪽 = +x) -> 좌상단 R640 오른쪽 90° -> 동쪽 직선. 차선 노드 heading 모드 흉내 (최소 회전반경 0.53 m)."""
+    import math as _m
+    fsm = MissionFSM({'start_state': 'M8_CONES', 'm1_corner_start_mm': start_mm})
+    fsm.axis_yaw = _m.radians(ax_err_deg) - fsm.p['m7_corner_dir'] * _m.pi / 2.0    # 3차선 방향 (라바콘 직선 = 이 + 오른쪽 90°)
+    x, y, yaw, dist = 0.0, y0, 0.0, 0.0
+    fsm._goto('M1_TRAFFIC', Inputs(t=0.0, dist_mm=0.0, yaw=yaw, lane={}), 'cones done')
+    q, worst = [], 0.0
+    R, xs = 640.0, start_mm
+    for i in range(400):
+        cmd = fsm.step(Inputs(t=0.05 * i, dist_mm=dist, yaw=yaw, confirmed_classes=set(), lane={}))
+        q.append(cmd.lane)
+        lane = q.pop(0) if len(q) > delay_ticks else {'mode': 'normal'}
+        if lane.get('mode') == 'heading':
+            k = -1.5 * _m.atan2(_m.sin(yaw - lane['yaw_ref']), _m.cos(yaw - lane['yaw_ref'])) / 0.18 / 1000.0
+        else:
+            k = 0.0
+        k = max(-1 / 530.0, min(1 / 530.0, k))
+        ds = 9.0
+        yaw += k * ds
+        x += ds * _m.cos(yaw)
+        y += ds * _m.sin(yaw)
+        dist += ds
+        # 진짜 경로(중심선)에서 옆 거리
+        if x <= xs and y > -R * 0.5:
+            off = y
+        elif y >= -R:
+            off = _m.hypot(x - xs, y + R) - R if x >= xs else y
+        else:
+            off = (xs + R) - x
+        worst = max(worst, abs(off))
+        if getattr(fsm, 'm1fc', None) and fsm.m1fc['done']:
+            break
+    return fsm, _m.degrees(yaw), worst
+
+
+def test_m1_forced_corner_turns_90_on_path():
+    """11/15 실차: 라바콘 뒤 커브에서 옆 출발 차로 선을 따라가 꼬임 -> 도면 원호로 강제 90°, 차로(반폭 250 - 차 반폭 120) 안."""
+    for y0, ax in ((0.0, 0.0), (40.0, 0.0), (-40.0, 0.0), (0.0, 3.0), (0.0, -3.0)):
+        fsm, yaw_end, worst = _m1_corner_sim(y0, ax)
+        assert fsm.m1fc['done'], (y0, ax)
+        assert -95.0 <= yaw_end <= -80.0, (y0, ax, yaw_end)            # 오른쪽으로 약 90°
+        assert worst <= 130.0 + abs(y0) + 25.0, (y0, ax, worst)
+        assert any('M1 forced corner done' in m for m in fsm.log)
+
+
+def test_m1_forced_corner_off_uses_old_corner_help():
+    fsm = MissionFSM({'start_state': 'M8_CONES', 'm1_force_corner': False})
+    fsm.axis_yaw = 3.14159
+    fsm._goto('M1_TRAFFIC', Inputs(t=0.0, dist_mm=0.0, yaw=0.0, lane={}), 'cones done')
+    cmd = fsm.step(Inputs(t=0.05, dist_mm=10.0, yaw=0.0, confirmed_classes=set(), lane={}))
+    assert cmd.lane['mode'] != 'heading'

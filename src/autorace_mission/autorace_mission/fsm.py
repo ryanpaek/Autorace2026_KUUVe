@@ -108,6 +108,34 @@ DEFAULT_PARAMS = {
     #   11/14 실차(1114_01): 한쪽 선 모드(left_only -> right_only)가 화면에 보이는 반대쪽 선을 버려 코너 6초 동안 선 없음(도면 곡률만).
     #   False면 예전처럼 M2 끝에서 바로 M8 (M8 접근에서 한쪽 선 모드)
     'm2_exit': True,
+    # 11/15 실차 'A/B 뒤 합류 구간에서 A는 왼쪽, B는 오른쪽으로 차선을 벗어남'(합류 사선은 차선 인식이 잘 안 됨) ->
+    #   인식 대신 도면 규격으로 강제 주행: 섬 왼쪽 끝 500 mm 앞(도면 x 3023, 섬이 좁아지기 250 mm 전)부터
+    #   A(왼쪽 차로)면 오른쪽으로, B면 왼쪽으로 520 mm를 cos S자로 m2_merge_len_mm 동안 옮긴다 (IMU 방향 + 오도메트리로 옆 위치 계산,
+    #   차선 노드는 heading 모드로 그 방향만 따라감). 다 옮기면(보통 차로 폭) 차선 인식으로 돌아감.
+    #   시작·길이는 시뮬레이션(test_fsm _merge_sim: 직선 방향 ±3°, 옆 ±30 mm)으로 바깥 선·섬 여유가 같이 가장 크게:
+    #   250/1150 -> 바깥 선 -43 mm(밟음), 500/1100 -> 바깥 선 약 +48·섬 약 +75 mm. 끝 = 도면 x 약 1923 (코너 1360 전)
+    # 11/15 바닥 갈림길 글자 A/B (차선 노드 floor_letter, 구멍 수로 구분): 최근 floor_letter_window 프레임 중 floor_letter_need 번
+    #   같으면 '이 갈림길에 들어왔다'로 확정 -> 표지(YOLO)·회피 노드 차로보다 우선 (차가 실제로 있는 쪽). M7 끝 ~ M2_EXIT
+    'floor_letter_use': True,
+    'floor_letter_window': 6,
+    'floor_letter_need': 3,
+    # 11/15 실차 '라바콘 끝난 뒤 커브에서 시작 차로 선을 따라가 꼬임': 좌상단 코너(R640, 오른쪽 90°)는 바깥쪽 바로 옆이 출발 차로라
+    #   크게 돌면 그 차로 선이 인식 대상이 됨 -> 차선 인식 대신 도면 경로로 강제: M1 시작(라바콘 끝)부터 직선 -> R640 원호 90° ->
+    #   직선을 IMU 방향 + 오도메트리로 따라감 (차선 노드 heading 모드). 다 돌고(m1_force_end_deg) 경로에 붙으면 차선 인식으로
+    'm1_force_corner': True,
+    'm1_force_r_mm': 640.0,
+    'm1_force_ld_mm': 350.0,
+    'm1_force_end_deg': 85.0,
+    'm1_force_tol_mm': 70.0,
+    'm2_merge': True,
+    'm2_merge_before_end_mm': 500.0,   # 섬 왼쪽 끝(m2_island_end)보다 이만큼 앞에서 시작 (자기 차로 안에서 먼저 안쪽으로)
+    'm2_merge_from_tip_mm': 1245.0,    # 도면 위치가 없을 때: M2 시작(섬 앞 끝 근처)부터 이만큼 가서 시작 (섬 길이 1745 - 500)
+    'm2_merge_len_mm': 1100.0,
+    'm2_merge_shift_mm': 520.0,        # A/B 차로 중심 -> 합류 차로 중심 (도면 차로 간격)
+    'm2_merge_ld_mm': 350.0,           # 옆 위치 따라가기 전방 주시
+    'm2_merge_max_deg': 45.0,          # 직선 방향에서 이보다 틀지 않음
+    'm2_merge_tol_mm': 60.0,           # 끝: 다 옮겼고 옆 오차 이 안 + 방향이 m2_merge_end_deg 안 (또는 길이 + 300 mm)
+    'm2_merge_end_deg': 6.0,
     'm2_exit_after_island_mm': 200.0,  # M2_EXIT 시작 = 섬 왼쪽 끝(m2_island_end) + 이만큼 (도면 위치). 도면에 없으면 예전처럼 합류 끝
     #   1114_01 리플레이(차선 노드에 실제 영상): 섬 끝부터 normal이면 M2 뒤쪽 선 없음 128 -> 104프레임, 코너 161 -> 0프레임
     'm8_corner_preview': True,       # 11/12 밤: M2 끝 뒤 좌하단 코너도 같은 IMU 코너 미리보기
@@ -349,6 +377,8 @@ class MissionFSM:
             self.m7c = (inp.yaw, inp.dist_mm, 'M7_OBSTACLE', start) if use else None
             # 3차선·갈림길 직선 방향 = 코너 진입 방향에서 90° 돈 방향 (M2·합류에서 선을 놓쳤을 때 붙잡을 방향)
             self.axis_yaw = (inp.yaw + self.p['m7_corner_dir'] * math.pi / 2.0) if use else None
+            self.m2m = None                          # 합류 강제 S자 (다음 판 위해 지움)
+            self.floor_fork, self.floor_buf = None, []
         from_exit = state == 'M8_CONES' and prev_state == 'M2_EXIT' and self.p.get('m2_exit', True)
         if state == 'M2_EXIT':
             # 11/14: 합류 끝 ~ 라바콘 시작선. M8 접근에 있던 좌하단 코너 IMU 미리보기·코너 지킴을 여기로 옮김
@@ -389,6 +419,8 @@ class MissionFSM:
             self.m8_both_n = 0
             self.m8_inner_on = False
             self.m8_inner_mode = None
+        if state == 'M2_FORK':
+            self.m2m = None
         if state == 'M6_ZIGZAG':
             self.pre_stop = None
             self.zz_at = None
@@ -406,6 +438,14 @@ class MissionFSM:
                          else self.p['m1_corner_start_mm'])
                 self.m7c = (yaw0, inp.dist_mm, 'M1_TRAFFIC', start)
                 self.m1_inner_on = False
+                self.m1fc = None
+                if self.p.get('m1_force_corner', True):
+                    off = (inp.lane or {}).get('offset_mm')
+                    y0 = (-float(off) if off is not None and (inp.lane or {}).get('status') not in (None, 'NONE')
+                          and abs(float(off)) <= 150.0 else 0.0)
+                    self.m1fc = {'axis': yaw0, 'last': inp.dist_mm, 'x': 0.0, 'y': y0, 'xs': start, 's': 0.0,
+                                 'done': False}
+                    self.log.append(f'M1 forced corner on (corner {start:.0f}mm ahead, side {y0:+.0f}mm)')
                 self.log.append(f'M1 corner preview on (start {start:.0f}mm)')
             else:
                 self.m7c = None
@@ -760,10 +800,32 @@ class MissionFSM:
                                        lane_width_mm=self.p['three_lane_width_mm'],
                                        lane_color=self.p['three_lane_color']))
 
+    def _watch_floor_letter(self, inp) -> None:
+        """바닥 글자 A/B 투표 -> self.floor_fork (한 번 정하면 그 판 끝까지)."""
+        if not self.p.get('floor_letter_use', True) or getattr(self, 'floor_fork', None) is not None:
+            return
+        buf = getattr(self, 'floor_buf', None)
+        if buf is None:
+            buf = self.floor_buf = []
+        buf.append((inp.lane or {}).get('floor_letter'))
+        del buf[:-int(self.p['floor_letter_window'])]
+        for ch in ('A', 'B'):
+            if buf.count(ch) >= self.p['floor_letter_need']:
+                self.floor_fork = ch
+                self.log.append(f'floor letter {ch} seen -> in fork {ch}'
+                                f'{"" if self.fork_choice in (None, ch) else f" (sign said {self.fork_choice}: follow floor)"}')
+                break
+
     def _s_M2_FORK(self, inp):
         """A(왼쪽) / B(오른쪽): 한쪽 경계선만 따라가는 차선 모드로 분기."""
         self._remember_fork(inp)
+        self._watch_floor_letter(inp)
+        ff = getattr(self, 'floor_fork', None)
+        if ff in ('A', 'B') and self.fork_choice != ff:
+            self.fork_choice = ff                      # 바닥 글자 = 차가 실제로 들어간 갈림길
         exit_lane = inp.obstacle.get('m7_exit')
+        if ff in ('A', 'B'):
+            exit_lane = ff                             # 바닥 글자가 회피 노드 차로 추정보다 정확
         if self.fork_choice is None and self.p['fork_from_m7_exit'] and exit_lane in ('A', 'B'):
             self.fork_choice = exit_lane          # 이미 그 차로에 있다
         if (self.sub == '' and exit_lane in ('A', 'B') and self.fork_choice in ('A', 'B')
@@ -792,6 +854,7 @@ class MissionFSM:
                                 if isinstance(tip, (int, float)) else 0.0)
         mode = 'left_only' if self.fork_choice == 'A' else 'right_only'
         _, db = self._since(inp, sub=True)
+        merge_cmd = self._m2_merge(inp, db)
         end = None
         if self.p.get('m2_exit', True):
             # 11/14: 갈림길 직후(섬 끝)부터 M2_EXIT 차선 인식 모드
@@ -800,8 +863,71 @@ class MissionFSM:
             end = self._past(inp, 'm2_merge_end')
         if (db >= self.p['fork_len_mm'] + self.fork_adj_mm) if end is None else end:
             self._next(inp, f'fork {self.fork_choice} done')
+            if merge_cmd is not None:
+                return merge_cmd
             return Command('lane', self._lane(self.p['base_speed']))
+        if merge_cmd is not None:
+            return merge_cmd
         return Command('lane', self._lane(self.p['approach_speed'], mode, **self._fork_cfg(inp, mode)))
+
+    def _m2_merge(self, inp, db: Optional[float] = None) -> Optional[Command]:
+        """A/B 뒤 합류: 도면 규격으로 강제 S자 (m2_merge 설명). 하는 중이면 명령, 아니면 None."""
+        p = self.p
+        if not p.get('m2_merge', True) or inp.yaw is None or self.fork_choice not in ('A', 'B'):
+            return None
+        m = getattr(self, 'm2m', None)
+        ff = getattr(self, 'floor_fork', None)
+        if m is not None and not m['done'] and ff in ('A', 'B') and (1.0 if ff == 'A' else -1.0) != m['side']:
+            # S자 도중에 바닥 글자로 반대쪽 갈림길임을 앎 -> 옆 위치를 그쪽 기준으로 다시 (지금까지 움직인 만큼 유지)
+            moved = m['y'] - m['side'] * p['m2_merge_shift_mm']
+            m['side'] = -m['side']
+            m['y'] = m['side'] * p['m2_merge_shift_mm'] + moved
+            self.log.append(f'M2 merge side fixed by floor letter {ff}')
+        if m is None:
+            start = self._past(inp, 'm2_island_end', -p['m2_merge_before_end_mm'])
+            if start is None:
+                start = db is not None and db >= p['m2_merge_from_tip_mm'] + getattr(self, 'fork_adj_mm', 0.0)
+            if not start:
+                return None
+            ax = getattr(self, 'axis_yaw', None)
+            if ax is None:
+                ax = getattr(self, 'm2_yaw', None)
+            if ax is None:
+                return None
+            side = 1.0 if self.fork_choice == 'A' else -1.0       # A = 진행 방향 왼쪽 차로 -> 오른쪽으로 옮김
+            y0 = side * p['m2_merge_shift_mm']
+            off = (inp.lane or {}).get('offset_mm')
+            if off is not None and (inp.lane or {}).get('status') not in (None, 'NONE') and abs(float(off)) <= 150.0:
+                y0 -= float(off)                                # 차선 노드: 차로 중심이 차 왼쪽 off mm -> 차는 중심 오른쪽
+            m = self.m2m = {'u0': inp.dist_mm, 'last': inp.dist_mm, 'y': y0,
+                            'side': side, 'axis': ax, 'done': False}
+            self.log.append(f'M2 merge start ({self.fork_choice}: {"오른쪽" if side > 0 else "왼쪽"}으로 '
+                            f'{p["m2_merge_shift_mm"]:.0f} mm, {p["m2_merge_len_mm"]:.0f} mm 동안)')
+        if m['done']:
+            return None
+        ds = inp.dist_mm - m['last']
+        m['last'] = inp.dist_mm
+        err = math.atan2(math.sin(inp.yaw - m['axis']), math.cos(inp.yaw - m['axis']))
+        m['y'] += ds * math.sin(err)
+        u = inp.dist_mm - m['u0']
+        L, A = p['m2_merge_len_mm'], p['m2_merge_shift_mm']
+        if (u >= L and abs(m['y']) <= p['m2_merge_tol_mm'] and abs(math.degrees(err)) <= p['m2_merge_end_deg']) \
+                or u >= L + 300.0:
+            m['done'] = True
+            self.log.append(f'M2 merge done (옆 {m["y"]:+.0f} mm, {u:.0f} mm) -> lane')
+            return None
+
+        def yref(uu):
+            return m['side'] * A * 0.5 * (1.0 + math.cos(math.pi * min(max(uu, 0.0), L) / L))
+
+        ld = p['m2_merge_ld_mm']
+        head = math.atan2(yref(u + ld) - m['y'], ld)
+        lim = math.radians(p['m2_merge_max_deg'])
+        head = max(-lim, min(lim, head))
+        yaw_ref = m['axis'] + head
+        yaw_ref = math.atan2(math.sin(yaw_ref), math.cos(yaw_ref))
+        return Command('lane', self._lane(p['approach_speed'], 'heading', yaw_ref=round(yaw_ref, 4)),
+                       note=f'M2 merge {u:.0f}/{L:.0f}mm y {m["y"]:+.0f}mm')
 
     def _cones_entry(self, inp, who: str) -> Optional[str]:
         """라바콘 시작선에 왔나 (들어갈 이유 문자열) / 아직이면 None. M2_EXIT와 (연습) M8 접근이 같이 씀.
@@ -860,6 +986,10 @@ class MissionFSM:
             self._next(inp, 'm2_exit off')
             self.m8_from_exit = False
             return Command('lane', self._lane(p['slow_speed']))
+        self._watch_floor_letter(inp)
+        merge_cmd = self._m2_merge(inp)                 # 합류 강제 S자가 아직 안 끝났으면 계속
+        if merge_cmd is not None:
+            return merge_cmd
         how = self._cones_entry(inp, 'M2_EXIT')
         if how is not None:
             self.m2x_how = how
@@ -990,8 +1120,57 @@ class MissionFSM:
         o = self.p.get('corner_outward_mm', 0.0)
         return {'target_offset_mm': round(-self.p['m7_corner_dir'] * o, 1)} if o else {}
 
+    def _m1_path(self, s: float, xs: float, R: float, d: float):
+        """좌상단 코너 경로 (코너 진입 직선 좌표: x 앞, y 왼쪽 +). s = 경로 길이. 오른쪽 코너는 d = -1."""
+        if s <= xs:
+            return s, 0.0
+        arc = R * math.pi / 2.0
+        if s <= xs + arc:
+            ph = (s - xs) / R
+            return xs + R * math.sin(ph), d * (R - R * math.cos(ph))
+        return xs + R, d * (R + (s - xs - arc))
+
+    def _m1_forced(self, inp, speed: float) -> Optional[dict]:
+        """M1 코너 강제 원호 (m1_force_corner 설명). 하는 중이면 차선 설정, 아니면 None."""
+        m = getattr(self, 'm1fc', None)
+        if m is None or m['done'] or inp.yaw is None or self.sub not in ('', 'approach'):
+            return None
+        p = self.p
+        R, d = p['m1_force_r_mm'], p['m7_corner_dir']
+        ds = inp.dist_mm - m['last']
+        m['last'] = inp.dist_mm
+        e = math.atan2(math.sin(inp.yaw - m['axis']), math.cos(inp.yaw - m['axis']))
+        m['x'] += ds * math.cos(e)
+        m['y'] += ds * math.sin(e)
+        # 경로에서 지금 위치 (지난 값 근처에서 가장 가까운 점)
+        best = (9e18, m['s'])
+        for i in range(-10, 41):
+            ss = max(0.0, m['s'] + i * 10.0)
+            px, py = self._m1_path(ss, m['xs'], R, d)
+            dd = (px - m['x']) ** 2 + (py - m['y']) ** 2
+            if dd < best[0]:
+                best = (dd, ss)
+        m['s'] = best[1]
+        err = math.sqrt(best[0])
+        turned = abs(e)
+        arc_end = m['xs'] + R * math.pi / 2.0
+        if (turned >= math.radians(p['m1_force_end_deg']) and m['s'] >= arc_end - 100.0 and err <= p['m1_force_tol_mm']) \
+                or m['s'] > arc_end + 400.0:
+            m['done'] = True
+            self.m7c = None
+            self.log.append(f'M1 forced corner done (turned {math.degrees(turned):.0f} deg, off {err:.0f}mm) -> lane')
+            return None
+        tx, ty = self._m1_path(m['s'] + p['m1_force_ld_mm'], m['xs'], R, d)
+        yaw_ref = m['axis'] + math.atan2(ty - m['y'], tx - m['x'])
+        yaw_ref = math.atan2(math.sin(yaw_ref), math.cos(yaw_ref))
+        v = min(speed, p.get('m1_corner_speed', speed)) if m['s'] >= m['xs'] - 300.0 else speed
+        return self._lane(v, 'heading', yaw_ref=round(yaw_ref, 4))
+
     def _m1_lane(self, inp, speed: float) -> dict:
         """M1: 라바콘 뒤 코너를 다 돌 때까지 안쪽 선 + 천천히 + 바깥쪽 비켜 가기 (그 뒤 보통 차선)"""
+        fc = self._m1_forced(inp, speed)
+        if fc is not None:
+            return fc
         c = getattr(self, 'm7c', None)
         if c is None or c[2] != 'M1_TRAFFIC':
             return self._lane(speed)

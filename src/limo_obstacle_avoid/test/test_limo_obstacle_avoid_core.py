@@ -296,6 +296,7 @@ def test_return_to_left_lane_right_away_if_it_is_clear():
 def test_side_wait_goes_straight_then_changes():
     """옮기기 시작했는데 가려는 차로 바로 옆(앞범퍼 근처)에 장애물이 걸리면 원래 차로로 0.3 m 직진 뒤 다시 옮김"""
     pl = _pl_center()
+    pl.p.shift_arc = False                                      # 예전 pure pursuit 길 (11/15 shift_arc 길은 이 배치를 안 부딪힌다고 봄)
     pl.pose.y = 0.0
     pl.target = 1
     pl.last_switch = 9.9
@@ -401,7 +402,7 @@ def test_center_force_not_before_4000_or_when_exit_known():
 def test_center_force_waits_04_when_obstacle_beside():
     pl = _pl_force(1, 2.05)
     x0 = pl.pose.x
-    pl.obs = [_confirmed(Obstacle(x0 - 0.1, x0 + 0.23, -0.11, 0.11))]   # 2차로 바로 옆
+    pl.obs = [_confirmed(Obstacle(x0 - 0.1, x0 + 0.60, -0.11, 0.11))]   # 2차로 바로 옆 (11/15: 앞범퍼 앞으로 40 cm 더 -> 꺾어 들어가면 부딪힘)
     pl.p.use_island = False
     pl.step(10.0)
     assert pl.target == 1
@@ -430,6 +431,7 @@ def _one_blocked_mid_beside(front_gap):
 def test_two_lane_jump_deferred_when_middle_frees_up_soon():
     """실차: 2차로를 타야 할 때 1 -> 3차로로 두 칸을 바로 감. 앞이 0.6 m 넘게 남았으면 보류(조금 더 가서 2차로)"""
     pl, obs = _one_blocked_mid_beside(1.0)
+    pl.p.shift_arc = False                              # 예전 pure pursuit 길로 굴려 봄 (shift_arc는 더 꺾어 2차로 옆 장애물에 닿는다고 봄)
     pl.p.two_lane_wait = False
     assert pl.choose(1, obs) == -1                      # 예전: 3차로(두 칸)
     pl.p.two_lane_wait = True
@@ -590,3 +592,47 @@ def test_stuck_search_only_toward_chosen_lane():
     v, w = pl.step(11.2)
     assert pl.target == -1                              # 3차선으로 정함
     assert not (v > 0 and w > 0)                        # 왼쪽(반대)으로 꺾어 가지 않음
+
+
+def test_island_sign_not_an_obstacle():
+    """11/15 실차: 섬 앞 끝 갈림길 표지판이 2차선 장애물로 보여 장애물 없는데 1차선으로 감 -> 표지판 자리는 뺌, 2차선에 그대로."""
+    p = AvoidParams()
+    p.section_length = 2.0
+    pl = AvoidPlanner(p)
+    pl.start(0.0, 0.0, 0.0)
+    pl.pose.x = 0.2
+    sign = _confirmed(Obstacle(1.95, 2.05, -0.05, 0.05))
+    real = _confirmed(Obstacle(1.0, 1.32, -0.11, 0.11))
+    pl.obs = [sign]
+    assert all(o is not sign for o in pl.obstacles())
+    pl.obs = [real]
+    assert any(o is real for o in pl.obstacles())             # 섬에서 먼 진짜 장애물은 그대로
+    pl.obs = [sign]
+    pl.step(1.0)
+    assert pl.target == 0                                      # 섬 앞에서 표지 기다리며 2차선 유지
+
+
+def test_shift_arc_straightens_into_outer_lane_without_overshoot():
+    """11/15 실차: 1차선으로 들어가며 바깥 노란선을 물고 들어갔다 돌아옴 -> 펼 수 있는 최대 각으로 꺾고 딱 중심(3 cm 안쪽)에서 폄.
+    가상 차(최소 회전반경 0.53 m)로 2차선 -> 1차선: 바깥으로 차로 중심 + 4 cm를 넘지 않음."""
+    import math as _m
+    for sa in (True, False):
+        p = AvoidParams()
+        p.shift_arc = sa
+        p.use_island = False
+        pl = AvoidPlanner(p)
+        pl.start(0.0, 0.0, 0.0)
+        pl.target, pl.last_switch = 1, 0.0
+        x = y = h = 0.0
+        ymax = 0.0
+        for i in range(120):
+            pl.pose.x, pl.pose.y, pl.pose.psi = x, y, h
+            k = pl.control(1.0, None, abs(y - 0.52) < p.reach_tol)
+            k = max(-1 / 0.53, min(1 / 0.53, k))
+            h += k * 0.01
+            x += 0.01 * _m.cos(h)
+            y += 0.01 * _m.sin(h)
+            ymax = max(ymax, y)
+        if sa:
+            assert ymax <= 0.52 + 0.04, ymax
+            assert abs(y - 0.52) < 0.05
