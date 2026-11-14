@@ -248,7 +248,12 @@ class ObstacleNode(Node):
         req.parameters = [ParamMsg(name='section_length', value=ParameterValue(
             type=ParameterType.PARAMETER_DOUBLE, double_value=float(section_m))),
             ParamMsg(name='start_heading_deg', value=ParameterValue(
-                type=ParameterType.PARAMETER_DOUBLE, double_value=float(hd or 0.0)))]
+                type=ParameterType.PARAMETER_DOUBLE, double_value=float(hd or 0.0))),
+            # 코너 미리보기로 정한 차로 (+1/-1, 0 = 없음) — 지난 판 값이 남지 않게 늘 넣음
+            ParamMsg(name='start_target', value=ParameterValue(
+                type=ParameterType.PARAMETER_INTEGER, integer_value=int(self.link.start_target or 0))),
+            ParamMsg(name='start_y', value=ParameterValue(
+                type=ParameterType.PARAMETER_DOUBLE, double_value=float(self.link.start_y_m or 0.0)))]
         self.param_cli.call_async(req).add_done_callback(
             lambda _f: self.enable_pub.publish(Bool(data=True)))
 
@@ -309,6 +314,8 @@ class ObstacleNode(Node):
         lx, hw = g('laser_x_mm').value, self.link.p.trigger_half_width_mm
         ahead = [c['near_x'] - lx for c in clusters if abs(c['y']) <= hw and c['near_x'] > lx]
         self.link.on_front(min(ahead) if ahead else None)
+        # M7 코너 미리보기: 코너를 도는 동안 라이다 점을 3차선 좌표로 쌓아 2차선 막힘·빈 옆 차로를 미리 정함 (m7_link 설명 8)
+        self.link.on_scan_points(pts)
         state = {'clusters': clusters[:12], 'lane_occupancy': occ,
                  'front_min_mm': min(near) if near else None,
                  'cones_done': False, 'cone_ahead_mm': None, 'cone_any_ahead_mm': None}

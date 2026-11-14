@@ -505,3 +505,27 @@ def test_no_reversal_before_arriving_in_new_lane():
         pl.obs = [_confirmed(Obstacle(xf + 1.2, xf + 1.53, -0.62, -0.42))]   # 3차로 앞 1.2 m (기준 1.5 m 안)
         pl.step(8.0)
         assert pl.target == want, (until_arrive, pl.target)
+
+
+def test_start_target_from_corner_preview():
+    """11/14: 코너 미리보기로 정한 차로(start_target)로 켜자마자 옮기고, 앞이 더 빈 쪽으로 '다시 고르기'는 안 함."""
+    p = AvoidParams()
+    p.start_target, p.start_y, p.start_heading_deg = 1, -0.086, 30.0
+    pl = AvoidPlanner(p)
+    pl.start(0.0, 0.0, 0.0, t=0.0)
+    assert pl.target == 1 and pl.flip_from == 0 and pl.rechosen
+    assert abs(pl.pose.y + 0.086) < 1e-9 and abs(math.degrees(pl.pose.psi) - 30.0) < 1e-6
+    assert any('미리 정한 차로' in e[1] for e in pl.events)
+    v, w = pl.step(0.05)
+    assert v > 0                                                   # 바로 출발 (지도 쌓일 때까지 안 기다림)
+
+
+def test_start_target_default_and_bad_values_ignored():
+    pl = AvoidPlanner(AvoidParams())
+    pl.start(0.0, 0.0, 0.0)
+    assert pl.target == 0 and pl.pose.y == 0.0
+    p = AvoidParams()
+    p.start_target, p.start_y, p.start_heading_deg = 5, 0.9, 70.0  # 말이 안 되는 값
+    pl = AvoidPlanner(p)
+    pl.start(0.0, 0.0, 0.0)
+    assert pl.target == 0 and pl.pose.y == 0.0 and pl.pose.psi == 0.0
