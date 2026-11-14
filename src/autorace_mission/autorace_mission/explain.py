@@ -17,7 +17,7 @@ from typing import Dict, List, Optional
 STATE_KO = {
     'WAIT_START': '출발 대기', 'LANE_ONLY': '차선 주행만', 'FINISHED': '완료',
     'M5_BUMP': 'M5 방지턱', 'M6_ZIGZAG': 'M6 지그재그', 'M3_PEDESTRIAN': 'M3 보행자',
-    'M7_OBSTACLE': 'M7 3차선 장애물', 'M2_FORK': 'M2 갈림길', 'M8_CONES': 'M8 라바콘',
+    'M7_OBSTACLE': 'M7 3차선 장애물', 'M2_FORK': 'M2 갈림길', 'M2_EXIT': 'M2→M8 차선 주행', 'M8_CONES': 'M8 라바콘',
     'M1_TRAFFIC': 'M1 신호등', 'M4_PARKING': 'M4 주차',
 }
 SOURCE_KO = {'lane': '차선 노드', 'obstacle': '장애물·회피 노드', 'parking': '주차 노드',
@@ -257,6 +257,12 @@ def _m2(c, sub):
     return f"갈림길 {ch}: {'왼쪽' if ch == 'A' else '오른쪽'} 경계선만 따라 주행"
 
 
+def _m2x(c, sub):
+    c.because.append('합류 끝 → 차선 인식 모드 (양쪽 노란 선) + 좌하단 코너 도면 곡률 보조')
+    _m8(c, '')
+    return '갈림길 뒤 차선 주행 (라바콘 시작선까지)'
+
+
 def _m8(c, sub):
     ob = c.ob
     if sub == '':
@@ -320,4 +326,4 @@ def _m4(c, sub):
 
 _STATES = {'WAIT_START': _wait, 'LANE_ONLY': _lane_only, 'FINISHED': _finished,
            'M5_BUMP': _m5, 'M6_ZIGZAG': _m6, 'M3_PEDESTRIAN': _m3, 'M7_OBSTACLE': _m7,
-           'M2_FORK': _m2, 'M8_CONES': _m8, 'M1_TRAFFIC': _m1, 'M4_PARKING': _m4}
+           'M2_FORK': _m2, 'M2_EXIT': _m2x, 'M8_CONES': _m8, 'M1_TRAFFIC': _m1, 'M4_PARKING': _m4}

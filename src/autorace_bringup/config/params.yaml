@@ -65,6 +65,7 @@ mission_node:
     cones_len_mm: 4300.0                   # cones_source_ready=false일 때만 씀 (차선 주행 통과 거리)
     # M8 라바콘: obstacle 노드가 콘 사이 경로를 따라감. false로 바꾸면 예전처럼 차선 주행으로 통과
     cones_source_ready: true
+    m2_exit: true                          # 11/14: M2_EXIT 상태(합류 끝 ~ 라바콘 시작선) = 차선 인식 모드만 + 코너 도면 곡률 보조. false면 예전(M8 접근에서 한쪽 선 모드)
     m8_keep_fork_mm: 2500.0                # 11/12 밤: M2에서 넘어오면 한쪽 선 모드를 코너를 다 돌 때까지 유지 (합류~코너 앞: 갈림길 바깥선, 코너: 안쪽 선=right_only). 이 거리는 안전 상한, 0=끔
     m8_both_frames: 0                      #   >0이면 양쪽 선이 이만큼 연속 보일 때 바로 normal (끝까지 한쪽 선 -> 0)
     m8_hold_speed: 0.15                    #   그동안 속도 (M7 직전 코너처럼 코너에서 직진하지 않게 천천히)
@@ -85,7 +86,7 @@ mission_node:
     m4_target_offset_mm: 50.0              # 11/12: 주차 노드에 넘긴 뒤 차선 왼쪽 5cm 붙기 (주차 노드 publish_lane_cfg: false와 같이)
     fork_len_mm: 2300.0                    # 도면 기준, 모의맵 실측으로 확인
     fork_default: A
-    stop_on_green_arrival: true
+    stop_on_green_arrival: false           # 11/14: 도착 때 초록이 확정돼 있으면 서지 않고 통과 (빨강·아무것도 못 봤으면 정지선에서 서서 초록 기다림)
     # 도면 경로 지도 (route_file은 launch가 config/track_route.yaml로 넣어 줌)
     route_gate_mm: 250.0                   # 흰 선을 도면 선으로 인정하는 오차 (달린 거리만큼 넓어짐)
     route_gain: 0.6
@@ -179,7 +180,7 @@ class_command_node:
     # 미션별 투표 기준 (최근 vote_window 프레임 중 몇 번). 0 = 위 vote_need. 제안값, TODO bag으로 조정
     #   잘못 보면 되돌릴 수 없는 것(갈림길 A/B는 한 번 정하면 안 바뀜, 신호등)은 엄하게
     #   놓치는 손해가 더 큰 것(서행·방지턱, 주차)은 느슨하게
-    mode_vote_need.M1_TRAFFIC: 7                # 신호등 빨강/초록 (+ 보행자)
+    mode_vote_need.M1_TRAFFIC: 4                # 신호등 빨강/초록 (+ 보행자). 11/14: 7 -> 4 (YOLO 약 2.5장/초라 7장이면 초록 확정 2.4초 늦음, 1114_01)
     mode_vote_need.M2_FORK: 3                   # 갈림길 A/B. 11/12 밤 7 -> 3 + 창 안 기다림(early_confirm_modes): 표지를 3번 보면 바로 결정
     mode_vote_need.M7_OBSTACLE: 3               # 3차선에서 미리 보는 갈림길 A/B. 11/12 밤 7 -> 3 (위와 같음)
     early_confirm_modes: [M2_FORK, M7_OBSTACLE]   # 이 미션은 최근 10프레임이 다 차기 전에도 need번이면 바로 인정
@@ -188,6 +189,7 @@ class_command_node:
     mode_vote_need.M5_BUMP: 5                   # 서행·방지턱: 잘못 봐도 시간만 조금 손해
     mode_vote_need.M6_ZIGZAG: 0                 # (받는 표지 없음)
     mode_vote_need.M8_CONES: 0                  # (받는 표지 없음)
+    mode_vote_need.M2_EXIT: 0                   # (받는 표지 없음)
     yellow_action: none                    # none: 명령 없음, pause: 정지선 앞 정지 요청
     # 원본 영상 bbox 높이(px). 0=크기 필터 끔. 현장 시험 후 클래스별 조정.
     min_bbox_height_px.red: 0.0
@@ -252,7 +254,9 @@ parking_node:
     back_mm: 150.0                         # 막혔을 때 후진 거리 (예전 50: 5cm씩 4번 왔다갔다)
     switch_pause_sec: 0.5                  # 전진 <-> 후진 바꿀 때 멈춤
     center_on_sides: false                 # 11/13 캡틴: 끔 (원을 접선까지). true면 70°부터 양옆 리모 정중앙 선을 따라 들어감
-    center_check: false                    # 11/13 캡틴: 끔 (경로 방식은 한 번에 넣기, 후진·재진입 안 함). true면 끝에서 양옆 리모 정중앙에서 center_tol_mm 넘게 벗어났으면 45cm 빼서 정중앙 선 따라 다시 (최대 2번)
+    center_check: true                     # 11/14 캡틴: 다시 켬 (끝에서 선 밟음 -> 양옆 정중앙 맞추기). center_on_sides가 꺼져 있어도 이제 끝에서 잰다 (예전엔 안 쟀음).
+                                           #   양옆 물체 안쪽 면이 앞바퀴 0~420mm 띠에 둘 다 보이고 그 사이가 650~1000mm일 때만. 시뮬레이션: 회전반경·라이다 위치 ±4~5cm 오차 -32/+48/+34mm -> -13/-3/-2mm (약 10초 더 걸림)
+                                           # (11/13 캡틴: 끔 (경로 방식은 한 번에 넣기, 후진·재진입 안 함). true면 끝에서 양옆 리모 정중앙에서 center_tol_mm 넘게 벗어났으면 45cm 빼서 정중앙 선 따라 다시 (최대 2번)
     center_retries: 2
     center_tol_mm: 15.0                    # 시뮬레이션 18개: 끝 옆 오차 평균 19 -> 8mm, 최대 35 -> 13mm
     center_pullout_mm: 450.0

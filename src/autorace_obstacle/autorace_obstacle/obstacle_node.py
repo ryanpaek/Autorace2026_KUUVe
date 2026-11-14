@@ -50,7 +50,9 @@ from autorace_obstacle.m7_link import M7Link, M7LinkParams
 from autorace_obstacle.scan_utils import cluster_points, lane_occupancy, roi, scan_to_points
 
 # 이 상태들에서는 차선 방향이 도면 방향과 다를 수 있어 yaw 차이를 배우지 않는다
-NO_LEARN_STATES = ('M6_ZIGZAG', 'M2_FORK', 'M8_CONES', 'M4_PARKING', 'FINISHED')
+NO_LEARN_STATES = ('M6_ZIGZAG', 'M2_FORK', 'M2_EXIT', 'M8_CONES', 'M4_PARKING', 'FINISHED')
+# 11/14: M2_EXIT(합류 끝 ~ 라바콘 시작선)에서도 콘을 미리 추적한다 (예전 M8 접근 단계). 명령은 M8_CONES에서만
+CONE_STATES = ('M2_EXIT', 'M8_CONES')
 
 
 def g_name(name: str) -> str:
@@ -199,8 +201,8 @@ class ObstacleNode(Node):
             return
         st, sub = m.get('state'), m.get('sub')
         if st != self.mstate:
-            if st == 'M8_CONES' or self.mstate == 'M8_CONES':
-                self.fol.reset()                       # 들어갈 때·나올 때 깨끗이
+            if (st in CONE_STATES) != (self.mstate in CONE_STATES):
+                self.fol.reset()                       # 들어갈 때·나올 때 깨끗이 (M2_EXIT -> M8는 추적 이어감)
                 self.get_logger().info(f'cones: reset ({self.mstate} -> {st})')
             if st == 'M7_OBSTACLE':
                 self.last_exit = None
@@ -310,7 +312,7 @@ class ObstacleNode(Node):
         state = {'clusters': clusters[:12], 'lane_occupancy': occ,
                  'front_min_mm': min(near) if near else None,
                  'cones_done': False, 'cone_ahead_mm': None, 'cone_any_ahead_mm': None}
-        if self.mstate == 'M8_CONES' and self.integ.ready:
+        if self.mstate in CONE_STATES and self.integ.ready:
             pose = self.integ.pose
             self.cands = self.fol.on_scan(pts, Pose2D(pose.x, pose.y, pose.yaw), self.lidar_xy)
             state['cones_done'] = self.fol.done
@@ -333,7 +335,7 @@ class ObstacleNode(Node):
                 self._check_camera(bgr)
 
     def _want_image(self) -> bool:
-        if self.mstate != 'M8_CONES' or not self.fol.tracker.tracks:
+        if self.mstate not in CONE_STATES or not self.fol.tracker.tracks:
             return False
         self.img_count += 1
         return self.img_count % max(1, int(self.get_parameter('cam_every').value)) == 0
@@ -398,7 +400,7 @@ class ObstacleNode(Node):
         state.update(self.link.state())
         self.state_pub.publish(String(data=json.dumps(state)))
 
-        if (self.mstate == 'M8_CONES' and self.get_parameter('publish_debug').value
+        if (self.mstate in CONE_STATES and self.get_parameter('publish_debug').value
                 and now - self.dbg_t >= 0.2):
             self.dbg_t = now
             pose = self.integ.pose

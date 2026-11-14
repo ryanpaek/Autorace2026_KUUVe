@@ -29,3 +29,11 @@ def test_player_command_with_device(monkeypatch):
     assert player_command('x.wav', device='plughw:1,0') == ['aplay', '-q', '-D', 'plughw:1,0', 'x.wav']
     monkeypatch.setattr('shutil.which', lambda name: None)
     assert player_command('x.wav') is None
+
+
+def test_parked_only_on_success_result():
+    from autorace_mission.chime_node import parked
+    assert parked('M4_PARKING', 'FINISHED', 'PARKED')
+    assert parked('M4_PARKING', 'FINISHED', None)            # 옛 미션 노드 (결과 없음)
+    assert not parked('M4_PARKING', 'FINISHED', 'FAIL_NO_CAR')
+    assert not parked('M1_TRAFFIC', 'M4_PARKING', 'PARKED')

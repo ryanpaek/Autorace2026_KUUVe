@@ -52,7 +52,9 @@ def test_full_lap_by_route():
     # 출발 후 leave_mm(600)과 횡단보도 끝선 둘 다 지나야 넘어간다
     assert p['m3_crosswalk_end'] <= entered['M7_OBSTACLE'] <= p['m3_crosswalk_end'] + 100
     assert entered['M2_FORK'] == pytest.approx(p['m7_island_tip'] - 300, abs=20)
-    assert entered['M8_CONES'] == pytest.approx(p['m2_merge_end'], abs=20)
+    # 11/14: 섬 끝 + 200 mm -> M2_EXIT(차선 인식 모드), 라바콘 시작선(도면 위치 - cones_enter_before) -> M8
+    assert entered['M2_EXIT'] == pytest.approx(p['m2_island_end'] + 200, abs=20)
+    assert p['m8_start_line'] - 400 <= entered['M8_CONES'] <= p['m8_start_line'] + 20
     assert entered['M1_TRAFFIC'] == pytest.approx(p['m8_end_line'] + 100, abs=20)
     # 카메라 정지선 없이도 도면 위치로 정지선 앞에서 선다 (brake 30 mm 앞)
     assert stops['M3_PEDESTRIAN'] == pytest.approx(p['m3_stop_line'] - 30, abs=15)
@@ -144,7 +146,9 @@ def test_m7_external_forced_end_if_avoid_never_finishes():
 def test_m2_uses_avoid_exit_lane_when_sign_unread():
     p, start, fsm, sources, entered = run_m7_external(fork_sign=False)
     assert fsm.fork_choice == 'A'                      # 회피가 끝난 차로 그대로 (섬을 건너지 않게)
-    assert entered['M8_CONES'] == pytest.approx(p['m2_merge_end'], abs=20)
+    # 11/14: 섬 끝 + 200 mm -> M2_EXIT(차선 인식 모드), 라바콘 시작선(도면 위치 - cones_enter_before) -> M8
+    assert entered['M2_EXIT'] == pytest.approx(p['m2_island_end'] + 200, abs=20)
+    assert p['m8_start_line'] - 400 <= entered['M8_CONES'] <= p['m8_start_line'] + 20
 
 
 def test_m7_external_off_keeps_old_behaviour():

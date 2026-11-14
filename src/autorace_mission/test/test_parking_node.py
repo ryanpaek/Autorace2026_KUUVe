@@ -579,7 +579,7 @@ def test_params_yaml_values_from_captain():
     p = _yaml_parking()
     assert p['front_stop_mm'] == 150.0 and p['back_mm'] == 150.0 and p['switch_pause_sec'] == 0.5
     assert p['guard_back'] and p['center_on_sides'] is False and p['follow_col5'] is False   # 11/13 캡틴: 원을 접선까지
-    assert p['center_check'] is False      # 11/13 15:49 캡틴: 경로 방식은 한 번에 넣기, 정중앙 다시 맞추기(후진·재진입) 끔
+    assert p['center_check'] is True       # 11/14 캡틴: 다시 켬 (끝에서 선 밟음). 11/13 15:49엔 끔
 
 
 def _step_inp(t, dist, blocked=False, yaw=0.0):
@@ -645,3 +645,19 @@ def test_all_defaults_are_ros_parameter_types():
             assert v and len({type(x) for x in v}) == 1 and isinstance(v[0], ok_scalar), k
         else:
             assert isinstance(v, ok_scalar), k
+
+
+@pytest.mark.parametrize('ov', [{'arc_radius_mm': 569.0}, {'arc_radius_mm': 489.0}, {'front_axle_from_lidar_mm': -97.0}])
+def test_center_check_works_without_center_on_sides(ov):
+    """11/14: center_on_sides 끔(원은 접선까지) + center_check 켬이면 끝에서 양옆 정중앙을 재서 15mm 넘으면 다시 넣는다.
+    예전엔 center_on_sides일 때만 재서 center_check가 아무 일도 안 했다 (회전반경 -4cm: 가운데서 +48mm 그대로)."""
+    o = dict(_yaml_parking(), **ov)
+    o['center_on_sides'], o['center_check'] = False, True
+    out, log = {}, []
+    n_in, hit, result = drive(FIVE, 2, o, fov_deg=210.0, camera=True, out=out, log=log)
+    x, y, th = out['pose']
+    x0, x1, _, _ = cell(2)
+    lat = x + 105.0 * math.cos(th) - (x0 + x1) / 2.0
+    assert (n_in, hit) == (4, False) and result.startswith('PARKED')
+    assert abs(lat) <= 20.0, lat
+    assert any((i.get('last_err') or (None,))[0] == 'center' for i in log)
