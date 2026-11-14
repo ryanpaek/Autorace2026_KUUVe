@@ -22,6 +22,17 @@ obstacle_node가 매 틱 update()를 부르고, 돌려받은 동작을 토픽으
      'sign' : 위에 더해, YOLO 갈림길 표지(fork_a/fork_b)를 확실히 본 뒤 지나가면(안 보이게 되면) 또는 가까워지면 끔.
               섬 앞 off_gate_mm 안이고 차가 바깥 차로(A/B)에 있을 때만 (가운데 차로에서 끄면 섬에 부딪힘)
 
+  8) 코너 미리보기 pre_* (11/14): 코너를 도는 동안 라이다 점을 IMU로 돈 각만으로 '3차선 직선 좌표'(시작선 x=0, 2차선 중심 y=0,
+     왼쪽 +)에 옮겨 쌓는다 (차가 코너 중심선 R640 위에 있다고 봄 -> odom 안 씀). 코너 직후(시작선 + pre_block_x_mm 안)
+     2차선에 장애물이 있으면 1·3차선을 같이 본다:
+       - 빈 차로: 2차선 장애물 옆·바로 뒤(앞면 + pre_side_need_mm)까지 그 차로에 장애물이 없나
+       - 막다름: 그 차로 다음 장애물 근처에 2차선도 막혀 있나 (거기서 두 칸 건너야 함)
+       - 꺾어 들어갈 수 있나: 켤 자세에서 최소 회전반경으로 굴려 봐서 차 옆면이 2차선 장애물을 비켜 가나.
+         코너 중간엔 차가 아직 바깥(1차선)을 보고 있어 안쪽 3차선은 코너보다 더 꺾어야 함 -> 가까우면 1차선만 됨
+     골랐으면 켤 때 회피 노드에 start_target(+1/-1)·start_y를 넘겨 켜자마자 그 차로로 옮긴다 (다시 고르기 안 함).
+     80°에서 켜서는 못 비켜 가면 코너 pre_enable_turn_deg(60)~80° 중 비켜 갈 수 있는 가장 늦은 각에서 켠다.
+     (11/14 실차: 코너 끝에서 켜고 지도가 쌓인 뒤에야 2차선 장애물에 반응 -> 늦게 꺾어 서고 후진, 시간 손실)
+
 시작선 위치는 세 가지로 판단한다 (위에서부터 우선).
   a. 카메라 흰 가로선: 시작선 근처에서 본 선까지 거리 - 그 뒤 달린 거리 (StopApproach와 같은 방식.
      선은 앞바퀴에 닿기 전에 화면 아래로 사라지므로 오도메트리로 이어 간다)
@@ -82,6 +93,38 @@ class M7LinkParams:
     corner_need_before_mm: float = -700.0   # M7 진입 위치(시작선 기준)가 이보다 앞이면 코너 지킴 (연습 set_state = -300 -> 안 씀)
     corner_fail_mm: float = 350.0       # 도면상 시작선 + 이만큼인데도 코너를 못 알아채면(IMU 이상) 예전 규칙으로
     trigger_fallback_mm: float = 1000.0  # obstacle: 앞 차로에 장애물이 끝까지 없으면 시작선 + 이만큼에서 켬
+    # 11/14 코너 미리보기 (모듈 설명 8): 코너 도는 중 라이다 점을 '3차선 직선 좌표'로 옮겨 쌓아 두고
+    #   코너 직후 2차선이 막혔으면 1·3차선 중 빈 쪽을 미리 정한다 -> 켤 때 회피 노드에 start_target으로 넘기고 조금 일찍 켬
+    pre_enable: bool = True
+    pre_corner_r_mm: float = 640.0      # 코너 중심선 반경 (도면 R640)
+    pre_corner_end_mm: float = -288.0   # 코너 끝 (시작선 기준, 도면)
+    pre_lane_width_mm: float = 520.0    # 3차선 차로 중심 간격 (avoid lane_width와 같게)
+    pre_min_turn_deg: float = 20.0      # 코너를 이만큼 돈 뒤부터 쌓음 (그 전엔 3차선이 옆·뒤라 각도 오차가 큼)
+    pre_lane_half_mm: float = 200.0     # 차로 중심 ± 이 안의 점만 그 차로 장애물 (바깥 벽·노이즈 제외)
+    pre_x_min_mm: float = -100.0        # 시작선 기준 이 범위 점만 (코너 안 벽·연석 제외)
+    pre_x_max_mm: float = 3000.0
+    pre_bin_mm: float = 100.0           # 앞뒤 칸 크기
+    pre_confirm: int = 2                # 같은 칸을 이만큼 스캔에서 봐야 장애물
+    pre_min_pts: int = 2                # 한 스캔에서 한 칸에 이만큼 점이 있어야 그 스캔에 '봄'
+    pre_block_x_mm: float = 1500.0      # 2차선 장애물 앞면이 시작선 + 이 안이면 '코너 직후 2차선 막힘'
+    pre_side_need_mm: float = 600.0     # 옆 차로가 2차선 장애물 앞면 + 이만큼까지 비어야 '빈 차로' (LIMO 320 + 여유)
+    pre_tie_mm: float = 300.0           # 두 옆 차로 빈 거리 차이가 이 안이면 같다고 보고: 갈림길 방향 > 옆 여유 큰 쪽
+    # 갈 수 있나 (굴려 보기): 켤 자세(코너 각)에서 그 차로로 최소 회전반경·전방 주시로 꺾어 가며, 차 옆면(장애물 쪽 변 + 앞 변)이
+    #   2차선 장애물 옆을 지나는 동안 가장 가까운 거리. 코너 중간엔 차가 아직 바깥(1차선) 쪽을 보고 있어
+    #   안쪽(3차선)은 코너보다 더 꺾어야 해서 가까운 장애물이면 못 감 (시뮬레이션: 시작선 +0.3 m 안이면 후진)
+    pre_reach_margin_mm: float = 60.0   # 이 이상 떨어져야 '갈 수 있음' (회피 노드 정지 판단 여유 path_margin + 켜기 지연)
+    pre_min_r_mm: float = 530.0         # 최소 회전반경 (실측, avoid min_turn_radius)
+    pre_lookahead_mm: float = 350.0     # 굴려 볼 때 전방 주시 (avoid lookahead)
+    pre_max_heading_deg: float = 40.0   # 차로 방향에서 이보다 틀지 않음 (avoid max_heading_deg)
+    pre_front_mm: float = 200.0         # 기준점 -> 앞범퍼 (avoid robot_front)
+    pre_rear_mm: float = 160.0          # 기준점 -> 뒤범퍼 (avoid robot_rear)
+    pre_obs_len_mm: float = 320.0       # 정차 LIMO 길이
+    pre_half_w_mm: float = 120.0        # 차 반폭 (avoid robot_half_width)
+    pre_obs_half_w_mm: float = 110.0    # 정차 LIMO 반폭
+    pre_enable_turn_deg: float = 60.0   # 미리 정했으면 코너를 이 각 ~ corner_turn_deg(80) 중 그 차로로 가장 잘 비켜 가는 각에서 켬
+                                        #   (바깥 1차선은 일찍, 안쪽 3차선은 늦게가 유리). 0 = 일찍 안 켬 (80°만)
+                                        #   시뮬레이션(m7_pre_sim): 50°는 코너 안 차로 이탈이 늘어남
+    pre_dead_mm: float = 600.0          # 옆 차로 다음 장애물과 2차선 다음 장애물이 이 안이면 그 옆 차로는 막다름
     # 끄기 방식 (모듈 설명 7)
     off_mode: str = 'none'              # 'none' | 'sign'
     off_sign_classes: Tuple[str, ...] = ('fork_a', 'fork_b')
@@ -170,6 +213,179 @@ class CornerWatch:
         return self.done
 
 
+class CornerPreview:
+    """코너 도는 중 라이다로 3차선 입구를 미리 본다 (모듈 설명 8). ROS 없음.
+
+    좌표: 3차선 직선 좌표 (mm). x = 시작선 기준 앞(+), y = 2차선 중심 기준 왼쪽(+).
+    차 기준점(뒤차축)이 코너 중심선 위에 있다고 보고, IMU로 돈 각 θ만으로 위치·방향을 정한다
+    (오른쪽 코너: 기준점 = (끝 - R cosθ, -R + R sinθ), 방향 = 90° - θ. 왼쪽 코너는 좌우 대칭).
+    """
+
+    def __init__(self, p: 'M7LinkParams'):
+        self.p = p
+        self.reset()
+
+    def reset(self) -> None:
+        self.hits = {}               # (차로 +1/0/-1, 칸 번호) -> 본 스캔 수
+        self.scans = 0
+        self.side = -1.0             # 코너 방향 (-1 오른쪽). 쌓을 때 IMU로 정함
+        self.decision = None         # decide() 마지막 결과
+
+    def pose(self, turn: float):
+        """IMU로 돈 각(라디안, 오른쪽 -) -> (기준점 x, y, 방향, 좌우 부호). 코너 시작 전이면 None."""
+        th = min(abs(turn), math.pi / 2)
+        if th < math.radians(self.p.pre_min_turn_deg):
+            return None
+        R, ce = self.p.pre_corner_r_mm, self.p.pre_corner_end_mm
+        side = -1.0 if turn < 0 else 1.0         # 오른쪽 코너 = -1 (트랙은 시계 방향)
+        return ce - R * math.cos(th), -R + R * math.sin(th), math.pi / 2 - th, side
+
+    def add_scan(self, pts, turn: Optional[float]) -> bool:
+        """pts: 차 기준점 좌표 라이다 점 [(x, y) mm] (obstacle_node scan_to_points 결과). 쌓았으면 True."""
+        if turn is None or pts is None:
+            return False
+        ps = self.pose(turn)
+        if ps is None:
+            return False
+        px, py, psi, side = ps
+        self.side = side
+        c, s = math.cos(psi), math.sin(psi)
+        lw, hw, b = self.p.pre_lane_width_mm, self.p.pre_lane_half_mm, self.p.pre_bin_mm
+        cnt = {}
+        for x, y in pts:
+            if side > 0:
+                y = -y                           # 왼쪽 코너면 좌우를 뒤집어 오른쪽 코너로 계산
+            X = px + x * c - y * s
+            Y = py + x * s + y * c
+            if side > 0:
+                Y = -Y
+            if not (self.p.pre_x_min_mm <= X <= self.p.pre_x_max_mm):
+                continue
+            lane = int(round(Y / lw))
+            if lane not in LANE_NUMBER or abs(Y - lane * lw) > hw:
+                continue
+            key = (lane, int(math.floor(X / b)))
+            cnt[key] = cnt.get(key, 0) + 1
+        for key, n in cnt.items():
+            if n >= self.p.pre_min_pts:
+                self.hits[key] = self.hits.get(key, 0) + 1
+        self.scans += 1
+        return True
+
+    def near_x(self, lane: int, from_x: float = -1e9, start_after: bool = False) -> Optional[float]:
+        """그 차로에서 확정된 장애물 칸 중 from_x 뒤로 끝나는(start_after: from_x 뒤에서 시작하는) 가장 가까운 칸의 앞면 x (mm)."""
+        b = self.p.pre_bin_mm
+        xs = [k[1] * b for k, n in self.hits.items()
+              if k[0] == lane and n >= self.p.pre_confirm
+              and ((k[1] * b >= from_x) if start_after else ((k[1] + 1) * b > from_x))]
+        return min(xs) if xs else None
+
+    def enable_pose(self, theta_deg: float):
+        """코너를 theta_deg 돌았을 때 기준점 자세 (진짜 좌표: 왼쪽 +) -> (x, y, 방향) mm·rad."""
+        ps = self.pose(math.copysign(math.radians(theta_deg), self.side))
+        if ps is None:
+            return None
+        x, y, psi, side = ps
+        return (x, y, psi) if side < 0 else (x, -y, -psi)
+
+    def reach_gap(self, lane: int, x2: float, start) -> float:
+        """start 자세에서 lane 차로 중심으로 굴려 가며(최소 회전반경, 전방 주시), 차 옆면(장애물 쪽 변 + 앞 변)이
+        2차선 장애물(앞면 x2, 길이 pre_obs_len_mm, 폭 ±pre_obs_half_w_mm) 옆을 지나는 동안 가장 가까운 거리 (mm, 음수면 부딪힘).
+        차가 비스듬히 지나가면 앞 모서리보다 옆면 뒤쪽이 장애물에 더 가까울 수 있어 변 전체를 본다."""
+        p = self.p
+        x, y, psi = start
+        ty = lane * p.pre_lane_width_mm
+        kmax = 1.0 / p.pre_min_r_mm
+        hmax = math.radians(p.pre_max_heading_deg)
+        L, f, r, w = p.pre_lookahead_mm, p.pre_front_mm, p.pre_rear_mm, p.pre_half_w_mm
+        x_end = x2 + p.pre_obs_len_mm
+        ds = 10.0
+        best = 9999.0
+        # 차 옆면 점 (기준점 좌표): 장애물 쪽 변 + 앞 변
+        side = [(f - i * (f + r) / 6.0, lane * -w) for i in range(7)] + [(f, lane * -w * (1 - i / 3.0)) for i in range(1, 4)]
+        for _ in range(800):
+            c, s_ = math.cos(psi), math.sin(psi)
+            for px, py in side:
+                gx = x + px * c - py * s_
+                if x2 <= gx <= x_end:
+                    gy = y + px * s_ + py * c
+                    best = min(best, lane * gy - p.pre_obs_half_w_mm)
+            if x - r * c > x_end:
+                break
+            a = math.atan2(ty - y, L) - psi
+            k = max(-kmax, min(kmax, 2.0 * math.sin(a) / L))
+            if abs(psi) >= hmax and k * psi > 0:
+                k = 0.0                                  # 차로 방향에서 더 틀지 않음
+            psi += k * ds
+            x += ds * math.cos(psi)
+            y += ds * math.sin(psi)
+        return best
+
+    def decide(self, fork: Optional[str] = None, enable_degs: Sequence[float] = (60.0, 80.0),
+               now_deg: float = 0.0) -> dict:
+        """코너 직후 2차선이 막혔으면 1·3차선 중 갈 차로와 켤 각을 고른다.
+
+        반환 {'blocked': 2차선 장애물 앞면 x, 'free': {+1, -1: 옆 차로 다음 장애물 앞면 (없으면 9999)},
+              'gap': {+1, -1: 2차선 장애물 옆을 비켜 가는 여유 mm (reach_gap, 켤 각 중 가장 좋은 값)},
+              'deg': {+1, -1: 그 켤 각}, 'dead': {+1, -1: 막다른 차로}, 'lane', 'enable_deg', 'why'}
+        막다른 차로: 옆 차로 다음 장애물 근처(±pre_dead_mm)에 2차선도 막혀 있음 -> 거기서 두 칸 건너야 함
+        (시뮬레이션: 그런 1차선으로 미리 가면 1.85 m에서 3차선으로 못 건너 세 번 후진, 안 정할 때보다 20초 손해)."""
+        p = self.p
+        x2 = self.near_x(0, p.pre_x_min_mm)
+        d = {'blocked': x2, 'free': {}, 'gap': {}, 'deg': {}, 'dead': {}, 'lane': None, 'enable_deg': None,
+             'scans': self.scans}
+        if x2 is None or x2 > p.pre_block_x_mm:
+            d['why'] = '2차선 코너 직후 비어 있음' if x2 is None else f'2차선 장애물 {x2:.0f} mm (멀어서 회피 노드에 맡김)'
+            self.decision = d
+            return d
+        need = x2 + p.pre_side_need_mm
+        x2b = self.near_x(0, x2 + p.pre_obs_len_mm + p.pre_bin_mm, start_after=True)   # 2차선 그다음 장애물
+        degs = sorted({max(float(a), now_deg) for a in enable_degs if a > 0}) or [max(now_deg, 80.0)]
+        free, gap, deg, dead = {}, {}, {}, {}
+        for lane in (1, -1):
+            xn = self.near_x(lane, p.pre_x_min_mm)
+            free[lane] = 9999.0 if xn is None else xn
+            dead[lane] = xn is not None and x2b is not None and abs(x2b - xn) <= p.pre_dead_mm
+            # 켤 각: 비켜 갈 수 있는 각 중 가장 늦은 것 (코너 안에서 일찍 켤수록 코너 안 차로 이탈 위험) / 다 안 되면 가장 나은 각
+            tries = [(self.reach_gap(lane, x2, st), a) for a in degs for st in [self.enable_pose(a)] if st is not None]
+            okk = [ga for ga in tries if ga[0] >= p.pre_reach_margin_mm]
+            gap[lane], deg[lane] = (max(okk, key=lambda ga: ga[1]) if okk
+                                    else max(tries, key=lambda ga: ga[0]) if tries else (-9999.0, None))
+        d.update(free=free, gap=gap, deg=deg, dead=dead)
+        n = LANE_NUMBER
+        txt = ' / '.join(f'{n[k]}차선 앞 {free[k]:.0f}·옆 {gap[k]:+.0f}'
+                         f'{"" if deg[k] is None else f"@{deg[k]:.0f}°"}{"·막다름" if dead[k] else ""}' for k in (1, -1))
+        empty = [k for k in (1, -1) if free[k] >= need]
+        reach = [k for k in empty if gap[k] >= p.pre_reach_margin_mm]
+        good = [k for k in reach if not dead[k]]
+        fork_lane = {'A': 1, 'B': -1}.get(fork)
+        best, why = None, ''
+        if good:
+            if len(good) == 1:
+                best, why = good[0], '한쪽만 감'
+            elif abs(free[1] - free[-1]) > p.pre_tie_mm:
+                best, why = max(good, key=lambda k: free[k]), '더 많이 빔'
+            elif fork_lane in good:
+                best, why = fork_lane, f'비슷함 -> 갈림길 {fork} 쪽'
+            else:
+                best, why = max(good, key=lambda k: gap[k]), '비슷함 -> 더 비켜 가는 쪽'
+        elif reach and not any(k not in reach and not dead[k] for k in empty):
+            best, why = max(reach, key=lambda k: free[k]), '막다른 차로뿐 -> 그래도 지금 피함'
+        if best is None:
+            if reach:
+                d['why'] = f'2차선 {x2:.0f} mm 막힘, 갈 수 있는 쪽은 막다른 차로 -> 회피 노드에 맡김 ({txt})'
+            elif empty:
+                d['why'] = f'2차선 {x2:.0f} mm 막힘, 너무 가까워 옆 차로로 못 꺾음 -> 회피 노드에 맡김 ({txt})'
+            else:
+                d['why'] = f'2차선 {x2:.0f} mm 막힘, 1·3차선도 막힘 -> 회피 노드에 맡김 ({txt})'
+            self.decision = d
+            return d
+        d['lane'], d['enable_deg'] = best, deg[best]
+        d['why'] = f'2차선 {x2:.0f} mm 막힘 -> {n[best]}차선, 코너 {deg[best]:.0f}°에서 켬 ({why}; {txt})'
+        self.decision = d
+        return d
+
+
 class M7Link:
     def __init__(self, params: Optional[M7LinkParams] = None):
         self.p = params or M7LinkParams()
@@ -215,6 +431,11 @@ class M7Link:
         self.corner = CornerWatch(self.p.corner_turn_deg, self.p.corner_straight_deg, self.p.corner_window_mm)
         self.corner_need = None      # None: 아직 모름(진입 직후), True: 코너 지킴, False: 안 씀
         self.start_heading_deg = None  # 켤 때 차가 3차선 직선에서 틀어진 각 (obstacle_node가 회피 노드에 넘김)
+        self.pre = CornerPreview(self.p)   # 코너 미리보기 (모듈 설명 8)
+        self.pre_lane = None         # 미리 정한 차로 (+1/-1), 켤 때 확정
+        self.pre_logged = None
+        self.start_target = 0        # 켤 때 회피 노드에 넘길 start_target (+1/-1, 0 = 없음)
+        self.start_y_m = 0.0         # 켤 때 회피 노드에 넘길 start_y (m)
         self.events: List[str] = []
 
     def on_yaw(self, yaw: Optional[float]) -> None:
@@ -253,6 +474,22 @@ class M7Link:
                 self.last_lane = (self.avoid_lane, 'avoid')   # 회피가 끝난 직후에도 그 차로를 기억
         if self.avoid_running and self.phase == 'armed':
             self.phase = 'running'
+
+    def on_scan_points(self, pts) -> None:
+        """라이다 한 바퀴 (차 기준점 좌표 mm 점들). 코너를 도는 동안(켜기 전)만 미리보기에 쌓는다."""
+        if not (self.p.pre_enable and self.in_m7 and self.phase == 'idle' and self.corner_need
+                and self.corner.active and not self.corner.done and self.yaw is not None):
+            return
+        if not self.pre.add_scan(pts, _wrap(self.yaw - self.corner.yaw0)):
+            return
+        fork = self.fork_sent if self.fork_sent in ('A', 'B') else None
+        lo, hi = self.p.pre_enable_turn_deg, self.p.corner_turn_deg
+        degs = [hi] if lo <= 0 or lo >= hi else [lo + i * 5.0 for i in range(int((hi - lo) / 5.0) + 1)] + [hi]
+        d = self.pre.decide(fork, degs, math.degrees(self.corner.turned))
+        key = (d.get('lane'), d.get('blocked') is not None and d['blocked'] <= self.p.pre_block_x_mm)
+        if key != self.pre_logged and (d.get('lane') is not None or self.pre_logged is not None):
+            self.events.append(f'코너 미리보기 (코너 {math.degrees(self.corner.turned):.0f}°): {d["why"]}')
+        self.pre_logged = key
 
     def on_front(self, front_mm: Optional[float]) -> None:
         """라이다: 앞 차로(차 중심 ±trigger_half_width_mm) 안 가장 가까운 장애물까지 거리 (라이다 기준, mm)."""
@@ -368,6 +605,10 @@ class M7Link:
             self.sign_lost = 0
             self.off_by = None
             self.trigger = None
+            self.pre.reset()
+            self.pre_lane = None
+            self.pre_logged = None
+            self.start_target, self.start_y_m = 0, 0.0
 
         fork = mission.get('fork_choice')
         if fork not in ('A', 'B') and self.fork_sent is None:
@@ -412,11 +653,20 @@ class M7Link:
         if self.phase == 'idle' and self.p.enable_mode == 'obstacle':
             if pos is None:
                 return out
+            pre = self._pre_ready()
+            if self.corner_need and not self.corner.done and pre is not None:
+                # 코너 미리보기로 2차선 막힘 + 갈 차로를 정함 -> 코너 끝(80°)까지 안 기다리고 켬. 앞 장애물 거리 조건도 안 봄
+                self.trigger = 'pre'
+                return out + self._arm(t, pos, f'코너 미리보기 {math.degrees(self.corner.turned):.0f}°: '
+                                              f'{LANE_NUMBER[pre]}차선으로 바로')
             if self.corner_need and not self.corner.done:
                 if pos < self.p.corner_fail_mm:
                     return out                  # 아직 코너 안 (도면 위치와 상관없이)
                 self.corner_need = False        # IMU로 코너를 못 알아챔 -> 예전 규칙
                 self.events.append(f'코너를 IMU로 못 알아챔 (돈 각 {math.degrees(self.corner.turned):.0f}°) -> 도면 문턱으로')
+            if self.corner_need and pre is not None:
+                self.trigger = 'pre'            # 코너를 다 돌았는데 미리 정한 차로가 있음 -> 바로 켬
+                return out + self._arm(t, pos, f'코너 미리보기: {LANE_NUMBER[pre]}차선으로 바로')
             if self.corner_need:
                 pass                            # 코너를 다 돎 = 직선: 도면 문턱 대신 이것으로 받음
             elif pos < self.p.trigger_gate_mm:
@@ -461,9 +711,34 @@ class M7Link:
         axis = self.corner.yaw0 + math.copysign(math.radians(self.p.corner_angle_deg), turn)
         return math.degrees(_wrap(self.yaw - axis))
 
+    def _pre_ready(self) -> Optional[int]:
+        """코너 미리보기로 정한 차로 (+1/-1)를 지금 쓸 수 있으면. 코너를 pre_enable_turn_deg 만큼 돌았어야 (코너 끝이면 바로)."""
+        d = self.pre.decision
+        if not (self.p.pre_enable and self.corner_need and d and d.get('lane') in (1, -1)):
+            return None
+        if self.corner.done:
+            return d['lane']
+        en = d.get('enable_deg') or self.p.corner_turn_deg
+        if self.corner.turned >= math.radians(en) - 1e-6:
+            return d['lane']
+        return None
+
+    def _start_y(self) -> float:
+        """켤 때 차 기준점이 2차선 중심에서 옆으로 (m). 코너를 IMU로 돈 경우 코너 중심선 모형으로, 아니면 0."""
+        if not (self.corner_need and self.corner.active and self.yaw is not None):
+            return 0.0
+        ps = self.pre.pose(_wrap(self.yaw - self.corner.yaw0))
+        if ps is None:
+            return 0.0
+        return (ps[1] if ps[3] < 0 else -ps[1]) / 1000.0
+
     def _arm(self, t: float, pos: float, why: str) -> List[Tuple]:
         out: List[Tuple] = []
         self.start_heading_deg = self._straight_heading_deg()
+        pre = self._pre_ready()
+        self.pre_lane = pre
+        self.start_target = int(pre) if pre is not None else 0
+        self.start_y_m = round(self._start_y(), 3)
         if self.fork_sent in (None, 'auto') and self.p.fork_fallback in ('A', 'B'):
             out.append(('fork', self.p.fork_fallback))
             self.fork_sent = self.p.fork_fallback
@@ -472,6 +747,10 @@ class M7Link:
         self.enable_t = t
         out.append(('enable', self.section_m))
         hd = '' if self.start_heading_deg is None else f', 직선 대비 {self.start_heading_deg:+.0f}°'
+        if self.start_target:
+            hd += f', 미리 정한 차로 {LANE_NUMBER[self.start_target]}차선'
+        if abs(self.start_y_m) >= 0.005:
+            hd += f', 옆 {self.start_y_m * 1000:+.0f} mm'
         self.events.append(f'회피 켬 ({why}): {self.trigger}, 위치 기준 {self.how}, 시작선 {pos:+.0f} mm, '
                            f'section {self.section_m:.2f} m{hd}')
         return out
@@ -604,4 +883,15 @@ class M7Link:
                 'm7_lane': (self.lane_now() or {}).get('lane'),
                 'm7_lane_src': (self.lane_now() or {}).get('src'),
                 'm7_line_d_mm': None if self.line is None else round(self.line[0]),
-                'm7_heading_forced': self.heading_forced}
+                'm7_heading_forced': self.heading_forced,
+                'm7_pre': self._pre_state()}
+
+    def _pre_state(self) -> Optional[dict]:
+        d = self.pre.decision
+        if not d:
+            return None
+        return {'lane': LANE_NUMBER.get(d.get('lane')) if d.get('lane') else None,
+                'block_mm': None if d.get('blocked') is None else round(d['blocked']),
+                'free1_mm': None if 1 not in d.get('free', {}) else round(d['free'][1]),
+                'free3_mm': None if -1 not in d.get('free', {}) else round(d['free'][-1]),
+                'scans': d.get('scans'), 'used': self.pre_lane is not None}

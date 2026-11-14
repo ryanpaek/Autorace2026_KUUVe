@@ -58,6 +58,11 @@ class AvoidParams:
     start_lane: int = 0               # enable 순간 로봇이 있는 차선
     start_heading_deg: float = 0.0    # enable 순간 차가 3차선 직선 방향에서 틀어진 각 (왼쪽 +). 팀 스택: obstacle_node가
                                       #   IMU로 '코너 진입 방향 - 90°'를 직선으로 보고 켤 때마다 넣음 (코너 끝에서 아직 덜 펴져도 기준이 맞음)
+    start_target: int = 0             # 11/14: 코너에서 미리 정한 차로 (+1/-1, 0 = 없음). obstacle_node가 켤 때마다 넣음.
+                                      #   코너 도는 중 라이다로 '코너 직후 2차선 막힘 + 빈 옆 차로'를 봤으면 켜자마자 그 차로로 옮기기 시작
+                                      #   (지도가 쌓일 때까지 기다리지 않음 -> 늦게 꺾어 서고 후진하던 것). 들어온 지도로 다시 고르기는 그대로
+    start_heading_max_deg: float = 50.0   # 11/14 35 -> 50 (코너 미리보기로 60°에서 켜면 30°). 이보다 큰 start_heading_deg는 잘못된 값으로 보고 0 (코너 미리보기로 일찍 켤 때는 이 안에서)
+    start_y: float = 0.0              # 11/14: 켤 때 차(기준점)가 시작 차로 중심에서 옆으로 떨어진 거리 [m, 왼쪽 +] (코너 끝 전 일찍 켤 때)
     section_length: float = 4.3       # enable 지점 ~ 3차선 끝(가운데 섬 시작)까지 거리 [실측!]
     island_length: float = 1.0        # 가운데 섬(육각형) 길이 → 가상 장애물로 넣음
     use_island: bool = True           # 섬을 가상 장애물로 넣을지
@@ -424,11 +429,25 @@ class AvoidPlanner:
         self.reset()
         self.t_start = t
         psi0 = math.radians(self.p.start_heading_deg)
-        if abs(psi0) > math.radians(35.0):
+        if abs(psi0) > math.radians(self.p.start_heading_max_deg):
             psi0 = 0.0                                   # 말이 안 되는 값은 버림
-        self.pose.reset(ox, oy, yaw, y0=self.p.start_lane * self.p.lane_width, psi0=psi0)
+        y0 = self.p.start_y if abs(self.p.start_y) <= 0.5 * self.p.lane_width else 0.0   # 말이 안 되는 값은 버림
+        self.pose.reset(ox, oy, yaw, y0=self.p.start_lane * self.p.lane_width + y0, psi0=psi0)
         self.state = 'RUN'
         self.last_switch = t - self.p.hold_time
+        try:
+            pre = int(self.p.start_target)
+        except (TypeError, ValueError):
+            pre = 0
+        if pre != self.p.start_lane and pre in self.lanes:
+            # 코너에서 미리 정한 차로: 바로 옮기기 시작. '다시 고르기'(앞이 더 빈 쪽으로 바꾸기)는 안 함 ->
+            #   코너 중간엔 차가 바깥쪽을 보고 있어 앞이 더 비어도 안쪽 차로는 못 꺾어 들어감 (미리보기가 그걸 보고 고름.
+            #   시뮬레이션: 다시 고르기로 3차선으로 바꿔 서고 후진). 정한 차로 앞이 정말 막히면 ①이 그대로 다시 고름
+            self.target = pre
+            self.flip_from = self.p.start_lane
+            self.last_switch = t
+            self.rechosen = True
+            self.events.append((0.0, f'코너에서 미리 정한 차로로 바로: {lane_name(self.p.start_lane)} → {lane_name(pre)}'))
 
     def set_exit(self, s):
         new = parse_exit(s)
