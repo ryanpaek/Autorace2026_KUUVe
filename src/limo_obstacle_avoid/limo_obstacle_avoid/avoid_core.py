@@ -103,7 +103,8 @@ class AvoidParams:
     forget_min_x: float = 0.25        # 차 기준 앞 이 거리부터 [m] (base_link 기준)
     forget_max_x: float = 2.2
     # ── 판단 ──
-    trigger_dist: float = 1.5   # 내 차선 앞 장애물이 (앞범퍼 기준) 이 안이면 차선 변경. 11/12 1.0 -> 1.3 -> 밤 1.5 (멀리서 미리. 1.8은 갈림길 시뮬레이션 30->28)
+    trigger_dist: float = 1.8   # 내 차선 앞 장애물이 (앞범퍼 기준) 이 안이면 차선 변경. 11/12 1.0 -> 1.3 -> 1.5 -> 11/15 저녁 1.8 (미리 피하기, 실차 요청)
+    exit_wall_trigger: float = 1.5    # 출구 반대쪽 가상 벽만 막을 때는 이 거리 (1.8이면 fork_sim 30 -> 28)
     change_len: float = 1.0           # 차선 1칸 옮기는 데 필요한 앞쪽 여유
     clear_back: float = 0.0           # 옮길 차선의 차 끝이 (뒤범퍼 - 이값)보다 뒤여야 들어감 (음수=더 일찍)
     clear_rollout: bool = True        # 11/12: 옆 장애물을 지나는 중이면 꺾어 들어가는 길을 굴려 봐서 안 부딪히면 바로 옮김
@@ -1016,7 +1017,14 @@ class AvoidPlanner:
             real = [o for o in obs if not o.virtual]
             rem = p.section_length - (x + p.robot_front)
             wait_sign = rem > p.center_leave_m and self.free_ahead(0, real) >= p.trigger_dist
-        if f_cur < p.trigger_dist and t - self.last_switch >= p.hold_time and not wait_sign:
+        # 11/15 저녁: 진짜 장애물은 trigger_dist(1.8 m) 앞에서 미리 피하되, 지금 차로를 막는 게 출구 반대쪽 가상 벽뿐이면
+        #   exit_wall_trigger(예전 1.5 m)로 (1.8 m면 옆 장애물을 다 지나기 전에 가상 벽에 반응해 '출구선호 포기' -> A/B 놓침)
+        trig = p.trigger_dist
+        if self.exit_pref is not None and p.exit_wall_trigger > 0:
+            f_real = self.free_ahead(cur, self.obstacles(False))
+            if f_real > f_cur + 1e-6:
+                trig = min(trig, p.exit_wall_trigger)
+        if f_cur < trig and t - self.last_switch >= p.hold_time and not wait_sign:
             nxt = self.choose(cur, obs)
             if nxt is None and self.exit_pref is not None:
                 obs2 = self.obstacles(False)            # 출구 선호 때문에 막혔으면 선호 포기

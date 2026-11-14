@@ -52,6 +52,8 @@ DEFAULT_PARAMS = {
     'zigzag_width_mm': 570.0,
     # 정지 미션 공통 (M3, M1)
     'stop_target_mm': 150.0,     # 11/15 저녁 실차: 100으로도 정지선 직전 -> 150. 실행 중 ros2 param set /mission_node stop_target_mm 으로 바로 조정
+    'm3_stop_target_mm': 250.0,  # 11/15 저녁 실차 요청: M7 직전 횡단보도는 여유롭게 25 cm 앞 (신호등은 stop_target_mm). 0이면 stop_target_mm
+    'stop_passed_mm': 120.0,     # 11/15 저녁: 정지선을 이만큼 넘게 지났다고 보이면(남은 거리 < -이것) 그 자리에서 섬 (다음 흰 선=끝선까지 가지 않게)
     'stop_brake_mm': 30.0,       # TODO 실측: approach_speed에서 0 명령 후 밀려가는 거리
     'stop_lost_ok_mm': 400.0,    # 정지선이 카메라에서 사라진 뒤 오도메트리로 이어 가는 한계
     # 정지선이 이 거리 안으로 오면 카메라 갱신을 끊고 오도메트리로만 센다.
@@ -81,7 +83,9 @@ DEFAULT_PARAMS = {
     # M8 라바콘 (obstacle 노드의 ConeFollower). false면 위 cones_len_mm 동안 차선 주행으로 통과
     'cones_source_ready': False,
     'cones_enter_before_mm': 0.0,    # 도면 위치 예비: 시작선 이만큼 앞(앞바퀴)에서 라바콘 모드 (1순위는 카메라로 선 통과)
-    'cones_enter_cone_mm': 150.0,    # 11/14: 라바콘 직전(라바콘 사이로 차가 들어오기 전, 앞바퀴 15cm 이내)까지는 차선 인식 유지
+    'cones_enter_cone_mm': 400.0,    # 11/15 저녁: 150 -> 400 (15 cm면 지연 때문에 콘에 닿은 뒤 바뀜 -> 들이받음). 그 전까지는 차선
+    'cones_corner_close_mm': 250.0,  #   코너를 '다 돎'으로 보기 전이라도 70° 넘게 돌았고 콘이 이 안이면 콘 모드
+    'cones_corner_min_deg': 70.0,
     'cones_approach_mm': 1550.0,     # 경로 지도 없을 때: M2 끝 -> 라바콘 모드 (도면 1854 - 300)
     # 11/11 코너 지킴: M2 끝 -> 좌하단 코너(90°) -> 시작선(코너 끝 + 240 mm). 도면 위치가 앞서거나 코너에서 콘이 보이면
     #   코너 안에서 라바콘 모드로 들어가 콘 쪽으로 곧장 감(지름길). 카메라로 시작선을 넘은 것 말고는 IMU로 코너를 다 돈 뒤에만
@@ -126,7 +130,7 @@ DEFAULT_PARAMS = {
     'm8_corner_turn_deg': 75.0,      # 0 = 안 씀
     'm8_corner_straight_deg': 4.0,
     'm8_corner_window_mm': 150.0,
-    'm8_corner_fail_mm': 300.0,      # 도면상 시작선 + 이만큼(지도 없으면 cones_approach + 이만큼)인데 코너를 못 알아채면 예전 규칙
+    'm8_corner_fail_mm': 100.0,      # 11/15 저녁 300 -> 100. 도면상 시작선 + 이만큼인데 코너를 못 알아채면 예전 규칙 (300이면 콘 사이에 이미 들어감)
     'cones_zone_mm': 2700.0,         # 라바콘 모드 최대 거리 (구간 2100 + 진입 300 + 여유)
     'cones_end_after_mm': 150.0,     # 끝선(앞바퀴)을 이만큼 지나면 obstacle 노드 판단과 상관없이 복귀
     'cones_handover_mm': 400.0,      # 차선을 다시 잡길 기다리는 최대 거리 (끝선 뒤 바로 코너)
@@ -224,6 +228,7 @@ class StopApproach:
         self.key = key           # 기본: 바로 뒤에 횡단보도 막대가 있는 가로선만 정지선으로 봄
         self.freeze_mm = freeze_mm          # 0이면 끔 (예전 동작)
         self.route_gate_mm = route_gate_mm  # 0이면 끔
+        self.passed_mm = 120.0              # 정지선을 이만큼 지났으면 바로 정지 (stop_passed_mm)
         self.seen_d = None       # 마지막으로 본 정지선 거리 (앞바퀴 기준)
         self.seen_at = None      # 그때의 누적 주행 거리
         self.route_line_s = None  # 도면상 정지선 s. 카메라가 선을 못 볼 때만 쓰는 예비값
@@ -277,6 +282,9 @@ class StopApproach:
 
     def should_stop(self, inp: Inputs) -> bool:
         rem = self.remaining(inp)
+        if rem is None and self.seen_d is not None and self.seen_at is not None:
+            rem = self.seen_d - (inp.dist_mm - self.seen_at)       # 놓친 뒤에도 '이미 지났나'는 셈
+            return rem < -self.passed_mm                        # 정지선을 지났음 -> 끝선까지 가지 말고 섬
         return rem is not None and rem <= self.target_mm + self.brake_mm
 
 
@@ -325,7 +333,12 @@ class MissionFSM:
         if state == 'M7_OBSTACLE':
             # 횡단보도에서 넘어올 때만 (연습으로 set_state M7이면 이미 코너 뒤 직선에 놓음)
             use = self.p.get('m7_corner_done_deg', 85.0) > 0 and why not in ('manual', 'init') and inp.yaw is not None
-            self.m7c = (inp.yaw, inp.dist_mm, 'M7_OBSTACLE', self.p['m7_corner_start_mm']) if use else None
+            start = self.p['m7_corner_start_mm']
+            xw = self._rp('m3_crosswalk_end')
+            if use and inp.route_s is not None and xw is not None:
+                # 11/15 저녁: 횡단보도에서 늦게(끝선 근처) 서면 M7 시작이 밀려 코너 보완도 늦었다 -> 도면 위치가 있으면 끝선 기준으로
+                start = max(0.0, min(1500.0, xw + self.p['m7_corner_start_mm'] - inp.route_s))
+            self.m7c = (inp.yaw, inp.dist_mm, 'M7_OBSTACLE', start) if use else None
             # 3차선·갈림길 직선 방향 = 코너 진입 방향에서 90° 돈 방향 (M2·합류에서 선을 놓쳤을 때 붙잡을 방향)
             self.axis_yaw = (inp.yaw + self.p['m7_corner_dir'] * math.pi / 2.0) if use else None
         from_exit = state == 'M8_CONES' and prev_state == 'M2_EXIT' and self.p.get('m2_exit', True)
@@ -481,11 +494,15 @@ class MissionFSM:
 
     def _arm_stop(self, inp: Inputs, line: Optional[str] = None) -> None:
         self._sub('approach', inp)
-        self.stop = StopApproach(self.p['stop_target_mm'], self.p['stop_brake_mm'],
+        target = self.p['stop_target_mm']
+        if line == 'm3_stop_line' and self.p.get('m3_stop_target_mm', 0.0) > 0.0:
+            target = self.p['m3_stop_target_mm']        # 11/15: 횡단보도(M3)는 더 넉넉하게
+        self.stop = StopApproach(target, self.p['stop_brake_mm'],
                                  self.p['stop_lost_ok_mm'],
                                  freeze_mm=self.p['stop_freeze_mm'],
                                  route_gate_mm=self.p['stop_route_gate_mm'])
         self.stop.route_line_s = self._rp(line) if line else None
+        self.stop.passed_mm = self.p.get('stop_passed_mm', 120.0)
         self.stop_line_name = line
 
     def _line_crossed(self, inp: Inputs, name: str) -> Optional[bool]:
@@ -751,6 +768,14 @@ class MissionFSM:
             cw.update(inp.yaw, inp.dist_mm)
             if cw.done:
                 self.log.append(f'{who} corner done (IMU {math.degrees(cw.turned):.0f}deg)')
+        # 11/15 저녁 실차 '커브 끝나고 라바콘을 그냥 들이받음': 코너를 IMU로 '다 돎(75° + 다시 직진)'이 늦게 나면
+        #   시작선 + 300 mm까지 콘 모드에 안 들어갔다 -> 70° 넘게 돌았고 차로 안 콘이 cones_corner_close_mm 안이면 들어감
+        late_close = (cw.active and not cw.done and ahead is not None
+                      and ahead <= p.get('cones_corner_close_mm', 0.0)
+                      and math.degrees(cw.turned) >= p.get('cones_corner_min_deg', 70.0))
+        if late_close:
+            self.log.append(f'{who} cone {ahead:.0f}mm close after {math.degrees(cw.turned):.0f}deg turn -> cones')
+            return f'cone ahead {ahead:.0f}mm (corner {math.degrees(cw.turned):.0f}deg)'
         if cw.active and not cw.done and not cam_near:
             fail = self._past(inp, 'm8_start_line', p['m8_corner_fail_mm'])
             if fail is None:

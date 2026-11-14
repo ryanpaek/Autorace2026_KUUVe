@@ -83,7 +83,7 @@ def test_pedestrian_stop_precision_and_wait():
         if fsm.sub == 'go':
             break
     assert stopped_at is not None
-    assert line_at - stopped_at == pytest.approx(150.0, abs=10)  # 11/15 저녁: 정지선 15cm 목표
+    assert line_at - stopped_at == pytest.approx(250.0, abs=10)  # 11/15 저녁: 횡단보도(M3)는 25cm 목표
     assert sim.t - t_stop >= 3.0
     assert cmd.source == 'lane'
 
@@ -215,21 +215,21 @@ def test_cones_enter_early_when_cone_close():
                       'cones_approach_mm': 2000.0})
     sim = Sim(fsm)
     for _ in range(300):
-        sim.tick(obstacle={'cone_ahead_mm': 400.0})
+        sim.tick(obstacle={'cone_ahead_mm': 500.0})
         if fsm.sub == 'cones':
             break
     assert fsm.sub == 'cones'
-    assert sim.dist >= 2000.0 - 50                          # 11/14: 400mm 앞 콘으로는 일찍 안 들어가고 차선 인식 유지
+    assert sim.dist >= 2000.0 - 50                          # 500mm 앞 콘으로는 일찍 안 들어가고 차선 인식 유지 (11/15 저녁: 기준 400)
 
     fsm2 = MissionFSM({'start_state': 'M8_CONES', 'cones_source_ready': True,
                        'cones_approach_mm': 2000.0})
     sim2 = Sim(fsm2)
     for _ in range(300):
-        sim2.tick(obstacle={'cone_ahead_mm': 120.0})
+        sim2.tick(obstacle={'cone_ahead_mm': 380.0})
         if fsm2.sub == 'cones':
             break
     assert fsm2.sub == 'cones'
-    assert 1500.0 - 50 <= sim2.dist < 2000.0                # 라바콘 직전(150mm 이내)에 들어오면 전환
+    assert 1500.0 - 50 <= sim2.dist < 2000.0                # 11/15 저녁: 라바콘 40 cm 안이면 전환 (15 cm면 들이받음)
 
 
 def test_cones_handover_times_out_without_lane():
@@ -397,8 +397,8 @@ def test_cones_not_entered_inside_corner():
     _, old = _m8_from_m2(0.0)
     assert old is not None and old < 609.0 + 1005.0                 # 코너 안에서 들어감 (재현)
     fsm, new = _m8_from_m2(75.0)
-    assert new is not None and new >= 609.0 + 1005.0 * (75.0 / 90.0)   # 코너를 거의 다 돈 뒤
-    assert any('M8 corner done' in m for m in fsm.log)
+    assert new is not None and new >= 609.0 + 1005.0 * (70.0 / 90.0)   # 코너를 거의 다 돈 뒤 (11/15 저녁: 콘이 바로 앞이면 70°부터)
+    assert any('M8 corner done' in m or 'close after' in m for m in fsm.log)   # 다 돎, 또는 70° 넘게 돌았고 콘이 바로 앞
 
 
 def test_cones_corner_guard_off_for_practice_start():
@@ -663,3 +663,30 @@ def test_green_on_arrival_passes_without_stopping():
         d = min(2000.0 + 40.0 * i, 3000.0)
         cmd = wait.step(Inputs(t=0.1 * i, dist_mm=d, route_s=d, confirmed_classes={}))
     assert wait.sub == 'stopped' and cmd.source == 'stop'
+
+
+def test_stop_now_if_stop_line_already_passed():
+    """11/15 저녁 실차: 횡단보도 정지선을 늦게 잡거나 놓치면 끝선까지 가서 섬 -> 정지선을 지났다고 보이면 그 자리에서 섬"""
+    from autorace_mission.fsm import StopApproach
+    st = StopApproach(250.0, 30.0, 400.0)
+    st.seen_d, st.seen_at = 600.0, 0.0                   # 600 mm 앞에서 봄
+    assert not st.should_stop(Inputs(t=0.0, dist_mm=100.0, lane={}))       # 아직 500 mm
+    assert st.should_stop(Inputs(t=0.0, dist_mm=400.0, lane={}))           # 200 mm: 목표 안
+    st2 = StopApproach(250.0, 30.0, 400.0)
+    st2.seen_d, st2.seen_at = 300.0, 0.0
+    assert st2.should_stop(Inputs(t=0.0, dist_mm=900.0, lane={}))          # 놓친 채 정지선을 600 mm 지남 -> 바로 정지
+
+
+def test_m7_corner_start_from_route_position():
+    """11/15 저녁: 횡단보도에서 늦게 출발해도 M7 직전 코너 보완은 도면상 끝선 기준 (예전: M7 시작 + 330 mm 고정)"""
+    import math as _m
+    pts = {'m3_crosswalk_end': 10000.0}
+    fsm = MissionFSM({'start_state': 'M3_PEDESTRIAN', 'route_points': pts})
+    fsm._goto('M7_OBSTACLE', Inputs(t=0.0, dist_mm=0.0, yaw=_m.radians(-90.0), route_s=10400.0), 'left crosswalk')
+    assert fsm.m7c[3] == 0.0                             # 끝선 400 mm 지나서 시작 -> 코너 보완 바로
+    fsm2 = MissionFSM({'start_state': 'M3_PEDESTRIAN', 'route_points': pts})
+    fsm2._goto('M7_OBSTACLE', Inputs(t=0.0, dist_mm=0.0, yaw=_m.radians(-90.0), route_s=9900.0), 'left crosswalk')
+    assert fsm2.m7c[3] == 430.0                          # 끝선 100 mm 전 -> 330 + 100
+    fsm3 = MissionFSM({'start_state': 'M3_PEDESTRIAN', 'route_points': pts})
+    fsm3._goto('M7_OBSTACLE', Inputs(t=0.0, dist_mm=0.0, yaw=_m.radians(-90.0)), 'left crosswalk')
+    assert fsm3.m7c[3] == 330.0                          # 도면 위치 없으면 예전대로

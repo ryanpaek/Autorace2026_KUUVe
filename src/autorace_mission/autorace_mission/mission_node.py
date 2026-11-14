@@ -142,7 +142,9 @@ class MissionNode(Node):
                 if prm.name in DEFAULT_PARAMS and not isinstance(DEFAULT_PARAMS[prm.name], dict):
                     self.fsm.p[prm.name] = prm.value
                     st = getattr(self.fsm, 'stop', None)
-                    if st is not None and prm.name == 'stop_target_mm':
+                    if st is not None and prm.name == 'stop_target_mm' and self.fsm.stop_line_name != 'm3_stop_line':
+                        st.target_mm = float(prm.value)
+                    if st is not None and prm.name == 'm3_stop_target_mm' and self.fsm.stop_line_name == 'm3_stop_line':
                         st.target_mm = float(prm.value)
                     if st is not None and prm.name == 'stop_brake_mm':
                         st.brake_mm = float(prm.value)
