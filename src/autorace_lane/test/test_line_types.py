@@ -108,7 +108,24 @@ def test_yellow_guard_off_on_normal_two_yellow_lines():
         return out, p
     out, p = both_yellow(-150.0, 370.0)                   # 왼쪽 노란 실선 15 cm인데 오른쪽도 노란 실선
     assert out.yellow_guard is None and out.kappa > -p.kappa_max + 0.5
-    out, p = both_yellow(-150.0, 370.0, yellow_guard_one_side_only=False)   # 예전(11/14)이면 최대 조향
+    out, p = both_yellow(-150.0, 370.0, yellow_guard_one_side_only=False,
+                         yellow_guard_three_lane_only=False)                 # 예전(11/14)이면 최대 조향
     assert out.yellow_guard == 'L'
     out, p = _run_scene(-150.0, 370.0, frames=3)           # 오른쪽이 흰 점선(M7 1차로)이면 지킴
     assert out.yellow_guard == 'L'
+
+
+def test_yellow_guard_only_in_three_lane_section():
+    """11/15 실차: 코너 앞에서 바깥 노란선이 앞쪽에서 휘어 들어오는 것을 '붙었다'로 보고 코너 0.6 m 전부터 끝까지 꺾음,
+    M2 한쪽 선 모드에서 섬 쪽으로 밀어냄 -> 지킴은 3차선(lane_color both, normal 모드)에서만"""
+    from autorace_lane.lane_core import LaneFollower
+    lane, white = _scene(-150.0, 370.0)                   # 왼쪽 노란 실선 15 cm + 오른쪽 흰 점선
+    for color, mode, want in (('both', 'normal', 'L'), ('yellow', 'normal', None),
+                              ('both', 'right_only', None), ('both', 'left_only', None)):
+        p = LaneParams(lane_width_mm=520.0, lane_color=color)
+        f = LaneFollower(CFG, p)
+        f.mode = mode
+        out = None
+        for _ in range(3):
+            out = f.process_bev(lane.copy(), white.copy(), yaw=0.0, speed=0.2)
+        assert out.yellow_guard == want, (color, mode, out.yellow_guard)

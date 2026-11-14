@@ -98,7 +98,7 @@ def run(kw, mode, y0, psi0, delay=4, hz=12, noise=3.0, dist=0.6, seed=1, T=12.0,
     # 노란 실선(+260)까지 차체 왼쪽 면(차 반폭 120) 여유
     margin=260.0-(np.max(ys)+120.0)
     return np.max(np.abs(ys)), np.ptp(ys[h:]), np.max(np.abs(ks)), flips, g/len(ys), margin
-NEW={}; OLD={"yellow_guard_one_side_only":False}; OFF={"yellow_solid_guard":False}
+NEW={}; OLD={"yellow_guard_one_side_only":False,"yellow_guard_three_lane_only":False}; OFF={"yellow_solid_guard":False}
 import os
 MODES=os.environ.get("MODES","normal,3lane").split(",")
 VAR=eval(os.environ.get("VAR","{}"))

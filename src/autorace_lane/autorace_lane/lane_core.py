@@ -295,6 +295,11 @@ class LaneParams:
     #   최대 조향 2.1을 15초에 14번 좌우로 뒤집음, 지킴 끄면 0번). 반대쪽 선도 노란 실선이면(= 일반 1차로) 지킴 안 함:
     #   그때는 양쪽 선 가운데 맞추기가 이미 양쪽 경계를 본다. M7 바깥 차로(노란 실선 + 흰 점선)·한쪽 선만 보일 때만 지킴
     yellow_guard_one_side_only: bool = True
+    # 11/15 실차: 모든 코너에서 '초반에 과하게 꺾고 그 뒤 직진해 뚫고 나감', M2에서 섬 쪽을 밟음.
+    #   카메라는 차 앞 0.55 m부터만 보이는데 지킴은 그 앞 노란선까지 거리를 잰다 -> 코너 앞에서 바깥 선이 앞쪽에서 휘어 들어오면
+    #   '노란선에 붙었다'로 보고 코너 0.6 m 전부터 끝까지 꺾음 (코너 시뮬레이션: 안쪽 35 cm 밀려 선 밟음, 끄면 11 cm).
+    #   M2 한쪽 선 모드도 휘어 나가는 바깥선을 '붙었다'로 보고 섬 쪽으로 밀어냄. 3차선(M7, lane_color both) 직선 구간에서만 지킴
+    yellow_guard_three_lane_only: bool = True
     yellow_guard_look_mm: float = 600.0   # 노란 실선까지 거리를 잴 때 이 앞까지만 (400으로 줄이면 M7 1차로 시뮬레이션 흔들림 37 -> 89 mm)
     yellow_guard_min_urg: float = 0.35    # 지킴이 걸리는 순간 최소 세기 (0이면 margin에서 0부터 hard까지 서서히)
 
@@ -1633,7 +1638,8 @@ class LaneFollower:
 
         # 11/14: 노란 실선 이탈 방지 강제 조향 (M7 3차선 바깥 노란 실선 및 일반 구간 노란 실선 경계 보호)
         hard_guard = False
-        if p.yellow_solid_guard and source not in ('stop', 'heading') and self.mode != 'zigzag':
+        if (p.yellow_solid_guard and source not in ('stop', 'heading') and self.mode == 'normal'
+                and (p.lane_color == 'both' or not p.yellow_guard_three_lane_only)):
             l_yellow_solid = (out.line_left is not None
                               and out.line_left.get('color') == 'yellow'
                               and not out.line_left.get('dashed', False))
