@@ -61,7 +61,7 @@ mission_node:
     zigzag_len_mm: 1800.0
     leave_mm: 600.0
     state_max_mm: 10000.0
-    stop_target_mm: 100.0                  # 11/15: 50 -> 100. 50으로도 실차는 정지선 직전에 섬 (카메라 사각 0.55 m를 오도메트리로 세고 제동 밀림이 더 큼). 목표: 실제 약 5 cm 앞
+    stop_target_mm: 150.0                  # 11/15 저녁: 100으로도 실차는 정지선 직전에 섬 -> 150. 실행 중 바로 바꾸기: ros2 param set /mission_node stop_target_mm 200.0
     stop_brake_mm: 30.0                    # TODO 실측
     ped_wait_sec: 3.5
     obstacle_source_ready: false           # obstacle 노드 완성 후 true
@@ -271,3 +271,11 @@ parking_node:
     guard_back: true                       # 옆 2cm 감시에 걸리면 그 자리에서 끝내지 말고 15cm 후진 뒤 다시 (최대 3번)
     guard_back_max: 3
     back_reverse_scale: 0.10               # 11/14: 기억후진 시 잘못 들었던 길로 갈 때 꺾었던 조향의 반대 방향 10% 조향
+
+ackermann_bridge:
+  ros__parameters:
+    # 11/15: 모든 커브에서 바깥으로 밀림의 원인. 브리지는 조향각 = atan(축거 x angular.z / v)인데 launch가 이 값을 안 넘겨
+    #   기본 0.2로 돌았다. 실측 유효 축거 0.222 (최대 조향 0.40 rad에서 잰 곡률 1.89 = tan(0.40)/0.222, 회피 노드도 0.222).
+    #   0.2로 계산하면 명령보다 약 11% 덜 꺾임 (docs/CHANGES_20261106_M7.md에 적혀 있었으나 안 고쳐져 있었음)
+    wheelbase: 0.222
+    max_steer: 0.40

@@ -114,6 +114,7 @@ class AvoidParams:
     edge_margin: float = 0.05
     edge_look: float = 0.35
     edge_from: float = 0.70           # 차로 중심에서 바깥 차로 쪽으로 lane_width x 이만큼 넘어온 뒤에만 지킴
+    edge_trust_k: float = 0.0         # 꺼 둠: 0.3·0.5면 노란 실선까지 최소 여유 12.5 -> 3.5 cm (시뮬레이션), 조향 반대 횟수는 그대로. 회피 조향이 이미 안쪽으로 최대 곡률의 이만큼 넘게 꺾고 있으면 노란선 지킴(끝까지 꺾기)이 안 끼어듦. 0 = 예전
     yellow_cam_guard: bool = True     # 11/14: 카메라(/lane/status)가 노란 실선 이탈 위험을 알리면 즉시 안쪽으로 최대 조향
     yellow_cam_offset_mm: float = 70.0
     better_margin: float = 0.3        # 옮길 차선이 지금보다 이만큼 더 비어야 옮김
@@ -252,7 +253,7 @@ class AvoidParams:
     lane_row: float = 0.55            # 차선 노드 offset_mm 을 재는 행 (기준점 앞 m)
     # ── 멈춤 탈출: 막혀서 서 있으면 상황이 안 바뀌어 계속 선다 → 조금 후진하며 크게 꺾어 다시 잡음 ──
     recover: bool = False             # 11/12 밤: 후진(되돌아가기·탈출) 완전히 끔. 막히면 끝까지 꺾어 빠지기(squeeze)만, 안 되면 서서 기다림
-    recover_after: float = 0.4        # 이만큼 계속 막혀 있으면 탈출 시작 [s] (0.8 -> 0.4: 서 있는 시간 줄임)
+    recover_after: float = 1.5        # 이만큼 계속 막혀 있으면 탈출(후진) 시작 [s]. 11/15 저녁 0.4 -> 1.5: 틈만 나면 후진 -> 먼저 전진 찾기(creep 바로, 양쪽 1초 뒤)
     recover_dist: float = 0.40   # 탈출 후진 거리 [m]. 11/12 0.25 -> 0.40
     recover_speed: float = 0.30   # 후진 속도 [m/s]. 11/12 0.10 -> 0.30
     recover_time: float = 4.0         # 이 시간 안에 못 끝내도 멈추고 다시 계획 [s]
@@ -1479,8 +1480,14 @@ class AvoidPlanner:
         if (psi > mh and k > 0) or (psi < -mh and k < 0):
             k = 0.0
         cam_side = self._cam_yellow_guard(t)
-        if self._edge_danger(y, psi) or cam_side != 0:
-            side = cam_side if cam_side != 0 else (1 if y > 0 else -1)
+        danger = self._edge_danger(y, psi) or cam_side != 0
+        side = cam_side if cam_side != 0 else (1 if y > 0 else -1)
+        # 11/15 저녁 실차 '방향을 정했는데 중간에 반대로 꺾었다 다시 원래대로 -> 회피 각이 안 나옴': 바깥 차로로 들어가며
+        #   37° 안팎으로 틀어지면 노란선 지킴이 거의 매번(시뮬레이션 127판에 153번) 반대쪽 끝까지 꺾었다. 그때 회피 조향(pure pursuit)도
+        #   이미 안쪽으로 edge_trust_k x 최대 넘게 꺾고 있으면 그대로 둠 (지킴은 회피가 바깥쪽으로 꺾거나 덜 꺾을 때만)
+        if danger and p.edge_trust_k > 0 and -side * k >= p.edge_trust_k * kmax:
+            danger = False
+        if danger:
             if not getattr(self, 'edge_guarded', False):
                 self.events.append((self.pose.x, f'바깥 노란선 앞 (옆 {y:+.2f}m, 방향 {math.degrees(psi):+.0f}°) -> 안쪽으로 끝까지 꺾음'))
             self.edge_guarded = True

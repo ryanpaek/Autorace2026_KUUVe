@@ -58,7 +58,7 @@ def generate_launch_description():
         # 이 LIMO의 애커만 드라이버는 /limo/ack_cmd(AckermannDrive)만 받는다
         DeclareLaunchArgument('use_ackermann_bridge', default_value='true'),
         Node(package='autorace_mission', executable='ackermann_bridge', name='ackermann_bridge',
-             parameters=[{'small_steer_gain': f('steer_gain')}],
+             parameters=[params, {'small_steer_gain': f('steer_gain')}],   # 11/15: params.yaml wheelbase 0.222
              output='screen', condition=IfCondition(LaunchConfiguration('use_ackermann_bridge'))),
         Node(package='autorace_lane', executable='lane_node', name='lane_node',
              parameters=[params, {'bev_config': bev,

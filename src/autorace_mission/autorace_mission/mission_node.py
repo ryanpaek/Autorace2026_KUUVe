@@ -10,6 +10,7 @@
   /mission/start (std_msgs/Empty)       출발
   /mission/estop (std_msgs/Bool)        true면 즉시 정지 (false로 해제)
   /mission/set_state (std_msgs/String)  연습용: 원하는 상태로 점프 (경로 위치 s도 그 미션 시작점으로)
+  /mission/resume (std_msgs/Empty)      끊긴 뒤 이어 하기: 마지막 기록(1초마다 ~/.ros/autorace_resume.json)의 미션·갈림길·경로 위치로 (11/15)
   /mission/skip (std_msgs/String)       주행 중 건너뛰기: 상태만 바꾸고 경로 위치 s는 그대로 (디버그 화면 버튼, 11/11)
   /route/set_s (std_msgs/Float32)       연습용: 경로 위치 s(mm)를 직접 지정
   /cmd_vel (Twist)                      후진 판단 보조용 (자기가 낸 명령 / 수동 조종 명령)
@@ -30,6 +31,7 @@
 
 import json
 import math
+import os
 import time
 
 import rclpy
@@ -131,6 +133,22 @@ class MissionNode(Node):
             except Exception as e:      # 지도 파일이 깨져도 거리 기준으로 달린다
                 self.get_logger().error(f'route map load failed ({path}): {e} -> 거리 기준')
         self.fsm = MissionFSM(params)
+        # 11/15: 실행 중 바꾸기 (빌드·재시작 없이). 예: ros2 param set /mission_node stop_target_mm 150.0
+        #   미션 FSM 설정값(DEFAULT_PARAMS)은 바로 반영. 지금 정지선에 다가가는 중이면 그 목표도 바로 바꿈
+        from rcl_interfaces.msg import SetParametersResult
+
+        def _on_params(plist):
+            for prm in plist:
+                if prm.name in DEFAULT_PARAMS and not isinstance(DEFAULT_PARAMS[prm.name], dict):
+                    self.fsm.p[prm.name] = prm.value
+                    st = getattr(self.fsm, 'stop', None)
+                    if st is not None and prm.name == 'stop_target_mm':
+                        st.target_mm = float(prm.value)
+                    if st is not None and prm.name == 'stop_brake_mm':
+                        st.brake_mm = float(prm.value)
+                    self.get_logger().info(f'설정 바꿈: {prm.name} = {prm.value}')
+            return SetParametersResult(successful=True)
+        self.add_on_set_parameters_callback(_on_params)
         self.get_logger().info(f'mission start state: {self.fsm.state}')
 
         self.dist_mm = 0.0
@@ -185,6 +203,14 @@ class MissionNode(Node):
         self.create_subscription(Bool, '/mission/estop', self._on_estop, 10)
         self.create_subscription(String, '/mission/set_state', self._on_set_state, 10)
         self.create_subscription(String, '/mission/skip', self._on_skip, 10)
+        # 11/15 저녁: 끊긴 뒤 이어 하기. 1초마다 미션 상태·갈림길 선택·경로 위치를 파일에 남기고,
+        #   /mission/resume (Empty) 를 받으면 그 상태에서 이어 감 (차가 그 자리에 그대로 있다고 봄).
+        #   resume_on_start true면 노드가 다시 켜질 때 resume_max_age_sec 안에 남긴 기록이 있으면 자동으로 이어 감
+        self.declare_parameter('resume_file', os.path.expanduser('~/.ros/autorace_resume.json'))
+        self.declare_parameter('resume_on_start', False)
+        self.declare_parameter('resume_max_age_sec', 300.0)
+        self.create_subscription(Empty, '/mission/resume', lambda _m: self._resume('topic'), 10)
+        self._resume_saved_t = 0.0
         self.create_subscription(Float32, '/route/set_s', self._on_set_s, 10)
         self.create_subscription(Twist, '/cmd_vel', self._on_cmd_vel, 10)
 
@@ -352,6 +378,54 @@ class MissionNode(Node):
         except ValueError as e:
             self.get_logger().error(str(e))
 
+    def _save_resume(self):
+        """1초마다 이어 하기용 기록 (미션 중일 때만)"""
+        now = time.monotonic()
+        if now - self._resume_saved_t < 1.0 or self.fsm.state in ('WAIT_START', 'FINISHED'):
+            return
+        self._resume_saved_t = now
+        rec = {'state': self.fsm.state, 'fork_choice': self.fsm.fork_choice,
+               'route_s': (self.route_s_map if self.route_active else None),
+               'wall_time': time.time()}
+        try:
+            path = self.get_parameter('resume_file').value
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp = path + '.tmp'
+            with open(tmp, 'w') as fp:
+                json.dump(rec, fp)
+            os.replace(tmp, path)
+        except OSError as e:
+            self.get_logger().warn(f'이어 하기 기록 실패: {e}', throttle_duration_sec=10.0)
+
+    def _resume(self, why):
+        """남긴 기록의 미션 상태·갈림길 선택·경로 위치로 이어 감"""
+        path = self.get_parameter('resume_file').value
+        try:
+            with open(path) as fp:
+                rec = json.load(fp)
+        except (OSError, ValueError):
+            self.get_logger().warn(f'이어 하기: 기록 없음 ({path})')
+            return False
+        age = time.time() - float(rec.get('wall_time', 0.0))
+        if why == 'start' and age > float(self.get_parameter('resume_max_age_sec').value):
+            self.get_logger().info(f'이어 하기: 기록이 {age:.0f}초 전이라 안 씀')
+            return False
+        state = rec.get('state')
+        if state not in SEQUENCE:
+            return False
+        try:
+            self.fsm._goto(state, self._inputs(), 'manual')
+        except ValueError as e:
+            self.get_logger().error(str(e))
+            return False
+        self.fsm.fork_choice = rec.get('fork_choice')
+        self.practice_m2 = False
+        if rec.get('route_s') is not None and self.route is not None:
+            self._route_reset(float(rec['route_s']), f'resume ({why})', align=False)
+        self.get_logger().info(f'이어 하기({why}): {state}, 갈림길 {rec.get("fork_choice")}, '
+                               f's {rec.get("route_s")}, {age:.0f}초 전 기록')
+        return True
+
     def _on_skip(self, msg):
         """지금 자리에서 다른 미션으로 (경로 위치·갈림길 선택은 그대로)."""
         target = msg.data.strip()
@@ -384,6 +458,10 @@ class MissionNode(Node):
 
     # --- 틱 -----------------------------------------------------------------
     def _tick(self):
+        if (not getattr(self, '_resume_tried', False) and self._last_xy
+                and self.get_parameter('resume_on_start').value):
+            self._resume_tried = True                 # 노드가 다시 켜짐: 최근 기록이 있으면 그 미션에서 이어 감
+            self._resume('start')
         s0 = float(self.get_parameter('route_start_s').value)
         if not self._auto_s_done and s0 >= 0.0 and self.tracker is not None and self._last_xy:
             self._route_reset(s0, 'route_start_s', align=True)
@@ -473,6 +551,7 @@ class MissionNode(Node):
                  'corner_preview': bool(getattr(self, '_corner_on', False)),
                  'route': self.tracker.state() if self.route_active else None}
         self.state_pub.publish(String(data=json.dumps(state)))
+        self._save_resume()
         sure_s = (self.route_s_map if (self.route_active and self.tracker is not None and not self.tracker.lost)
                   else None)
         self.stage_pub.publish(String(data=json.dumps(

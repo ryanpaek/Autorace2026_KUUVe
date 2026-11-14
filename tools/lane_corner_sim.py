@@ -79,7 +79,8 @@ def render(x0, y0, h0, rnd, noise_mm):
     return img
 
 
-def run(kw, v=0.25, hz=13.0, delay=3, noise_mm=6.0, route=True, s_err=0.0, seed=1, trace=False):
+def run(kw, v=0.25, hz=13.0, delay=3, noise_mm=6.0, route=True, s_err=0.0, seed=1, trace=False, plant=1.0):
+    """plant: 실제 곡률 / 명령 곡률 (브리지 축거 0.2 vs 실제 0.222면 약 0.9)"""
     rnd = random.Random(seed)
     p = LaneParams(lane_width_mm=W, lane_color='yellow', lookahead_mm=650.0, kappa_alpha=0.5,
                    kappa_rate_max=0.6, kappa_max=2.1, route_ff_weight_lost=0.8, curve_slowdown=0.3)
@@ -103,7 +104,7 @@ def run(kw, v=0.25, hz=13.0, delay=3, noise_mm=6.0, route=True, s_err=0.0, seed=
         img = render(x, y, h, rnd, noise_mm)
         out = f.process_bev(img, np.zeros_like(img), yaw=h, speed=v)
         q.append(out.kappa * (out.speed_scale if out.speed_scale else 1.0) ** 0)
-        k = max(-kmax_car, min(kmax_car, q.pop(0)))
+        k = max(-kmax_car, min(kmax_car, plant * q.pop(0)))
         vv = v * (out.speed_scale if out.speed_scale is not None else 1.0)
         h += vv * k * dt
         x += vv * 1000.0 * math.cos(h) * dt
