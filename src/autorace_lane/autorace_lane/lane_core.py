@@ -290,6 +290,13 @@ class LaneParams:
     yellow_guard_margin_mm: float = 200.0  # 차 중심에서 노란 실선까지 옆 거리가 이 안이면 강하게 안쪽 조향 시작
     yellow_guard_hard_mm: float = 140.0    # 이 안이면 변화율 제한을 무시하고 최대 곡률(kappa_max)로 즉시 조향
     yellow_guard_gain: float = 2.0
+    # 11/15 실차: 직선에서 좌우로 왔다갔다 하다 첫 코너에서 이탈. 일반 구간은 양쪽 선이 모두 노란 실선이라 차가 6 cm만
+    #   비켜도 지킴이 걸리고 14 cm면 순간 최대 조향 -> 반대쪽에서 또 걸림 (차선 시뮬레이션: 지연 4프레임·잡음 12 mm에서
+    #   최대 조향 2.1을 15초에 14번 좌우로 뒤집음, 지킴 끄면 0번). 반대쪽 선도 노란 실선이면(= 일반 1차로) 지킴 안 함:
+    #   그때는 양쪽 선 가운데 맞추기가 이미 양쪽 경계를 본다. M7 바깥 차로(노란 실선 + 흰 점선)·한쪽 선만 보일 때만 지킴
+    yellow_guard_one_side_only: bool = True
+    yellow_guard_look_mm: float = 600.0   # 노란 실선까지 거리를 잴 때 이 앞까지만 (400으로 줄이면 M7 1차로 시뮬레이션 흔들림 37 -> 89 mm)
+    yellow_guard_min_urg: float = 0.35    # 지킴이 걸리는 순간 최소 세기 (0이면 margin에서 0부터 hard까지 서서히)
 
     @classmethod
     def from_dict(cls, d: dict) -> 'LaneParams':
@@ -1633,7 +1640,9 @@ class LaneFollower:
             r_yellow_solid = (out.line_right is not None
                               and out.line_right.get('color') == 'yellow'
                               and not out.line_right.get('dashed', False))
-            y_lim = min(look, 600.0)
+            if p.yellow_guard_one_side_only and l_yellow_solid and r_yellow_solid:
+                l_yellow_solid = r_yellow_solid = False          # 일반 1차로 (양쪽 노란 실선): 가운데 맞추기에 맡김
+            y_lim = min(look, p.yellow_guard_look_mm)
             dist_l, dist_r = None, None
             if l_yellow_solid and lpix_mm is not None and len(lpix_mm) > 0:
                 near_l = lpix_mm[lpix_mm[:, 1] <= y_lim]
@@ -1646,13 +1655,13 @@ class LaneFollower:
             span = max(p.yellow_guard_margin_mm - p.yellow_guard_hard_mm, 1.0)
             if dist_l is not None and dist_l < p.yellow_guard_margin_mm and (dist_r is None or dist_l <= dist_r):
                 out.yellow_guard = 'L'
-                urg = max(0.35, min(1.0, (p.yellow_guard_margin_mm - dist_l) / span))
+                urg = max(p.yellow_guard_min_urg, min(1.0, (p.yellow_guard_margin_mm - dist_l) / span))
                 k_guard = -min(p.kappa_max, urg * p.kappa_max * p.yellow_guard_gain)
                 kappa_raw = min(kappa_raw, k_guard)
                 hard_guard = dist_l <= p.yellow_guard_hard_mm
             elif dist_r is not None and dist_r < p.yellow_guard_margin_mm:
                 out.yellow_guard = 'R'
-                urg = max(0.35, min(1.0, (p.yellow_guard_margin_mm - dist_r) / span))
+                urg = max(p.yellow_guard_min_urg, min(1.0, (p.yellow_guard_margin_mm - dist_r) / span))
                 k_guard = min(p.kappa_max, urg * p.kappa_max * p.yellow_guard_gain)
                 kappa_raw = max(kappa_raw, k_guard)
                 hard_guard = dist_r <= p.yellow_guard_hard_mm

@@ -471,3 +471,20 @@ def test_search_does_not_turn_past_30deg():
     pl.last_clusters = [(bx - 0.05, bx + 0.25, by - 0.15, by + 0.15)]
     out = pl._creep_step(5.0)
     assert out is None or out[1] <= 0                   # 이미 왼쪽 35° -> 왼쪽으로 더는 안 꺾음
+
+
+def test_outer_entry_lookahead_only_last_half_into_outer_lane():
+    """11/15 실차: M7 바깥 차로로 옮길 때 노란 실선을 밟음 -> 바깥 차로 마지막 반 칸에서만 전방 주시를 늘려 완만하게"""
+    pl = _pl_center()
+    pl.target = 1
+    pl.pose.y = 0.10                                      # 아직 반 칸 전
+    assert pl._ld() == pl.p.lookahead
+    pl.pose.y = 0.35                                      # 마지막 반 칸
+    assert pl._ld() == pl.p.outer_entry_lookahead
+    pl.target = 0
+    pl.pose.y = 0.10                                      # 가운데 차로로 갈 때는 해당 없음
+    assert pl._ld() == pl.p.lookahead
+    pl.target = -1
+    pl.pose.y = -0.40
+    pl.sharp = True                                       # 후진 뒤 크게 꺾기가 먼저
+    assert pl._ld() == pl.p.recover_lookahead

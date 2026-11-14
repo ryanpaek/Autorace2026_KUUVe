@@ -191,6 +191,10 @@ class AvoidParams:
     v_change: float = 0.30   # 차선 변경 중 속도. 11/12 0.20 -> 0.30
     lookahead: float = 0.35   # pure pursuit 전방주시. 11/12 0.40 -> 0.35: 더 크게 꺾어 확 피함 (0.30은 속도 0.3과 같이 쓰면 코너 끝에서 켤 때 이탈 1/30)
     min_turn_radius: float = 0.53     # LIMO 아커만 최소 회전반경 실측값 (이보다 작게 두면 못 도는 경로를 계획)
+    # 11/15 실차: M7에서 바깥 차로로 옮길 때 노란 실선을 밟음 (크게 틀어진 채 들어가 지연만큼 넘침, 카메라도 못 봄).
+    #   바깥 차로(1·3차로)로 가는 마지막 반 칸(목표 차로 중심까지 outer_entry_from x 차로폭 안)에서는 전방 주시를 늘려 완만하게 들어감. 0 = 끔
+    outer_entry_lookahead: float = 0.55   # 시뮬레이션(카메라 흉내 127판, 지연 0.25 s): 노란 실선까지 최소 여유 8.8 -> 12.4 cm, 성공 그대로
+    outer_entry_from: float = 0.5
     max_heading_deg: float = 40.0     # 이 이상 비틀어지면 더 꺾지 않음 (30으로 줄이면 붙은 배치 시험 4개 실패 -> 그대로)
     # 11/12 밤 실차 요청: 멀리서 미리, 각을 덜 벌려 옮김 (크게 틀면 카메라가 선을 놓치고 사각지대가 커짐).
     #   지금 차가 들어 있는 차로의 앞 장애물이 gentle_free 넘게 멀면 전방 주시 gentle_lookahead, 최대 틀기 gentle_heading_deg.
@@ -1424,9 +1428,14 @@ class AvoidPlanner:
 
     def _ld(self):
         """전방 주시 거리. 후진(되돌아가기·탈출)한 뒤 다음 차로에 들어갈 때까지는 짧게 -> 더 크게 꺾어 빨리 빠짐."""
+        p = self.p
         if self.sharp:
-            return self.p.recover_lookahead
-        return self.p.gentle_lookahead if getattr(self, 'gentle_on', False) else self.p.lookahead
+            return p.recover_lookahead
+        ld = p.gentle_lookahead if getattr(self, 'gentle_on', False) else p.lookahead
+        if (p.outer_entry_lookahead > ld and abs(self.target) == p.num_side_lanes
+                and abs(self.center(self.target) - self.pose.y) < p.outer_entry_from * p.lane_width):
+            ld = p.outer_entry_lookahead                 # 바깥 차로 마지막 반 칸: 완만하게 (노란 실선 넘침 방지)
+        return ld
 
     def _pursuit_k(self, x, y, psi):
         """(x, y, psi)에서 목표 차로 중심을 따라가는 곡률 (control과 같은 식, 차선 노드 섞기 없음)."""
