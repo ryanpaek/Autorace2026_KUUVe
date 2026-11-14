@@ -38,6 +38,7 @@ lane_node:
     yellow_guard_hard_mm: 140.0
     yellow_guard_gain: 2.0
     yellow_guard_one_side_only: true       # 11/15: 양쪽이 다 노란 실선(일반 구간)이면 지킴 안 함 (직선에서 좌우로 왔다갔다 원인). M7 바깥 차로만
+    yellow_guard_three_lane_only: true     # 11/15: 지킴은 M7 3차선에서만. 코너 앞(바깥 선이 앞쪽에서 휘어 들어옴)·M2 한쪽 선 모드에서 '붙었다'로 착각해 과하게 꺾던 것
 
 mission_node:
   ros__parameters:
