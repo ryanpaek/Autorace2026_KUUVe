@@ -431,6 +431,7 @@ class M7Link:
         self.corner = CornerWatch(self.p.corner_turn_deg, self.p.corner_straight_deg, self.p.corner_window_mm)
         self.corner_need = None      # None: 아직 모름(진입 직후), True: 코너 지킴, False: 안 씀
         self.start_heading_deg = None  # 켤 때 차가 3차선 직선에서 틀어진 각 (obstacle_node가 회피 노드에 넘김)
+        self.avoid_why = {}          # /avoid/state lane_why (차로별 판단, 실시간 토픽용)
         self.pre = CornerPreview(self.p)   # 코너 미리보기 (모듈 설명 8)
         self.pre_lane = None         # 미리 정한 차로 (+1/-1), 켤 때 확정
         self.pre_logged = None
@@ -468,6 +469,8 @@ class M7Link:
             self.avoid_psi = st.get('psi_deg')
         if 'y' in st and st.get('target') is not None:
             self.avoid_dy = abs(float(st['y']) - 0.52 * float(st['target']))
+        if 'lane_why' in st:
+            self.avoid_why = st.get('lane_why') or {}
         if 'now_lane' in st:
             self.avoid_lane = st.get('now_lane')
             if self.phase in ('armed', 'running') and self.avoid_lane in LANE_NUMBER:
@@ -545,6 +548,35 @@ class M7Link:
             if list(self.cam_ids).count(k) >= 5:
                 best = k
         self.cam_lane = best
+
+    # --- 실시간 확인 토픽 (/m7_1_now_lane, /m7_2_target_lane) ------------------------
+    def now_text(self) -> str:
+        ln = self.lane_now()
+        if ln is None:
+            return '지금 차선: 모름'
+        src = {'avoid': '회피 노드 위치', 'camera': '카메라 선 종류', 'last': '마지막 값', 'start': '진입 기본값'}[ln['src']]
+        return f'지금 {ln["lane"]}차선({ln["side"]}) ← {src}'
+
+    def target_text(self) -> str:
+        if self.phase in ('armed', 'running') and self.avoid_target in LANE_NUMBER:
+            k = self.avoid_target
+            n = LANE_NUMBER[k]
+            why = self.avoid_why.get(str(k)) or self.avoid_why.get(k) or ''
+            fork = lane_to_fork(k)
+            head = f'목표 {n}차선({ {1: "왼쪽", 2: "가운데", 3: "오른쪽"}[n] }{", " + fork if fork else ""}) ← 회피 노드'
+            if self.pre_lane is not None and self.pre_lane == k:
+                head += ' (코너 미리보기로 정함)'
+            return head + (f' | {why}' if why else '')
+        d = self.pre.decision
+        if self.phase == 'idle' and d and d.get('lane') in LANE_NUMBER:
+            n = LANE_NUMBER[d['lane']]
+            return f'목표 {n}차선 (코너 미리보기, 아직 안 켬, 코너 {d.get("enable_deg") or 0:.0f}°에서 켬) | {d.get("why", "")}'
+        if self.phase == 'idle':
+            why = (d or {}).get('why')
+            return '목표 2차선 직진 (회피 켜기 전, 차선 주행)' + (f' | {why}' if why else '')
+        if self.phase in ('done', 'aborted'):
+            return f'회피 끝 ({self.off_by or self.phase}) -> 마지막 차로 {LANE_NUMBER.get(self._end_lane(), "?")}차선'
+        return '목표: 모름 (회피 노드 상태 안 옴)'
 
     def lane_now(self) -> Optional[dict]:
         """{'lane': 1|2|3, 'avoid_lane': +1|0|-1, 'side', 'src': 'avoid'|'camera'|'last'|'start'} 또는 None.

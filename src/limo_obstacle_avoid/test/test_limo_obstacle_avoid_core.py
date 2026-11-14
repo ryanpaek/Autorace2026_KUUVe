@@ -450,6 +450,7 @@ def test_search_both_sides_when_stuck_long():
     pl.last_clusters = [(1.45, 1.78, -0.30, -0.08)]
     pl.p.squeeze = False                                # 지도 기준 끝까지 꺾기는 빼고 찾기만 봄
     pl.p.stop_dist = 0.30                               # 이 배치(앞 0.25 m)는 예전 정지 거리 기준
+    pl.p.squeeze_target_only = False                    # 예전 동작 (11/14 밤부터 기본은 정한 차로 쪽으로만, 아래 시험)
     v, w = pl.step(10.0)
     assert v == 0.0                                     # 처음엔 정지 (똑바로는 막힘)
     v, w = pl.step(11.2)
@@ -529,3 +530,63 @@ def test_start_target_default_and_bad_values_ignored():
     pl = AvoidPlanner(p)
     pl.start(0.0, 0.0, 0.0)
     assert pl.target == 0 and pl.pose.y == 0.0 and pl.pose.psi == 0.0
+
+
+def _cam(off_mm, h_deg, left_yellow=True):
+    y = {'color': 'yellow', 'dashed': False}
+    w = {'color': 'white', 'dashed': True}
+    return {'status': 'BOTH', 'offset_mm': off_mm, 'heading_rad': math.radians(h_deg),
+            'line_left': y if left_yellow else w, 'line_right': w, 'kappa': 0.0}
+
+
+def test_cam_yellow_guard_uses_car_body_not_camera_row():
+    """11/14 밤 실차 '차로 바꾸는 중 좌우 지그재그': 1차선으로 비스듬히(25°) 들어가는 중, 차체는 차로 중심 오른쪽 10 cm
+    -> 카메라 행(앞 0.55 m)은 노란선 쪽이지만 차체는 안 닿음 -> 끝까지 꺾지 않음. 차체가 노란선에 닿으면 꺾음."""
+    pl = AvoidPlanner(AvoidParams())
+    pl.start(0.0, 0.0, 0.0)
+    # 차 위치 y_l = -off cos h + 0.55 sin h. 차 방향 = -h  -> 왼쪽으로 25° 향함: h = -25°
+    h = -25.0
+    off_for = lambda y_l, hd=h: -(y_l - 0.55 * math.sin(math.radians(hd))) / math.cos(math.radians(hd)) * 1000.0
+    assert pl._cam_yellow_body(_cam(off_for(-0.20), h), None) == 0
+    assert pl._cam_yellow_body(_cam(off_for(0.10), h), None) == 1          # 차체 앞 모서리가 노란선 근처 + 그쪽으로 향함
+    assert pl._cam_yellow_body(_cam(off_for(0.10, 10.0), 10.0), None) == 0   # 이미 안쪽으로 향함
+    assert pl._cam_yellow_body(_cam(off_for(0.10), h, left_yellow=False), None) == 0   # 왼쪽이 흰 점선
+
+
+def test_lane_fix_not_applied_while_changing_lane():
+    p = AvoidParams()
+    pl = AvoidPlanner(p)
+    pl.start(0.0, 0.0, 0.0)
+    pl.target = 1                                     # 1차선으로 옮기는 중 (y = 0)
+    assert not pl.lane_fix({'status': 'BOTH', 'offset_mm': 50.0, 'heading_rad': 0.0}, 0.0)
+    p.lane_fix_commit = False
+    assert pl.lane_fix({'status': 'BOTH', 'offset_mm': 50.0, 'heading_rad': 0.0}, 0.1)
+
+
+def test_lane_blend_only_when_straightened():
+    p = AvoidParams()
+    pl = AvoidPlanner(p)
+    pl.start(0.0, 0.0, 0.0)
+    pl.lane_fix({'status': 'BOTH', 'offset_mm': 0.0, 'heading_rad': 0.0, 'kappa': 1.5}, 0.0)
+    pl.control(0.2, 0.05, True)
+    assert pl.blend_used                              # 차로 안, 펴져 있음 -> 차선 노드 조향 섞음
+    pl.pose.psi = math.radians(20.0)
+    pl.control(0.2, 0.05, True)
+    assert not pl.blend_used                          # 비스듬함 -> 회피 조향만
+
+
+def test_stuck_search_only_toward_chosen_lane():
+    """11/14 밤 실차 '차로를 정했으면 그 차로로': 3차선(오른쪽)으로 정했는데 막혀 서면, 예전엔 라이다 빈 길 찾기가
+    반대(왼쪽)로 꺾어 전진 -> 좌우 왔다갔다. 이제 정한 쪽만 찾고, 거기도 막혔으면 서서 (후진으로) 다시 봄."""
+    pl = _pl_center()
+    pl.pose.x, pl.pose.y = 1.0, 0.0
+    pl.target = 0
+    pl.last_switch = 9.9
+    pl.obs = [_confirmed(Obstacle(1.45, 1.78, -0.30, -0.08))]
+    pl.last_clusters = [(1.45, 1.78, -0.30, -0.08)]
+    pl.p.squeeze = False
+    pl.p.stop_dist = 0.30
+    pl.step(10.0)
+    v, w = pl.step(11.2)
+    assert pl.target == -1                              # 3차선으로 정함
+    assert not (v > 0 and w > 0)                        # 왼쪽(반대)으로 꺾어 가지 않음

@@ -820,3 +820,16 @@ def test_link_preview_resets_each_run():
     link.update(9.0, mission(20000.0, state='M2_FORK'), {})
     link.update(10.0, mission(12000.0, dist=0.0), {})                # 다음 판 M7
     assert link.pre.decision is None and link.start_target == 0 and not link.pre.hits
+
+
+def test_live_lane_texts():
+    """11/14 밤: /m7_1_now_lane, /m7_2_target_lane 문자열."""
+    link = obstacle_link()
+    link.update(0.0, mission(12000.0, dist=0.0), {})
+    assert '2차선' in link.now_text() and '진입 기본값' in link.now_text()
+    assert '2차선 직진' in link.target_text()
+    link.phase = 'running'
+    link.on_avoid_state({'state': 'RUN', 'target': 1, 'now_lane': 0,
+                         'lane_why': {'0': '지금 앞 0.40m', '1': '갈 수 있음 앞 9.90m'}})
+    assert '목표 1차선(왼쪽, A)' in link.target_text() and '갈 수 있음' in link.target_text()
+    assert '지금 2차선' in link.now_text() and '회피 노드' in link.now_text()

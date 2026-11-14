@@ -123,8 +123,12 @@
     edge_look: 0.35
     edge_from: 0.70
     yellow_cam_guard: true   # 11/14: 카메라 노란 실선 경계 감지 시 즉시 안쪽 최대 조향
-    yellow_cam_offset_mm: 70.0
+    yellow_cam_offset_mm: 70.0   # (yellow_cam_body false일 때만)
+    yellow_cam_body: true    # 11/14 밤: 카메라 노란선 지킴을 '차체 앞 모서리'가 노란선에 닿을 때만 (카메라 행 옆 위치로 판단해
+                             #   바깥 차로로 비스듬히 들어갈 때 끝까지 꺾기 <-> 회피 조향이 번갈아 좌우 지그재그. 시뮬레이션 지킴<->회피 64 -> 5)
+    yellow_cam_half: 0.25
     outer_entry_lookahead: 0.55  # 11/15: 바깥 차로(1·3차로)로 옮기는 마지막 반 칸은 전방 주시 0.55 m로 완만하게 (노란 실선 밟음 방지). 0 = 끔
+    squeeze_target_only: true  # 11/14 밤 '차로를 정했으면 그 차로로': 막혀 끝까지 꺾기·라이다 빈 길 찾기(creep_search)는 정한 차로 쪽으로만
     squeeze: true            # 11/12: 막히면 먼저 조향 끝까지 꺾어 빠짐 (앞뒤 왔다갔다 대신)
     squeeze_min_dist: 0.10   # 11/12 밤 0.2 -> 0.1: 끝까지 꺾은 길로 0.1 m 안에 안 부딪히면 꺾어서 감 (후진 없음)
     squeeze_speed: 0.20   # 11/12 밤: M7 속도 0.20 (0.10 -> 0.20)
@@ -170,6 +174,8 @@
     lane_id_need: 5
     lane_keep_blend: 1.0     # 차로 안 직진: 조향 = 팀 차선 주행과 똑같이 v x kappa (/lane/status, 양쪽 선 보이고 같은 차로일 때)
     lane_keep_blend_single: 0.7   # 11/12 밤: 차로 안에서 한쪽 선만 보여도 차선 노드 조향을 70% (차선 인식 우선)
+    lane_blend_max_psi_deg: 8.0   # 11/14 밤: 차선 노드 조향 섞기는 차가 8° 안으로 펴진 뒤에만 (비스듬한 채 섞으면 차선 노드와 회피 조향이 번갈아 이김)
+    lane_fix_commit: true    # 11/14 밤: 차로 옮기는 중엔 카메라로 위치를 안 고침 (정한 차로로 끝까지, 도착하면 다시 고침)
     lane_blend_tol: 0.12     # 11/15: 차선 조향을 섞는 범위 목표 차로 중심 8 -> 12 cm (M7에서 차선을 거의 안 보던 것, 위치 추정 오차 몫)
                              #   (11/10 0.5 -> 1.0. 차로 바꾸는 중·한쪽 선만 보일 때는 회피 조향)
     lane_fresh_sec: 0.3

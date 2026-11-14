@@ -215,21 +215,21 @@ def test_cones_enter_early_when_cone_close():
                       'cones_approach_mm': 2000.0})
     sim = Sim(fsm)
     for _ in range(300):
-        sim.tick(obstacle={'cone_ahead_mm': 500.0})
+        sim.tick(obstacle={'cone_ahead_mm': 400.0})
         if fsm.sub == 'cones':
             break
     assert fsm.sub == 'cones'
-    assert sim.dist >= 2000.0 - 50                          # 500mm 앞 콘으로는 일찍 안 들어가고 차선 인식 유지 (11/15 저녁: 기준 400)
+    assert sim.dist >= 2000.0 - 50                          # 11/14: 400mm 앞 콘으로는 일찍 안 들어가고 차선 인식 유지 (11/14 밤 원복: 기준 150)
 
     fsm2 = MissionFSM({'start_state': 'M8_CONES', 'cones_source_ready': True,
                        'cones_approach_mm': 2000.0})
     sim2 = Sim(fsm2)
     for _ in range(300):
-        sim2.tick(obstacle={'cone_ahead_mm': 380.0})
+        sim2.tick(obstacle={'cone_ahead_mm': 120.0})
         if fsm2.sub == 'cones':
             break
     assert fsm2.sub == 'cones'
-    assert 1500.0 - 50 <= sim2.dist < 2000.0                # 11/15 저녁: 라바콘 40 cm 안이면 전환 (15 cm면 들이받음)
+    assert 1500.0 - 50 <= sim2.dist < 2000.0                # 라바콘 직전(150mm 이내)에 들어오면 전환 (11/14 밤 원복)
 
 
 def test_cones_handover_times_out_without_lane():
@@ -397,8 +397,8 @@ def test_cones_not_entered_inside_corner():
     _, old = _m8_from_m2(0.0)
     assert old is not None and old < 609.0 + 1005.0                 # 코너 안에서 들어감 (재현)
     fsm, new = _m8_from_m2(75.0)
-    assert new is not None and new >= 609.0 + 1005.0 * (70.0 / 90.0)   # 코너를 거의 다 돈 뒤 (11/15 저녁: 콘이 바로 앞이면 70°부터)
-    assert any('M8 corner done' in m or 'close after' in m for m in fsm.log)   # 다 돎, 또는 70° 넘게 돌았고 콘이 바로 앞
+    assert new is not None and new >= 609.0 + 1005.0 * (75.0 / 90.0)   # 코너를 거의 다 돈 뒤 (11/14 밤 원복)
+    assert any('M8 corner done' in m for m in fsm.log)
 
 
 def test_cones_corner_guard_off_for_practice_start():
@@ -719,3 +719,39 @@ def test_crosswalk_stop_line_pretracked_in_zigzag():
         assert 150.0 <= line - at <= 300.0, (zl, line - at)          # 25 cm 목표 근처, 선 앞
     fsm, line, at = _zigzag_to_crosswalk(False, 2100.0)              # 예전: 지그재그가 늦게 끝나면 정지선을 지나서 섬
     assert at is None or line - at < 0.0
+
+
+def _zigzag_blind(cap, cam_lines=False, line=1983.0, zz_len=1800.0):
+    """11/14 밤 실차 '횡단보도를 다 지난 다음 섬': 카메라가 정지선을 못 주고(cam_lines False) 도면 위치도 없을 때.
+    지그재그 시작선을 카메라로 지난 순간부터 달린 거리로 정지선 앞에서 서야 한다."""
+    fsm = MissionFSM({'start_state': 'M6_ZIGZAG', 'm3_zz_cap': cap, 'zigzag_len_mm': zz_len, 'zigzag_start_mm': 0.0})
+    sim = Sim(fsm)
+    fsm.line = StopApproach(0.0, 0.0, 400.0)
+    fsm.line.how = 'camera'
+    fsm._sub('zigzag', Inputs(t=0.0, dist_mm=0.0), 'start line (test)')
+    fsm.zz_at, fsm.zz_how = (0.0, 'camera') if cap else (None, None)
+    fsm.ped_seen = True                                   # 표지는 봄 (그래도 정지선 거리를 모르면 못 섬)
+    for _ in range(2000):
+        rem = line - sim.dist
+        lane = {'crosswalk_lines_mm': [rem] if cam_lines and 350.0 <= rem <= 1200.0 else []}
+        sim.tick(lane=lane)
+        if fsm.state == 'M3_PEDESTRIAN' and fsm.sub == 'stopped':
+            return line - sim.dist, fsm
+        if sim.dist > line + 1500.0:
+            break
+    return None, fsm
+
+
+def test_crosswalk_zigzag_distance_cap_stops_before_line():
+    left, fsm = _zigzag_blind(cap=False)
+    assert left is None                                   # 예전: 정지선 거리를 모르면 안 섬 (다 지나감)
+    left, fsm = _zigzag_blind(cap=True)
+    assert left is not None and 60.0 <= left <= 160.0, left   # 지그재그 시작선부터 거리로 정지선 약 10 cm 앞
+    assert any('zigzag-line distance' in m for m in fsm.log)
+
+
+def test_crosswalk_camera_stop_wins_over_cap():
+    """카메라로 정지선을 잡으면 평소대로 m3_stop_target_mm(25 cm) 앞에서 서고, 안전장치는 안 씀."""
+    left, fsm = _zigzag_blind(cap=True, cam_lines=True)
+    assert left is not None and left >= 200.0
+    assert not any('M3 stop by zigzag-line distance' in m for m in fsm.log)
