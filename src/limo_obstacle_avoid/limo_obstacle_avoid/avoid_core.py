@@ -238,6 +238,14 @@ class AvoidParams:
     lane_fix_while_changing: bool = True   # 11/12: 옮기는 중·10~20° 틀어져도 양쪽 선이 보이면 반만 반영
     lane_fix_change_deg: float = 20.0      #   이보다 틀어지면 안 씀
     lane_fix_change_scale: float = 0.5     #   옮기는 중·10° 넘을 때 반영 비율
+    # 11/14 (1114_02): M7에서 흰색도 차선으로 보니 트랙 밖 밝은 바닥·벽 아래를 흰 선으로 잡아 (바닥 끝, 노란선)을 한 차로로 봄
+    #   -> 그 가짜 차로로 옆 위치를 끌어가 '1차선 안'이라 믿고 노란선 밖으로 계속 꺾음. 선 종류가 지금 차로와 맞을 때만 보정
+    lane_fix_check_types: bool = True      # 1차선(+1)=왼쪽 노랑·오른쪽 흰, 가운데=양쪽 흰, 3차선(-1)=왼쪽 흰·오른쪽 노랑. 색이 반대면 안 씀
+    # 바깥 차로라 믿는데 안쪽 선이 노란 실선으로 보이면 = 노란선 밖. 옆 위치를 노란선 바깥으로 옮겨 안쪽으로 돌아오게
+    outside_fix: bool = True
+    outside_frames: int = 3                # 연속 이만큼 보이면
+    outside_max_deg: float = 25.0          # 차선 방향이 이보다 틀어져 보이면 안 씀 (노란선이 화면을 가로지르는 경우)
+    outside_margin: float = 0.05           # 노란선 바깥 이만큼으로 놓음 [m]
     lane_row: float = 0.55            # 차선 노드 offset_mm 을 재는 행 (기준점 앞 m)
     # ── 멈춤 탈출: 막혀서 서 있으면 상황이 안 바뀌어 계속 선다 → 조금 후진하며 크게 꺾어 다시 잡음 ──
     recover: bool = False             # 11/12 밤: 후진(되돌아가기·탈출) 완전히 끔. 막히면 끝까지 꺾어 빠지기(squeeze)만, 안 되면 서서 기다림
@@ -252,7 +260,7 @@ class AvoidParams:
     trail_step: float = 0.05          # 지나온 길 점 간격 [m]
     rollback_lookahead: float = 0.30  # 후진할 때 따라갈 뒤쪽 점 거리 [m]
     recover_lookahead: float = 0.20   # 후진 뒤 다음 차로까지 전방 주시. 11/12 0.25 -> 0.20 (최소 회전반경까지 꺾음)
-    rollback_max_dist: float = 0.40   # 한 번 되돌아갈 최대 거리 [m]. 11/12 0.3 -> 0.4
+    rollback_max_dist: float = 0.60   # 한 번 되돌아갈 최대 거리 [m]. 11/12 0.3 -> 0.4, 11/14 0.4 -> 0.6 (1114_02: 0.4는 두 번 다 '갈 길 없음')
     rollback_time: float = 15.0       # 한 번 되돌아가기 최대 시간 [s]
 
 
@@ -395,6 +403,9 @@ class AvoidPlanner:
         self.rec_side_last = None    # 마지막 swing 방향
         self.rec_same_side = 0
         self.lane_fix_n = 0          # 카메라 차선으로 보정한 횟수 (status)
+        self.lane_fix_type_rej = 0   # 선 종류가 안 맞아 버린 횟수 (status)
+        self.outside_n = 0           # 노란선 밖으로 본 연속 프레임
+        self.outside_fix_n = 0       # 노란선 밖으로 옮긴 횟수 (status)
         self.lane_fix_dy = 0.0       # 마지막 보정량 [m]
         self.trail = []              # 지나온 길 [(x, y)] (되돌아가기)
         self.lane_ids = []           # 차선 노드 차로 번호 기록
@@ -808,6 +819,7 @@ class AvoidPlanner:
             return False
         self.lane_last, self.lane_t = lane, t
         self._lane_id_fix(lane)
+        self._outside_check(lane)
         if not p.lane_fix:
             return False
         off, h = lane.get('offset_mm'), lane.get('heading_rad')
@@ -826,6 +838,9 @@ class AvoidPlanner:
         off = float(off) / 1000.0
         y_in_lane = -off * math.cos(h) + p.lane_row * math.sin(h)
         lane_idx = self.nearest_lane(self.pose.y)
+        if p.lane_fix_check_types and not self._types_match(lane, lane_idx):
+            self.lane_fix_type_rej += 1
+            return False
         dy = self.center(lane_idx) + y_in_lane - self.pose.y
         if abs(dy) > p.lane_fix_gate:
             return False
@@ -837,6 +852,44 @@ class AvoidPlanner:
         self.lane_fix_n += 1
         self.lane_fix_dy = dy
         return True
+
+    def _types_match(self, lane, lane_idx):
+        """카메라가 본 양쪽 선 색이 lane_idx 차로와 맞나 (모르면 맞다고 봄). 바깥(노란) 쪽이 흰색이거나 안쪽(흰) 쪽이 노랑이면 False."""
+        n = self.p.num_side_lanes
+        want_l = 'yellow' if lane_idx >= n else 'white'      # 가장 왼쪽 차로만 왼쪽이 노란 실선
+        want_r = 'yellow' if lane_idx <= -n else 'white'
+        for key, want in (('line_left', want_l), ('line_right', want_r)):
+            ln = lane.get(key)
+            if isinstance(ln, dict) and ln.get('color') in ('yellow', 'white') and ln['color'] != want:
+                return False
+        return True
+
+    def _outside_check(self, lane):
+        """바깥 차로(±n)라 믿는데 안쪽 선이 노란 실선 = 차가 노란선 밖. outside_frames 연속이면 옆 위치를 노란선 바깥으로."""
+        p = self.p
+        if not p.outside_fix:
+            return
+        n = p.num_side_lanes
+        now = self.nearest_lane(self.pose.y)
+        h = lane.get('heading_rad')
+        key = 'line_right' if now == n else ('line_left' if now == -n else None)
+        ln = lane.get(key) if key else None
+        hit = (isinstance(ln, dict) and ln.get('color') == 'yellow' and not ln.get('dashed')
+               and h is not None and abs(math.degrees(float(h))) <= p.outside_max_deg
+               and lane.get('status') in ('BOTH', 'R' if now == n else 'L'))
+        self.outside_n = self.outside_n + 1 if hit else 0
+        if self.outside_n < p.outside_frames:
+            return
+        self.outside_n = 0
+        sgn = 1.0 if now == n else -1.0
+        y_out = sgn * (self.center(n) + p.lane_width / 2.0 + p.outside_margin)
+        dy = y_out - self.pose.y
+        if dy * sgn <= 0.0:                             # 이미 그만큼 바깥으로 알고 있음
+            return
+        self._apply_transform(0.0, dy)
+        self.outside_fix_n += 1
+        self.events.append((self.pose.x, f'노란선 밖으로 봄 ({"왼쪽" if sgn > 0 else "오른쪽"} 바깥 차로인데 안쪽 선이 노란 실선) '
+                                         f'-> 옆 위치 {dy * 100:+.0f}cm (노란선 밖 {p.outside_margin * 100:.0f}cm)'))
 
     def _lane_id_fix(self, lane):
         """차선 노드의 3차선 번호가 여러 번 같게 나오면, 지금 추정 차로가 다를 때 옆 위치를 그 차로로 옮긴다."""
@@ -1493,6 +1546,7 @@ class AvoidPlanner:
             'cam_lane': self.lane_id, 'lane_id_fix_n': self.lane_id_fix_n,
             'lane_blend': getattr(self, 'blend_used', False),
             'lane_fix_n': self.lane_fix_n, 'lane_fix_dy_cm': round(self.lane_fix_dy * 100, 1),
+            'lane_fix_type_rej': self.lane_fix_type_rej, 'outside_fix_n': self.outside_fix_n,
             'exit_pref': self.exit_pref,
             'lane_why': {str(k): v for k, v in self.lane_why.items()},
             # 확정 장애물 (앞 1.5 m 안, 차 기준 x, 옆 y 범위). 실차에서 '어느 차로에 있다고 보는지' 확인용
