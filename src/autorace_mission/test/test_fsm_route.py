@@ -56,9 +56,9 @@ def test_full_lap_by_route():
     assert entered['M2_EXIT'] == pytest.approx(p['m2_island_end'] + 200, abs=20)
     assert p['m8_start_line'] - 400 <= entered['M8_CONES'] <= p['m8_start_line'] + 20
     assert entered['M1_TRAFFIC'] == pytest.approx(p['m8_end_line'] + 100, abs=20)
-    # 카메라 정지선 없이도 도면 위치로 정지선 앞에서 선다 (brake 30 mm 앞)
-    assert stops['M3_PEDESTRIAN'] == pytest.approx(p['m3_stop_line'] - 30, abs=15)
-    assert stops['M1_TRAFFIC'] == pytest.approx(p['m1_stop_line'] - 30, abs=15)
+    # 카메라 정지선 없이도 도면 위치로 정지선 앞에서 선다 (목표 50 mm + brake 30 mm 앞)
+    assert stops['M3_PEDESTRIAN'] == pytest.approx(p['m3_stop_line'] - 80, abs=15)
+    assert stops['M1_TRAFFIC'] == pytest.approx(p['m1_stop_line'] - 80, abs=15)
     assert fsm.fork_choice == 'B'
 
 

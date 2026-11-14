@@ -111,9 +111,11 @@ class AvoidParams:
     # 11/12: 바깥 노란선 지킴. 바깥 차로에서 바깥쪽으로 향해 있고 edge_look 앞에서 차체 모서리가 선(가장자리 - edge_margin)을
     #   넘을 것 같으면 안쪽으로 끝까지 꺾음 (회피 중 노란선 밖으로 나간 것, 11/12 실차)
     edge_guard: bool = True
-    edge_margin: float = 0.03
-    edge_look: float = 0.30
-    edge_from: float = 0.85           # 차로 중심에서 바깥 차로 쪽으로 lane_width x 이만큼 넘어온 뒤에만 지킴
+    edge_margin: float = 0.05
+    edge_look: float = 0.35
+    edge_from: float = 0.70           # 차로 중심에서 바깥 차로 쪽으로 lane_width x 이만큼 넘어온 뒤에만 지킴
+    yellow_cam_guard: bool = True     # 11/14: 카메라(/lane/status)가 노란 실선 이탈 위험을 알리면 즉시 안쪽으로 최대 조향
+    yellow_cam_offset_mm: float = 70.0
     better_margin: float = 0.3        # 옮길 차선이 지금보다 이만큼 더 비어야 옮김
     rechoose_dy: float = 0.12         # 차로를 옮기기 시작했어도 원래 차로 중심에서 이만큼 안이면, 새로 확정된
                                       #   장애물로 다른 차로가 더 비어 보일 때 목표를 바꿈 (켜자마자 고른 쪽이 다음 줄에서 막힘 방지)
@@ -251,6 +253,7 @@ class AvoidParams:
     recover_mode: str = 'trail'       # 'trail' | 'swing'(예전: 25cm 후진하며 크게 꺾기)
     trail_step: float = 0.05          # 지나온 길 점 간격 [m]
     rollback_lookahead: float = 0.30  # 후진할 때 따라갈 뒤쪽 점 거리 [m]
+    rollback_reverse_scale: float = 0.10  # 11/14: 기억후진 시 잘못 들었던 길로 갈 때 꺾었던 조향의 반대 방향 10% 조향
     recover_lookahead: float = 0.20   # 후진 뒤 다음 차로까지 전방 주시. 11/12 0.25 -> 0.20 (최소 회전반경까지 꺾음)
     rollback_max_dist: float = 0.40   # 한 번 되돌아갈 최대 거리 [m]. 11/12 0.3 -> 0.4
     rollback_time: float = 15.0       # 한 번 되돌아가기 최대 시간 [s]
@@ -397,6 +400,8 @@ class AvoidPlanner:
         self.lane_fix_n = 0          # 카메라 차선으로 보정한 횟수 (status)
         self.lane_fix_dy = 0.0       # 마지막 보정량 [m]
         self.trail = []              # 지나온 길 [(x, y)] (되돌아가기)
+        self.trail_k = []            # 지나온 길 각 지점의 전진 조향 곡률 [1/m]
+        self.last_fwd_k = 0.0        # 직전 전진 조향 곡률 [1/m]
         self.lane_ids = []           # 차선 노드 차로 번호 기록
         self.lane_id = None          # 확정된 카메라 차로 번호
         self.lane_id_fix_n = 0
@@ -872,8 +877,10 @@ class AvoidPlanner:
         x, y = self.pose.x, self.pose.y
         if not self.trail or math.hypot(x - self.trail[-1][0], y - self.trail[-1][1]) >= self.p.trail_step:
             self.trail.append((x, y))
+            self.trail_k.append(self.last_fwd_k)
             if len(self.trail) > 400:
                 self.trail = self.trail[-400:]
+                self.trail_k = self.trail_k[-400:]
 
     def _rollback_step(self, t):
         """지나온 길을 따라 후진. 갈 차로가 생기면 그 차로로 정하고 끝(None). 너무 멀리·오래면 끝."""
@@ -903,6 +910,8 @@ class AvoidPlanner:
             return None
         while len(self.trail) > 1 and math.hypot(self.trail[-1][0] - x, self.trail[-1][1] - y) < p.rollback_lookahead:
             self.trail.pop()
+            if self.trail_k:
+                self.trail_k.pop()
         if (rb['dist'] >= p.rollback_max_dist or t - rb['t0'] >= p.rollback_time or not self.trail):
             self.events.append((x, f'되돌아가기 끝 ({rb["dist"]:.2f}m, 갈 길 없음) → 다시 계획'))
             self.rb = None
@@ -915,7 +924,11 @@ class AvoidPlanner:
         xr = dx * math.cos(psi) + dy * math.sin(psi)
         yr = -dx * math.sin(psi) + dy * math.cos(psi)
         d2 = xr * xr + yr * yr
-        k = 0.0 if d2 < 1e-6 else 2.0 * yr / d2
+        k_trail = 0.0 if d2 < 1e-6 else 2.0 * yr / d2
+        # 11/14: 잘못 들었던 길로 갈 때 꺾었던 조향 방향의 반대 방향으로 10%(rollback_reverse_scale) 크기 조향 후진
+        k_fwd = (self.trail_k[-1] if self.trail_k and abs(self.trail_k[-1]) > 1e-6
+                 else (rb.get('k_fwd', 0.0) if abs(rb.get('k_fwd', 0.0)) > 1e-6 else k_trail))
+        k = -p.rollback_reverse_scale * k_fwd if p.rollback_reverse_scale > 0.0 else k_trail
         kmax = 1.0 / p.min_turn_radius
         k = max(-kmax, min(kmax, k))
         v = -p.recover_speed
@@ -1186,7 +1199,8 @@ class AvoidPlanner:
                   and t - self.stuck_since >= p.recover_after and len(self.trail) > 1):
                 self.choose(self.nearest_lane(y), obs)       # 차로별 판단을 로그에 남기려고 (결정은 안 바꿈)
                 self.events.append((x, '  차로 판단: ' + self._why_text()))
-                self.rb = {'t0': t, 'x0': x, 'y0': y, 'dist': 0.0, 'blocked': self.target}
+                self.rb = {'t0': t, 'x0': x, 'y0': y, 'dist': 0.0, 'blocked': self.target,
+                           'k_fwd': self.last_fwd_k}
                 self.rec_n += 1
                 why = '앞 비상' if self.emergency else '갈 차선 막힘'
                 self.events.append((x, f'멈춤 {t - self.stuck_since:.1f}s ({why}) → 온 길 되돌아가기 '
@@ -1444,11 +1458,16 @@ class AvoidPlanner:
         mh = math.radians(p.max_heading_deg)
         if (psi > mh and k > 0) or (psi < -mh and k < 0):
             k = 0.0
-        if self._edge_danger(y, psi):
+        cam_side = self._cam_yellow_guard(t)
+        if self._edge_danger(y, psi) or cam_side != 0:
+            side = cam_side if cam_side != 0 else (1 if y > 0 else -1)
             if not getattr(self, 'edge_guarded', False):
                 self.events.append((self.pose.x, f'바깥 노란선 앞 (옆 {y:+.2f}m, 방향 {math.degrees(psi):+.0f}°) -> 안쪽으로 끝까지 꺾음'))
             self.edge_guarded = True
-            return v * (-kmax if y > 0 else kmax)      # 바깥 노란선 앞: 안쪽으로 끝까지
+            k_out = -kmax if side > 0 else kmax
+            if v > 0:
+                self.last_fwd_k = k_out
+            return v * k_out                           # 바깥 노란선 앞: 안쪽으로 끝까지
         self.edge_guarded = False
         # 차로 안에서 똑바로 갈 때는 팀 차선 노드 곡률을 섞는다 (양쪽 선 보임, 같은 차로, 최근 값)
         ln = self.lane_last
@@ -1462,7 +1481,33 @@ class AvoidPlanner:
             a = p.lane_keep_blend if ln.get('status') == 'BOTH' else p.lane_keep_blend_single
             k = max(-kmax, min(kmax, (1.0 - a) * k + a * float(ln['kappa'])))
             self.blend_used = True
+        if v > 0 and abs(k) > 1e-6:
+            self.last_fwd_k = k
+            if self.trail_k:
+                self.trail_k[-1] = k
         return v * k
+
+    def _cam_yellow_guard(self, t):
+        """카메라(/lane/status)에서 노란 실선에 바짝 붙었으면 +1(왼쪽 노란선 -> 오른쪽으로 꺾어야 함) / -1(오른쪽 노란선) / 0."""
+        p = self.p
+        ln = self.lane_last
+        if not (p.edge_guard and p.yellow_cam_guard and ln and t is not None and self.lane_t is not None
+                and t - self.lane_t <= p.lane_fresh_sec):
+            return 0
+        yg = ln.get('yellow_guard')
+        if yg == 'L':
+            return 1
+        if yg == 'R':
+            return -1
+        off = ln.get('offset_mm')
+        if off is None:
+            return 0
+        ll, lr = ln.get('line_left') or {}, ln.get('line_right') or {}
+        if ll.get('color') == 'yellow' and not ll.get('dashed', False) and float(off) < -p.yellow_cam_offset_mm:
+            return 1
+        if lr.get('color') == 'yellow' and not lr.get('dashed', False) and float(off) > p.yellow_cam_offset_mm:
+            return -1
+        return 0
 
     def _edge_danger(self, y, psi):
         """바깥 차로에서 바깥쪽으로 가는데 edge_look 앞에서 차체 앞 모서리가 노란선(가장자리 - edge_margin)을 넘나."""
