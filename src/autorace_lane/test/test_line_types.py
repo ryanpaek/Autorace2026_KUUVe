@@ -89,3 +89,26 @@ def test_yellow_solid_guard_steers_strongly_away_from_yellow_boundary():
     out, p = _run_scene(-120.0, 400.0, frames=3, yellow_solid_guard=False)   # 끄면 예전대로
     assert out.yellow_guard is None and out.kappa > -p.kappa_max + 0.3
 
+
+
+def test_yellow_guard_off_on_normal_two_yellow_lines():
+    """11/15 실차: 일반 구간(양쪽 노란 실선)에서 지킴이 직선 흔들림을 만듦 -> 양쪽이 다 노란 실선이면 지킴 안 함.
+    한쪽만 노란 실선(M7 바깥 차로)이면 그대로 지킴"""
+    def both_yellow(left_mm, right_mm, **kw):
+        from autorace_lane.lane_core import LaneFollower
+        p = LaneParams(lane_width_mm=520.0, lane_color='yellow', **kw)
+        f = LaneFollower(CFG, p)
+        lane, _ = _scene(left_mm, right_mm)
+        lane2, _ = _scene(right_mm, left_mm)
+        lane = np.maximum(lane, lane2)                    # 두 선 모두 노란 실선 (흰 마스크 없음)
+        white = np.zeros_like(lane)
+        out = None
+        for _ in range(3):
+            out = f.process_bev(lane.copy(), white.copy(), yaw=0.0, speed=0.2)
+        return out, p
+    out, p = both_yellow(-150.0, 370.0)                   # 왼쪽 노란 실선 15 cm인데 오른쪽도 노란 실선
+    assert out.yellow_guard is None and out.kappa > -p.kappa_max + 0.5
+    out, p = both_yellow(-150.0, 370.0, yellow_guard_one_side_only=False)   # 예전(11/14)이면 최대 조향
+    assert out.yellow_guard == 'L'
+    out, p = _run_scene(-150.0, 370.0, frames=3)           # 오른쪽이 흰 점선(M7 1차로)이면 지킴
+    assert out.yellow_guard == 'L'
