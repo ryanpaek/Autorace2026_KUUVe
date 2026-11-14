@@ -53,7 +53,8 @@ DEFAULT_PARAMS = {
     # 정지 미션 공통 (M3, M1)
     'stop_target_mm': 150.0,     # 11/15 저녁 실차: 100으로도 정지선 직전 -> 150. 실행 중 ros2 param set /mission_node stop_target_mm 으로 바로 조정
     'm3_stop_target_mm': 250.0,  # 11/15 저녁 실차 요청: M7 직전 횡단보도는 여유롭게 25 cm 앞 (신호등은 stop_target_mm). 0이면 stop_target_mm
-    'stop_passed_mm': 120.0,     # 11/15 저녁: 정지선을 이만큼 넘게 지났다고 보이면(남은 거리 < -이것) 그 자리에서 섬 (다음 흰 선=끝선까지 가지 않게)
+    'stop_passed_mm': 120.0,
+    'm3_pretrack': True,         # 11/15 밤: 지그재그(M6) 중에 횡단보도 정지선을 미리 재 둠 (M3 시작 때는 이미 카메라 사각)     # 11/15 저녁: 정지선을 이만큼 넘게 지났다고 보이면(남은 거리 < -이것) 그 자리에서 섬 (다음 흰 선=끝선까지 가지 않게)
     'stop_brake_mm': 30.0,       # TODO 실측: approach_speed에서 0 명령 후 밀려가는 거리
     'stop_lost_ok_mm': 400.0,    # 정지선이 카메라에서 사라진 뒤 오도메트리로 이어 가는 한계
     # 정지선이 이 거리 안으로 오면 카메라 갱신을 끊고 오도메트리로만 센다.
@@ -303,6 +304,7 @@ class MissionFSM:
         self.sub_t = self.sub_dist = 0.0
         self.stop: Optional[StopApproach] = None
         self.stop_line_name: Optional[str] = None    # 지금 정지 접근 중인 도면 선 이름 (위치 다시 잡기용)
+        self.pre_stop = None                          # 지그재그 중에 미리 잰 횡단보도 정지선 (M3가 이어받음)
         self.count = 0                               # 서브 상태 안에서 쓰는 연속 카운터
         self.log = []
         self.parking_sign = False                    # 주차 표지를 봤나 (M1~M4 동안 투표, 상태가 바뀌어도 유지)
@@ -382,6 +384,7 @@ class MissionFSM:
             self.m8_inner_on = False
             self.m8_inner_mode = None
         if state == 'M6_ZIGZAG':
+            self.pre_stop = None
             self.ped_seen = False                        # M6~M3에서 본 보행자 표지 (상태가 바뀌면 투표는 지워지므로 따로 기억)
         if state == 'M1_TRAFFIC':
             use = (self.p.get('m1_corner_preview', True) and self.p.get('m7_corner_done_deg', 85.0) > 0
@@ -492,17 +495,27 @@ class MissionFSM:
         lines = inp.lane.get('crosswalk_lines_mm') or []
         return bool(lines) and lines[0] <= self.p['arm_on_crosswalk_mm']
 
-    def _arm_stop(self, inp: Inputs, line: Optional[str] = None) -> None:
-        self._sub('approach', inp)
+    def _new_stop(self, line: Optional[str]) -> 'StopApproach':
         target = self.p['stop_target_mm']
         if line == 'm3_stop_line' and self.p.get('m3_stop_target_mm', 0.0) > 0.0:
             target = self.p['m3_stop_target_mm']        # 11/15: 횡단보도(M3)는 더 넉넉하게
-        self.stop = StopApproach(target, self.p['stop_brake_mm'],
-                                 self.p['stop_lost_ok_mm'],
-                                 freeze_mm=self.p['stop_freeze_mm'],
-                                 route_gate_mm=self.p['stop_route_gate_mm'])
-        self.stop.route_line_s = self._rp(line) if line else None
-        self.stop.passed_mm = self.p.get('stop_passed_mm', 120.0)
+        st = StopApproach(target, self.p['stop_brake_mm'],
+                          self.p['stop_lost_ok_mm'],
+                          freeze_mm=self.p['stop_freeze_mm'],
+                          route_gate_mm=self.p['stop_route_gate_mm'])
+        st.route_line_s = self._rp(line) if line else None
+        st.passed_mm = self.p.get('stop_passed_mm', 120.0)
+        return st
+
+    def _arm_stop(self, inp: Inputs, line: Optional[str] = None) -> None:
+        self._sub('approach', inp)
+        pre = getattr(self, 'pre_stop', None)
+        if line == 'm3_stop_line' and pre is not None and (pre.seen_d is not None or pre.route_line_s is not None):
+            self.stop = pre                              # 지그재그 중에 미리 잰 정지선을 이어받음
+            self.log.append(f'M3 uses pre-tracked stop line ({pre.how})')
+        else:
+            self.stop = self._new_stop(line)
+        self.pre_stop = None
         self.stop_line_name = line
 
     def _line_crossed(self, inp: Inputs, name: str) -> Optional[bool]:
@@ -612,6 +625,19 @@ class MissionFSM:
                 return Command('lane', self._lane(self.p['base_speed']))
             self._sub('zigzag', inp, f'start line ({self.line.how or "route/distance"})')
         self._remember_ped(inp)
+        # 11/15 밤 실차 'M7 전 횡단보도를 지나서 섬 -> 다음 코너 탈선': M3는 정지선 266 mm 앞(지그재그 끝)에서 시작하는데
+        #   카메라는 앞바퀴 350 mm 앞부터 보인다 -> M3가 시작할 때 정지선은 이미 사각이라 다음 흰 선(막대·끝선)을 잡았다.
+        #   지그재그 중에 정지선이 보이면 미리 거리를 재 두고(M3가 이어받음), 지그재그가 끝나기 전에 정지 거리 안이면 바로 M3로
+        if self.p.get('m3_pretrack', True):
+            if getattr(self, 'pre_stop', None) is None and (
+                    self._crosswalk_near(inp) or self._past(inp, 'm3_stop_line', -self.p['arm_on_crosswalk_mm'])):
+                self.pre_stop = self._new_stop('m3_stop_line')
+                self.log.append('M6: crosswalk stop line pre-tracked for M3')
+            if getattr(self, 'pre_stop', None) is not None:
+                self.pre_stop.remaining(inp)
+                if self.pre_stop.should_stop(inp):
+                    self._next(inp, 'stop line close (pre-tracked in zigzag)')
+                    return Command('stop', self._lane(0.0))
         _, dz = self._since(inp, sub=True)
         end = self._past(inp, 'm6_zigzag_end')
         if (dz >= self.p['zigzag_len_mm']) if end is None else end:
@@ -626,7 +652,8 @@ class MissionFSM:
         if self.sub == '':
             sign = self._vote(inp, 'pedestrian')
             early = getattr(self, 'ped_seen', False)
-            if sign or early or self._stop_near(inp, 'm3_stop_line'):
+            pre = getattr(self, 'pre_stop', None) is not None
+            if sign or early or pre or self._stop_near(inp, 'm3_stop_line'):
                 self.log.append('M3 stop armed by ' + ('pedestrian sign' if sign else
                                                        'pedestrian sign seen in M6' if early else 'route/crosswalk'))
                 self._arm_stop(inp, 'm3_stop_line')

@@ -690,3 +690,32 @@ def test_m7_corner_start_from_route_position():
     fsm3 = MissionFSM({'start_state': 'M3_PEDESTRIAN', 'route_points': pts})
     fsm3._goto('M7_OBSTACLE', Inputs(t=0.0, dist_mm=0.0, yaw=_m.radians(-90.0)), 'left crosswalk')
     assert fsm3.m7c[3] == 330.0                          # 도면 위치 없으면 예전대로
+
+
+def _zigzag_to_crosswalk(pretrack, zigzag_len):
+    """지그재그 시작선 지난 뒤부터: 정지선은 지그재그 시작 + 1943 mm. 카메라는 앞바퀴 350~2000 mm 안의 선만 봄 (사각 350 mm)"""
+    fsm = MissionFSM({'start_state': 'M6_ZIGZAG', 'm3_pretrack': pretrack, 'zigzag_len_mm': zigzag_len,
+                      'zigzag_start_mm': 0.0})
+    sim = Sim(fsm)
+    fsm._sub('zigzag', Inputs(t=0.0, dist_mm=0.0), 'start line (test)')   # 지그재그 시작선을 막 지남
+    line = 1943.0
+    stopped_at = None
+    for _ in range(1500):
+        rem = line - sim.dist
+        lane = {'crosswalk_lines_mm': [rem] if 350.0 <= rem <= 2000.0 else []}
+        cmd = sim.tick(lane=lane)
+        if fsm.state == 'M3_PEDESTRIAN' and fsm.sub == 'stopped' and stopped_at is None:
+            stopped_at = sim.dist
+            break
+    return fsm, line, stopped_at
+
+
+def test_crosswalk_stop_line_pretracked_in_zigzag():
+    """11/15 밤 실차: M7 전 횡단보도를 지나서 섬. M3가 시작할 때(정지선 266 mm 앞) 정지선은 이미 카메라 사각(350 mm)이라
+    못 잡았다 -> 지그재그 중에 미리 재 두고 이어받음. 지그재그 끝 판단이 늦어도(거리 2100 mm) 정지선 앞에서 섬"""
+    for zl in (1677.0, 2100.0):
+        fsm, line, at = _zigzag_to_crosswalk(True, zl)
+        assert at is not None, zl
+        assert 150.0 <= line - at <= 300.0, (zl, line - at)          # 25 cm 목표 근처, 선 앞
+    fsm, line, at = _zigzag_to_crosswalk(False, 2100.0)              # 예전: 지그재그가 늦게 끝나면 정지선을 지나서 섬
+    assert at is None or line - at < 0.0
