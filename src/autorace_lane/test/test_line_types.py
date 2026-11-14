@@ -44,3 +44,19 @@ def test_lane_id_rules():
     assert lane_id_from_types(W, W) == 0
     assert lane_id_from_types(W, Y) == -1
     assert lane_id_from_types(Y, Y) is None and lane_id_from_types(None, W) is None
+
+
+def test_yellow_solid_guard_steers_strongly_away_from_yellow_boundary():
+    """11/14: 3차선 M7(또는 일반 구간)에서 노란 실선에 가까워지면 강하게 안쪽으로 조향해 이탈을 막는다."""
+    cfg = BevConfig()
+    p = LaneParams(lane_width_mm=520.0, lane_color='both', yellow_solid_guard=True,
+                   yellow_guard_margin_mm=200.0, yellow_guard_hard_mm=140.0)
+    f = LaneFollower(cfg, p)
+    img = np.zeros((cfg.bev_h, cfg.bev_w, 3), np.uint8)
+    draw_line(img, cfg, -120.0, (0, 220, 240), dashed=False)
+    draw_line(img, cfg, +400.0, (240, 240, 240), dashed=True)
+    lane, white = color_masks(img, p)
+    out = f.process_bev(lane, white, speed=0.2, raw_lane=lane)
+    assert out.yellow_guard == 'L'
+    assert out.kappa == pytest.approx(-p.kappa_max, abs=1e-3)
+

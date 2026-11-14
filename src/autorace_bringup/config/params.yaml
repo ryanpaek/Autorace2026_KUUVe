@@ -32,6 +32,11 @@ lane_node:
     route_ff_weight_lost: 0.8
     yaw_kp: 1.5
     curve_slowdown: 0.3
+    # 11/14: 노란 실선은 절대 이탈하면 안 되는 트랙 바깥 경계선 -> 접근 시 안쪽으로 강하게 조향
+    yellow_solid_guard: true
+    yellow_guard_margin_mm: 200.0
+    yellow_guard_hard_mm: 140.0
+    yellow_guard_gain: 2.0
 
 mission_node:
   ros__parameters:
@@ -53,7 +58,7 @@ mission_node:
     zigzag_len_mm: 1800.0
     leave_mm: 600.0
     state_max_mm: 10000.0
-    stop_target_mm: 30.0                   # 11/12: 앞바퀴를 정지선 3cm 앞에 세운다 (예전 0 = 선 가장자리에 딱 맞춤 -> 조금만 늦어도 선을 밟음). 판정 ±5cm
+    stop_target_mm: 50.0                   # 11/14: 모든 정지선 5cm(50mm) 앞에 정지 (예전 30.0 = 너무 타이트하게 멈춤)
     stop_brake_mm: 30.0                    # TODO 실측
     ped_wait_sec: 3.5
     obstacle_source_ready: false           # obstacle 노드 완성 후 true
@@ -71,9 +76,9 @@ mission_node:
     m8_hold_speed: 0.15                    #   그동안 속도 (M7 직전 코너처럼 코너에서 직진하지 않게 천천히)
     fork_lane_width_mm: 460.0              # 11/12 밤: M2·합류 한쪽 선 모드 차로 폭 (바깥선에서 230 mm). 섬 쪽 선을 밟고 들어가던 것 -> 바깥선 쪽으로
     fork_lost_search: true                 #   M7 차선 구간·M2·합류에서 선을 놓치면 직선 방향으로 풀고 좌우 30° 찾기 (서서 끝내지 않음)
-    m8_corner_k_gain: 1.15                 #   M2 뒤 코너 곡률 배율 (R640 -> 약 R557, 더 안쪽으로). 차선이 더 꺾으라고 하면 그 값
+    m8_corner_k_gain: 1.0                  # 11/14: 1.15 -> 1.0 (R557은 코너 안쪽 노란 선을 밟고 출구에서 차선 이탈 유발 -> R640 그대로)
     cones_enter_before_mm: 0.0             # 도면 예비: 시작선 이만큼 앞에서 라바콘 모드 (1순위는 카메라로 선 통과)
-    cones_enter_cone_mm: 500.0             # 차로 안 콘이 이 안이면 조금 일찍
+    cones_enter_cone_mm: 150.0             # 11/14: 500 -> 150mm (라바콘 사이로 차가 들어오기 직전까지는 차선 인식이 메인)
     cones_end_after_mm: 150.0              # 끝선 이만큼 지나면 무조건 복귀
     cones_zone_mm: 2700.0
     cones_handover_mm: 400.0
@@ -262,3 +267,4 @@ parking_node:
     center_pullout_mm: 450.0
     guard_back: true                       # 옆 2cm 감시에 걸리면 그 자리에서 끝내지 말고 15cm 후진 뒤 다시 (최대 3번)
     guard_back_max: 3
+    back_reverse_scale: 0.10               # 11/14: 기억후진 시 잘못 들었던 길로 갈 때 꺾었던 조향의 반대 방향 10% 조향

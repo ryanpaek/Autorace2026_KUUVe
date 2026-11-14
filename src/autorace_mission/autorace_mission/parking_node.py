@@ -318,6 +318,7 @@ class ParkingV2:
         self.guard_backs = 0       # 옆 감시로 후진한 횟수
         self.center_tries = 0      # 끝에서 가운데 다시 맞춘 횟수
         self.center_off = None     # 마지막으로 잰 양옆 정중앙에서 차체 중심 옆 거리 (mm, 왼쪽 +)
+        self.last_fwd_k = KAPPA_FULL_RIGHT  # 직전 전진 조향 곡률 (기억후진 시 반대 방향 10% 조향용)
 
     def _enter(self, phase, inp):
         """단계 바꾸기: 시작 시각·거리·방향 기록."""
@@ -399,8 +400,10 @@ class ParkingV2:
         self._last_dist = inp['dist_mm']
 
     def _out(self, v, k, info=None):
-        """명령을 내보내며 마지막 속도 부호를 기억 (위치 계산용)."""
+        """명령을 내보내며 마지막 속도 부호와 전진 조향 곡률을 기억 (위치 계산 및 기억후진 반대 조향용)."""
         self._last_v = v
+        if v > 0 and k is not None and abs(k) > 1e-6:
+            self.last_fwd_k = float(k)
         return v, k, (info or self._info())
 
     def _line_to_world(self, rel, inp):
@@ -1018,7 +1021,10 @@ class ParkingV2:
             moved = inp['dist_mm'] - self.d_phase
             if moved >= (self.back_len or p['back_mm']):
                 return self._switch('TURN', inp)
-            return self._out(-p['back_speed'], p['back_kappa'])
+            k_back = p['back_kappa']
+            if k_back == 0.0 and p.get('back_reverse_scale', 0.0) > 0.0:
+                k_back = -p['back_reverse_scale'] * self.last_fwd_k
+            return self._out(-p['back_speed'], k_back)
 
         if self.phase == 'TURN':            # ④ 오른쪽 최대 조향 전진 + ⑤ 양옆 확인까지 반복
             moved = inp['dist_mm'] - self.d_phase
@@ -1305,8 +1311,9 @@ DEFAULTS = {
     'guard_back': False,       # 11/13: 옆 감시(guard_stop_mm)에 걸리면 끝내지 말고 back_mm 후진 뒤 다시 (params true)
     'guard_back_max': 3,
     'back_speed': 0.10,
-    'back_kappa': 0.0,         # 후진할 때 곡률. 0 = 바퀴 똑바로. +값(왼쪽)이면 후진하면서 더 돌아감
+    'back_kappa': 0.0,         # 후진할 때 고정 곡률. 0이면 아래 back_reverse_scale로 직전 전진 조향의 반대 10% 조향
                                # (오른쪽 -값으로 후진하면 앞에서 돈 만큼 되돌아가니 쓰지 말 것)
+    'back_reverse_scale': 0.10,  # 11/14: 기억후진 시 잘못 들었던 길로 갈 때 꺾었던 조향의 반대 방향 10% 조향
     'max_backs': 15,
     'abeam_tol_mm': 30.0,
     'side_max_mm': 700.0,

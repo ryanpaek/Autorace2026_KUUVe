@@ -403,3 +403,31 @@ def test_target_lane_beside_obstacle_does_not_flip_back():
     pl.target, pl.last_switch, pl.rechosen = 1, 9.95, False             # 방금 0 -> +1
     pl.step(10.0)
     assert pl.target == 1                                               # 예전: -1로 뒤집음
+
+
+def test_camera_yellow_solid_guard_forces_inward_steering():
+    """11/14: 오도메트리 y가 안쪽이어도 카메라(/lane/status)에서 노란 실선에 접근하면 즉시 안쪽으로 최대 조향."""
+    pl = running(y0=0.20, psi0=0.0)
+    pl.target = 1
+    pl.lane_last = {'status': 'L', 'yellow_guard': 'L',
+                    'line_left': {'color': 'yellow', 'dashed': False}, 'offset_mm': -120.0}
+    pl.lane_t = 0.0
+    w = pl.control(0.2, 0.05, False)
+    assert pl.edge_guarded and w == pytest.approx(-0.2 / pl.p.min_turn_radius, abs=1e-3)
+
+
+def test_rollback_reverses_with_opposite_10_percent_steering():
+    """11/14: 기억후진 시 잘못 들었던 길로 갈 때 꺾었던 조향(k_fwd)의 반대 방향으로 10% 크기로 조향하며 후진."""
+    p = AvoidParams(recover=True, recover_mode='trail', rollback_reverse_scale=0.10)
+    pl = AvoidPlanner(p)
+    pl.start(0.0, 0.0, 0.0, 0.0)
+    pl.last_fwd_k = 1.50                                                # 왼쪽(+1.50)으로 꺾어 들어가다 막힘
+    pl.trail = [(0.0, 0.0), (0.3, 0.05), (0.6, 0.15)]
+    pl.trail_k = [1.50, 1.50, 1.50]
+    pl.pose.x, pl.pose.y, pl.pose.psi = 0.65, 0.18, 0.2
+    pl.rb = {'t0': 1.0, 'x0': 0.65, 'y0': 0.18, 'dist': 0.0, 'blocked': 1, 'k_fwd': 1.50}
+    v, w = pl._rollback_step(1.1)
+    k_rev = w / v
+    assert v < 0.0
+    assert k_rev == pytest.approx(-0.10 * 1.50, abs=1e-6)               # 반대 방향(-), 10% 크기
+

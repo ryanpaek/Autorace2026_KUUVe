@@ -83,7 +83,7 @@ def test_pedestrian_stop_precision_and_wait():
         if fsm.sub == 'go':
             break
     assert stopped_at is not None
-    assert line_at - stopped_at == pytest.approx(0.0, abs=10)   # ±5cm 판정 안쪽
+    assert line_at - stopped_at == pytest.approx(50.0, abs=10)   # 11/14: 정지선 5cm(50mm) 앞 정지
     assert sim.t - t_stop >= 3.0
     assert cmd.source == 'lane'
 
@@ -219,7 +219,17 @@ def test_cones_enter_early_when_cone_close():
         if fsm.sub == 'cones':
             break
     assert fsm.sub == 'cones'
-    assert 1500.0 - 50 <= sim.dist < 2000.0                # 끝까지 안 기다리고 조금 일찍 (armed 이후)
+    assert sim.dist >= 2000.0 - 50                          # 11/14: 400mm 앞 콘으로는 일찍 안 들어가고 차선 인식 유지
+
+    fsm2 = MissionFSM({'start_state': 'M8_CONES', 'cones_source_ready': True,
+                       'cones_approach_mm': 2000.0})
+    sim2 = Sim(fsm2)
+    for _ in range(300):
+        sim2.tick(obstacle={'cone_ahead_mm': 120.0})
+        if fsm2.sub == 'cones':
+            break
+    assert fsm2.sub == 'cones'
+    assert 1500.0 - 50 <= sim2.dist < 2000.0                # 라바콘 직전(150mm 이내)에 들어오면 전환
 
 
 def test_cones_handover_times_out_without_lane():
@@ -375,7 +385,7 @@ def _m8_from_m2(turn_deg):
         d = sim.dist
         # 609 mm 직선 -> R640 90° 우회전(1005 mm) -> 북쪽 직선
         turn = min(max(d - 609.0, 0.0) / 1005.0, 1.0) * (math.pi / 2)
-        sim.tick(yaw=math.pi - turn, obstacle={'cone_ahead_mm': 400.0})   # 코너에서도 앞에 콘이 보임
+        sim.tick(yaw=math.pi - turn, obstacle={'cone_ahead_mm': 120.0})   # 코너에서도 앞에 콘이 보임
         if fsm.sub == 'cones':
             entered = d
             break

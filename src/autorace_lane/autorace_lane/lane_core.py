@@ -285,6 +285,11 @@ class LaneParams:
     # 값 = 기억을 쓰는 최대 주행 거리(mm, 권장 1000). 위치(pose) 필요. 0이면 끔
     lost_arc_mm: float = 0.0
     lost_arc_max_turn_deg: float = 75.0   # 기억한 뒤 차가 이만큼 돌면(코너 끝) 그만 쓴다
+    # 11/14: 노란 실선은 트랙 바깥 경계선이므로 절대 이탈하면 안 됨 -> 가까워지면 안쪽으로 강하게 조향
+    yellow_solid_guard: bool = True
+    yellow_guard_margin_mm: float = 200.0  # 차 중심에서 노란 실선까지 옆 거리가 이 안이면 강하게 안쪽 조향 시작
+    yellow_guard_hard_mm: float = 140.0    # 이 안이면 변화율 제한을 무시하고 최대 곡률(kappa_max)로 즉시 조향
+    yellow_guard_gain: float = 2.0
 
     @classmethod
     def from_dict(cls, d: dict) -> 'LaneParams':
@@ -341,6 +346,7 @@ class LaneOutput:
     # 3차선 차로 번호 (진행 방향 기준 +1 왼쪽/1차선, 0 가운데/2차선, -1 오른쪽/3차선). 모르면 None
     #   왼쪽 노란 실선 + 오른쪽 흰 점선 = +1, 양쪽 흰 점선 = 0, 왼쪽 흰 점선 + 오른쪽 노란 실선 = -1
     lane_id: Optional[int] = None
+    yellow_guard: Optional[str] = None  # 노란 실선 이탈 방지 강제 조향 작동 여부 ('L' | 'R' | None)
     mem_pts: int = 0                    # 기억 점 수 (차선 기억이 켜졌을 때)
     ff_kappa: Optional[float] = None    # 도면 곡률 (왼쪽 +, 1/m). 미리 넣기가 켜졌을 때
     lookahead_mm: Optional[float] = None
@@ -351,7 +357,8 @@ class LaneOutput:
             'mem_pts', 'ff_kappa', 'lookahead_mm',
             'kappa', 'speed_scale', 'status', 'source', 'offset_mm',
             'heading_rad', 'path_kappa', 'low_conf', 'stoplines_mm',
-            'crosswalk_lines_mm', 'end_lines_mm', 'line_left', 'line_right', 'lane_id')}
+            'crosswalk_lines_mm', 'end_lines_mm', 'line_left', 'line_right', 'lane_id',
+            'yellow_guard')}
         d['target_mm'] = list(self.target_mm) if self.target_mm else None
         cl = self.debug.get('centerline')
         d['model'] = ('circle' if cl.circle is not None else 'poly') if cl is not None else None
@@ -1427,7 +1434,20 @@ class LaneFollower:
         if p.line_types:
             out.line_left = classify_line(left, raw_lane, bev_white, cfg, p)
             out.line_right = classify_line(right, raw_lane, bev_white, cfg, p)
-            out.lane_id = lane_id_from_types(out.line_left, out.line_right) if det.status == 'BOTH' else None
+            if det.status == 'BOTH':
+                out.lane_id = lane_id_from_types(out.line_left, out.line_right)
+            elif p.lane_color == 'both':
+                # 11/14: 3차선(M7)에서 한쪽 선만 보여도 그것이 노란 실선이면 바깥 차로(왼쪽=1차선, 오른쪽=3차선)
+                if (det.status == 'L' and out.line_left
+                        and out.line_left.get('color') == 'yellow' and not out.line_left.get('dashed', False)):
+                    out.lane_id = 1
+                elif (det.status == 'R' and out.line_right
+                      and out.line_right.get('color') == 'yellow' and not out.line_right.get('dashed', False)):
+                    out.lane_id = -1
+                else:
+                    out.lane_id = None
+            else:
+                out.lane_id = None
         self.prev_line_masks = (self._line_mask(lab_full, left), self._line_mask(lab_full, right))
 
         fit_order = self.fit_order_override or (1 if self.mode == 'zigzag' else p.fit_order)
@@ -1604,10 +1624,46 @@ class LaneFollower:
             kappa_raw = kappa_raw + w * (k_ff - kappa_raw)
         out.source = source
 
+        # 11/14: 노란 실선 이탈 방지 강제 조향 (M7 3차선 바깥 노란 실선 및 일반 구간 노란 실선 경계 보호)
+        hard_guard = False
+        if p.yellow_solid_guard and source not in ('stop', 'heading') and self.mode != 'zigzag':
+            l_yellow_solid = (out.line_left is not None
+                              and out.line_left.get('color') == 'yellow'
+                              and not out.line_left.get('dashed', False))
+            r_yellow_solid = (out.line_right is not None
+                              and out.line_right.get('color') == 'yellow'
+                              and not out.line_right.get('dashed', False))
+            y_lim = min(look, 600.0)
+            dist_l, dist_r = None, None
+            if l_yellow_solid and lpix_mm is not None and len(lpix_mm) > 0:
+                near_l = lpix_mm[lpix_mm[:, 1] <= y_lim]
+                pts_l = near_l if len(near_l) >= 3 else lpix_mm
+                dist_l = -float(np.percentile(pts_l[:, 0], 85))
+            if r_yellow_solid and rpix_mm is not None and len(rpix_mm) > 0:
+                near_r = rpix_mm[rpix_mm[:, 1] <= y_lim]
+                pts_r = near_r if len(near_r) >= 3 else rpix_mm
+                dist_r = float(np.percentile(pts_r[:, 0], 15))
+            span = max(p.yellow_guard_margin_mm - p.yellow_guard_hard_mm, 1.0)
+            if dist_l is not None and dist_l < p.yellow_guard_margin_mm and (dist_r is None or dist_l <= dist_r):
+                out.yellow_guard = 'L'
+                urg = max(0.35, min(1.0, (p.yellow_guard_margin_mm - dist_l) / span))
+                k_guard = -min(p.kappa_max, urg * p.kappa_max * p.yellow_guard_gain)
+                kappa_raw = min(kappa_raw, k_guard)
+                hard_guard = dist_l <= p.yellow_guard_hard_mm
+            elif dist_r is not None and dist_r < p.yellow_guard_margin_mm:
+                out.yellow_guard = 'R'
+                urg = max(0.35, min(1.0, (p.yellow_guard_margin_mm - dist_r) / span))
+                k_guard = min(p.kappa_max, urg * p.kappa_max * p.yellow_guard_gain)
+                kappa_raw = max(kappa_raw, k_guard)
+                hard_guard = dist_r <= p.yellow_guard_hard_mm
+
         # 곡률 명령 필터: EMA -> 변화율 제한 -> 클램프
-        k_f = p.kappa_alpha * kappa_raw + (1.0 - p.kappa_alpha) * self.kappa_cmd
-        k_f = self.kappa_cmd + float(np.clip(k_f - self.kappa_cmd,
-                                             -p.kappa_rate_max, p.kappa_rate_max))
+        if hard_guard:
+            k_f = kappa_raw
+        else:
+            k_f = p.kappa_alpha * kappa_raw + (1.0 - p.kappa_alpha) * self.kappa_cmd
+            k_f = self.kappa_cmd + float(np.clip(k_f - self.kappa_cmd,
+                                                 -p.kappa_rate_max, p.kappa_rate_max))
         self.kappa_cmd = float(np.clip(k_f, -p.kappa_max, p.kappa_max))
         out.kappa = self.kappa_cmd
         if source != 'stop':
