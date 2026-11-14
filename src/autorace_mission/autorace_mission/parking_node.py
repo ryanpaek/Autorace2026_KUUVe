@@ -299,6 +299,9 @@ class ParkingV2:
         self.tgt_pm = []           # 1·3번 중점 (가까이서 잰 값)
         self.target_s = None       # 목표 = 1·3번 중심선 ∩ 5번 중심선 (칸 가운데 선 기준 s)
         self.target_src = None
+        self.settle_n0 = (0, 0)     # path: 정지 시작 때 잰 개수 (정지 중 새로 잰 값만 쓰려고)
+        self.q_s = None            # path: 꺾기 시작점 Q (뒷바퀴 축, 칸 가운데 선 기준 s)
+        self.done_logged = False
         self.turn_at = None        # 꺾을 때 (모서리 s, 라이다 s, 잰 횟수) — 실차 확인용
         self.turn_ref_used = None  # 꺾은 기준: 'corner' | 'pair'
         self.trigger = None        # 주차 모드 시작 이유: 'line' | 'pair'
@@ -344,7 +347,11 @@ class ParkingV2:
         """앞 두 띠의 통로 가운데로 차 기준 칸 가운데 선 (앞바퀴 기준 mx, my, ux, uy). 띠 하나만 되면 방향은 칸 추정선."""
         p = self.p
         pts = inp.get('points', [])
-        b = p.get('center_bands_mm', ((40.0, 170.0), (230.0, 420.0)))
+        f_ = list(p.get('center_bands_mm', [0.0, 170.0, 230.0, 420.0]))
+        # ROS 파라미터는 숫자 목록만 받음 -> [시작1, 끝1, 시작2, 끝2] (예전 ((a,b),(c,d)) 모양도 받음)
+        if f_ and isinstance(f_[0], (list, tuple)):
+            f_ = [x for band in f_ for x in band]
+        b = ((float(f_[0]), float(f_[1])), (float(f_[2]), float(f_[3])))
         m1 = corridor_mid(pts, b[0][0], b[0][1], gap_min_mm=p.get('center_gap_min_mm', 650.0),
                           gap_max_mm=p.get('center_gap_max_mm', 1000.0))
         m2 = corridor_mid(pts, b[1][0], b[1][1], gap_min_mm=p.get('center_gap_min_mm', 650.0),
@@ -582,7 +589,12 @@ class ParkingV2:
         if fp is not None:
             mx, my, pvx, pvy = fp
             near = (mx - pvx * p['pair_dist_mm'] / 2.0, my - pvy * p['pair_dist_mm'] / 2.0)
-            if math.hypot(*near) <= p['target_max_range_mm']:
+            far = (mx + pvx * p['pair_dist_mm'] / 2.0, my + pvy * p['pair_dist_mm'] / 2.0)
+            # 11/13: 먼 쪽(3번)이 덩어리 거리 1.5m 끝에 걸리면 먼 끝이 잘려 중심이 가까운 쪽으로 쏠림 -> 중점 5cm 앞쪽
+            # (꺾기가 4~6cm 일찍, 끝에서 1번 쪽으로 치우침). 3번 전체가 보일 때만, 1번이 시야(±105도) 뒤로 빠지기 전만
+            far_ok = math.hypot(*far) <= p['target_far_max_mm']
+            near_ok = math.degrees(math.atan2(near[1], near[0] + p['front_axle_from_lidar_mm'])) >= -p['target_near_max_deg']
+            if math.hypot(*near) <= p['target_max_range_mm'] and far_ok and near_ok:
                 s_, _ = to_sd(mx, my)
                 if abs(s_) <= p['target_gate_mm']:
                     self.tgt_pm.append(s_)
@@ -592,6 +604,21 @@ class ParkingV2:
                 h = sorted(hist[-n:])
                 self.target_s, self.target_src = h[len(h) // 2], src
                 return
+
+    def _rear_s(self):
+        """뒷바퀴 축 가운데: 칸 가운데 선 기준 차로 방향 mm."""
+        cx, cy, _, _ = self.pair_line
+        vx, vy = self._lane_dir()
+        return (self.px - cx) * vx + (self.py - cy) * vy
+
+    def _target_stable(self):
+        """path: 목표(5번 중심, 없으면 1·3번 중점)를 가까이서 3번 이상 쟀고 최근 값이 path_stable_mm 안으로 일정한가."""
+        p = self.p
+        for hist in (self.tgt_c5, self.tgt_pm):
+            if len(hist) >= p['corner_min_frames']:
+                last = hist[-5:]
+                return max(last) - min(last) <= p['path_stable_mm']
+        return False
 
     def _lidar_s(self, inp):
         """라이다 위치: 칸 가운데 선 기준 차로 방향 mm."""
@@ -810,6 +837,22 @@ class ParkingV2:
                     self.pair_line = tuple((a * n + b) / (n + 1) for a, b in zip(self.pair_line, line))
                 self.pair_n += 1
             if self.pair_line is not None and self.pair_n >= p['pair_min_frames']:
+                if p['turn_ref'] == 'path':
+                    # 11/13 캡틴 경로: ① 1·3·5번 인식 ② 다 되면 정지(서서 다시 잼) ③ 목표 P' = l5 위, 원이 끝나는 깊이
+                    # ④ Q(뒷바퀴) = 목표 - 회전 반경 으로 전진/후진 ⑤ 최대 조향 원호 ⑥ 앞범퍼가 5번 앞 30cm(R)면 정지
+                    self._measure_target(inp)
+                    late = self._rear_s() > -p['arc_radius_mm'] + p['path_late_mm']
+                    if self._target_stable() or (late and self.target_s is not None):
+                        self.settle_n0 = (len(self.tgt_c5), len(self.tgt_pm))
+                        self._enter('SETTLE', inp)
+                        return self._out(0.0, 0.0)
+                    if late and self.target_s is None and self._rear_s() > -p['arc_radius_mm'] + 2 * p['path_late_mm']:
+                        # 5번도 1·3번 가까운 짝도 못 잼: 멀리서 평균 낸 짝 중점으로
+                        self.target_s, self.target_src = 0.0, 'pair_avg'
+                        self.settle_n0 = (len(self.tgt_c5), len(self.tgt_pm))
+                        self._enter('SETTLE', inp)
+                        return self._out(0.0, 0.0)
+                    return self._out(inp['lane_v'], None)
                 if p['turn_ref'] == 'target':
                     # 11/13 캡틴: 목표 = 1·3번 중심선 ∩ 5번 중심선. 1번 꼭짓점은 '언제 꺾을지' 기준점:
                     # 꼭짓점 -> 꺾기 시작점 거리 d = (목표 - 라이다 기준 앞당김) - 꼭짓점 을 매번 계산 (고정값 아님)
@@ -921,6 +964,43 @@ class ParkingV2:
             else:
                 return self._out(inp['lane_v'], None)
 
+        if self.phase == 'SETTLE':          # path ②: 서서 다시 재기
+            self._measure_target(inp)
+            if inp['t'] - self.t_phase < p['settle_sec']:
+                return self._out(0.0, 0.0)
+            n5, npm = self.settle_n0
+            for vals, src in ((self.tgt_c5[n5:], 'col5'), (self.tgt_pm[npm:], 'pair')):
+                if len(vals) >= p['corner_min_frames']:
+                    v_ = sorted(vals)
+                    self.target_s, self.target_src = v_[len(v_) // 2], src + '_still'
+                    break
+            cx, cy, ux, uy = self.pair_line
+            vx, vy = self._lane_dir()
+            t0 = self.target_s
+            self.pair_line = (cx + t0 * vx, cy + t0 * vy, ux, uy)      # 칸 가운데 선 = l5 (목표가 s = 0)
+            self.line = self.pair_line
+            self.q_s = -p['arc_radius_mm']                              # Q: 뒷바퀴가 l5에서 회전 반경만큼 앞
+            self.turn_ref_used = 'path_' + str(self.target_src)
+            self.turn_at = (round(t0), round(self._rear_s() - self.q_s))   # (목표 s, 정지 때 뒷바퀴 - Q)
+            self._enter('MOVE_Q', inp)
+
+        if self.phase == 'MOVE_Q':          # path ④: Q까지 똑바로 전진/후진
+            err = self._rear_s() - self.q_s                             # + = Q를 지나침 -> 후진
+            if abs(err) <= p['q_tol_mm'] or abs(inp['dist_mm'] - self.d_phase) >= p['move_q_max_mm']:
+                if abs(err) > p['q_tol_mm']:
+                    return self._done('FAIL_Q', inp)
+                self._enter('PAUSE', inp)
+                return self._out(0.0, 0.0)
+            if err < 0:
+                if -err <= p['move_q_brake_mm']:
+                    self._enter('PAUSE', inp)
+                    return self._out(0.0, 0.0)
+                return self._out(p['move_q_speed'], 0.0)
+            if err <= p['move_q_brake_mm']:
+                self._enter('PAUSE', inp)
+                return self._out(0.0, 0.0)
+            return self._out(-p['move_q_speed'], 0.0)
+
         if self.phase == 'PAUSE':           # ③ 1초 정지
             if inp['t'] - self.t_phase >= p['pause_sec']:
                 self.yaw_turn0 = inp['yaw']
@@ -959,7 +1039,9 @@ class ParkingV2:
             if self.pair_line is not None and side is not None:
                 # 짝을 알고 양옆 리모 옆면이 보이면: 옆면으로 구한 선에서 차체 중심이 칸 가운데 오면 멈춤.
                 # (차선에서 본 짝은 리모의 차선 쪽 끝면만 보여 깊이가 8~17cm 얕게 나온다 -> 깊이는 옆면으로)
-                if not p.get('center_on_sides', False):
+                if not p.get('center_on_sides', False) or self.side_line is None:
+                    # 11/13: center_on_sides인데 정중앙 선을 아직 못 구했으면(통로 폭 조건 등) 옆면 선으로.
+                    # 예전엔 None을 그대로 칸 선에 넣어 TURN에서 노드가 죽었음 (시뮬레이션: 1·3 간격 좁은 배치)
                     self.side_line = self._line_to_world(side, inp)
                 self.line = self.side_line
                 self.side_seen = True
@@ -987,9 +1069,13 @@ class ParkingV2:
                     r = l = True
                     self.stop_how = 'cap'
             if not (r and l) and p['stop_from_col5_mm'] > 0 and self._turned_deg(inp) >= p['col5_min_turn_deg']:
-                # 11/12 캡틴: 5번(정면) 앞 stop_from_col5_mm에서 정지. 리모가 칸 가운데면 앞범퍼가 칸 끝 선 약 6cm 전
+                # 11/12 캡틴: 5번(정면) 앞 stop_from_col5_mm에서 정지 (11/13 path: R = 앞범퍼 30cm).
+                # 11/13: 원이 끝나기 전에 R에 닿으면 덜 돈 채 섬(8~19도) -> stop_turn_deg 넘게 돈 뒤에만,
+                # 단 stop_hard_mm보다 가까우면 몇 도든 정지
                 gap = self._front_gap(inp)
-                if gap is not None and gap <= p['stop_from_col5_mm'] + p['enter_brake_mm']:
+                if gap is not None and (
+                        (gap <= p['stop_from_col5_mm'] + p['enter_brake_mm'] and self._turned_deg(inp) >= p['stop_turn_deg'])
+                        or gap <= p['stop_hard_mm'] + p['enter_brake_mm']):
                     r = l = True
                     self.stop_how = 'col5'
             if (not (r and l) and self._turned_deg(inp) >= 10.0 and self.realigns >= p['max_realign']
@@ -1142,7 +1228,7 @@ class ParkingV2:
         """/parking/state에 실을 내용."""
         return {'phase': self.phase, 'done': self.phase == 'DONE', 'result': self.result,
                 'backs': self.backs, 'realigns': self.realigns, 'last_err': self.err,
-                'row': self.row, 'stop_how': self.stop_how, 'trigger': self.trigger, 'turn_ref': self.turn_ref_used, 'corner_s': None if self.corner_s is None else round(self.corner_s), 'corner_n': self.corner_n, 'turn_at': self.turn_at, 'target_s': None if self.target_s is None else round(self.target_s), 'target_src': self.target_src, 'n_c5': len(self.tgt_c5), 'n_pm': len(self.tgt_pm),
+                'row': self.row, 'stop_how': self.stop_how, 'trigger': self.trigger, 'turn_ref': self.turn_ref_used, 'corner_s': None if self.corner_s is None else round(self.corner_s), 'corner_n': self.corner_n, 'turn_at': self.turn_at, 'target_s': None if self.target_s is None else round(self.target_s), 'target_src': self.target_src, 'n_c5': len(self.tgt_c5), 'n_pm': len(self.tgt_pm), 'q_s': self.q_s,
                 'end_mm': None if self.end_d is None else round(self.end_d)}
 
 
@@ -1161,15 +1247,25 @@ DEFAULTS = {
     'skip_wait_line': False,   # 11/12: true면 WAIT_LINE 건너뛰고 바로 FOLLOW(짝 찾기). 미션 노드 m4_direct와 같이 켬 (params)
     'follow_max_direct_mm': 3500.0,  # 바로 시작했을 때 짝 없이 이만큼 가면 멈춤. 도면: M4 시작 약 3.8m -> 꺾는 곳 6.56m, 차선 끝 8.13m
     'wait_blocked_before_pair': True,  # 짝 찾기 전 앞이 막히면 BLOCKED로 끝내지 말고 서서 기다림
-    'turn_ref': 'pair',        # 꺾는 기준: 'pair'(짝 중점) | 'corner'(1번 모서리, 리모 폭 가정) | 'center1'(1번 앞면 가운데) | 'target'(1·3 중심선 ∩ 5번 중심선, 꼭짓점 기준 꺾기, 11/13)
+    'turn_ref': 'pair',        # 꺾는 기준: 'pair'(짝 중점) | 'corner'(1번 모서리, 리모 폭 가정) | 'center1'(1번 앞면 가운데) | 'target'(꼭짓점 기준 꺾기) | 'path'(캡틴 경로: 정지·Q로 이동·원호, 11/13)
     'turn_from_corner_mm': 140.0,  # corner: 라이다가 1번 모서리 선을 이만큼 지나면 꺾기.
                                #   = turn_lead 320 을 바꾼 값: 2번 가운데 = 모서리 + 410 (칸 52 - 리모 반폭 11), 앞바퀴 = 가운데 - 320,
                                #   라이다 = 앞바퀴 + 47 -> 모서리 + 137. 실차로 맞출 것
     'turn_from_center1_mm': 247.0,  # center1: 라이다가 1번 앞면 가운데를 이만큼 지나면 꺾기.
                                #   = 2번 가운데(1번 + 520) - turn_lead 320 + 라이다 47. 실차로 맞출 것
+    'arc_radius_mm': 529.0,    # path: 최대 조향 때 뒷바퀴 축 가운데 회전 반경 (실측 곡률 1.89). Q = l5 - 이 값
+    'path_stable_mm': 30.0,    # path: 목표 최근 5번 값이 이 안이면 '인식 다 함'
+    'path_late_mm': 150.0,     # path: 인식이 늦어 뒷바퀴가 Q를 이만큼 지나면 그때 정지 (뒤로 돌아옴)
+    'settle_sec': 1.0,         # path: 다 인식하면 서서 다시 재는 시간
+    'move_q_speed': 0.08,      # path: Q까지 전진/후진 속도 m/s
+    'move_q_brake_mm': 5.0,    # path: 0.08m/s 제동 거리 (0.18m/s 23mm 기준 환산)
+    'q_tol_mm': 10.0,          # path: Q 도착 허용 오차
+    'move_q_max_mm': 800.0,    # path: Q까지 이보다 많이 움직여야 하면 FAIL_Q
     'turn_lead_lidar_mm': 273.0,  # target: 라이다가 목표 이만큼 전에 오면 꺾기 (= turn_lead 320 - 라이다 47, 실차로 맞출 것)
     'target_max_range_mm': 1300.0,  # target: 5번·1번이 라이다에서 이 안일 때 잰 값만 (멀면 일부만 보임)
-    'target_gate_mm': 250.0,   # target: 짝으로 예상한 칸 가운데에서 차로 방향으로 이 안만
+    'target_gate_mm': 250.0,
+    'target_far_max_mm': 1300.0,  # target/path: 먼 쪽(3번) 중심이 이 안일 때만 짝 중점 사용 (덩어리 1.5m 끝에서 잘림)
+    'target_near_max_deg': 95.0,  # target/path: 가까운 쪽(1번)이 라이다에서 이 각도 안일 때만 (시야 ±105도 끝에서 잘림)   # target: 짝으로 예상한 칸 가운데에서 차로 방향으로 이 안만
     'corner_min_pts': 4,       # 모서리 잴 때 필요한 차로 쪽 면 점 수
     'corner_gate_mm': 250.0,   # 모서리가 짝으로 예상한 위치(1번 중심 + 110)에서 이보다 멀면 버림 (11/13: 150 -> 250, 칸 폭만 한 상자)
     'corner_window_mm': 300.0, # 1번 중심에서 차로 방향으로 이 안의 점만 1번으로 봄 (11/13: 260 -> 300)
@@ -1178,6 +1274,8 @@ DEFAULTS = {
     'corner_median_n': 7,      # 최근 이만큼의 중앙값
     'stop_from_col5_mm': 0.0,  # 11/12: 꺾은 뒤(col5_min_turn_deg 이상) 앞범퍼 -> 정면 물체(5번) 이 거리면 정지. 0 = 끔
                                #   220: 리모가 칸 가운데면 5번 앞면 = 칸 가운데 + 459 -> 앞범퍼 239 (칸 끝 선 300 전 약 6cm)
+    'stop_turn_deg': 0.0,      # col5 정지는 이만큼 돈 뒤에만 (0 = col5_min_turn_deg부터). path: 85
+    'stop_hard_mm': 0.0,       # 이보다 가까우면 몇 도든 정지 (0 = 안 씀). path: 200
     'guard_stop_mm': 0.0,      # 재정렬을 다 썼거나 끈 경우, 꺾는 중 리모에 이보다 가까우면 GUARD_STOP 정지. 0 = 끔
     'publish_lane_cfg': True,  # 주차 노드가 /lane/config를 직접 보냄. 11/12: false (미션 노드가 오프셋까지 보냄, 1초마다 덮어쓰던 문제)
     'single_fallback': False,  # 짝 없이 오른쪽 물체 하나만 보고 꺾기 (V1 방식). 11/12: 표지판에 속아 1번 칸 충돌 -> 기본 끔
@@ -1193,7 +1291,7 @@ DEFAULTS = {
     'center_on_sides': False,  # 11/13: 양옆 리모가 보이면(stop_min_turn_deg 이상 돈 뒤) 그 정중앙 선을 따라 조향 (params true)
     'center_smooth': 0.5,      #   정중앙 선 갱신 비율 (1 = 매번 새 값)
     'center_min_turn_deg': 70.0,   #   이만큼 돈 뒤부터 (덜 돌면 통로가 비스듬)
-    'center_bands_mm': ((0.0, 170.0), (230.0, 420.0)),   #   통로 가운데를 재는 앞 두 띠 (앞바퀴 기준)
+    'center_bands_mm': [0.0, 170.0, 230.0, 420.0],   # [시작1, 끝1, 시작2, 끝2]. 11/13: ((..),(..))였을 때 ROS가 못 받아 노드가 켜지자마자 죽음.   #   통로 가운데를 재는 앞 두 띠 (앞바퀴 기준)
     'center_gap_min_mm': 650.0,    #   1·3번 사이 통로 폭 (도면: 칸 두 개 1040 - 리모 폭 220 = 820)
     'center_gap_max_mm': 1000.0,
     'center_max_dir_deg': 25.0,    #   두 띠로 구한 방향이 차와 이보다 틀어지면 안 믿음
@@ -1375,7 +1473,7 @@ def main(args=None):
                                                     min_size_mm=g('single_min_size_mm'))
                     clusters_box = scan_clusters(s.ranges, s.angle_min, s.angle_increment, s.range_min,
                                                  s.range_max, g('front_axle_from_lidar_mm'), g('laser_yaw'),
-                                                 max_dist_mm=1500.0, x_mode='box')
+                                                 max_dist_mm=1500.0, x_mode='box', min_size_mm=g('car_min_size_mm'))
                 v, k, info = self.logic.step({
                     't': time.monotonic(), 'dist_mm': self.dist_mm, 'yaw': self.yaw,
                     'lane_v': self.lane_v, 'lane_w': self.lane_w, 'stoplines_mm': self.stoplines,
@@ -1395,6 +1493,11 @@ def main(args=None):
                 self._sent_cfg = None
                 self.logic = None
             self.cmd_pub.publish(tw)
+            if self.logic is not None and info.get('done') and not self.logic.done_logged:
+                # 11/13 캡틴: 주차 끝나면 터미널(실행 창)에 띄우기
+                self.logic.done_logged = True
+                self.get_logger().info(f"주차 완료: result={info.get('result')} stop_how={info.get('stop_how')} "
+                                       f"turn_ref={info.get('turn_ref')} turn_at={info.get('turn_at')}")
             info.update({'active': active, 'version': '2P', 'stamp': time.monotonic()})
             self.state_pub.publish(String(data=json.dumps(info)))
 

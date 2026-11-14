@@ -221,7 +221,7 @@ parking_node:
     turn_lead_mm: 320.0                    # 칸 가운데가 앞바퀴보다 이만큼 앞일 때 꺾기 (회전반경 530 - 축거 210)
     straighten_yaw_deg: 87.0               # 이만큼 돌면 바퀴 펴기 (정지 후 2~4도 더 돎, calib 3번)
     max_realign: 0                         # 재정렬 최대 횟수 (0 = 끔). 11/12: 2 -> 0 (만점 자리에서도 후진·재진입 반복, 고쳐지지도 않음)
-    follow_col5: true                      # 꺾은 뒤 정면 5번 리모로 2번 칸 세로 가운데선 구해서 따라가기 (11/10)
+    follow_col5: false                     # 11/13 캡틴: 끔. 원을 접선까지 다 그림 (켜면 70°부터 5번 선을 비스듬히 쫓아 끝 방향 6~12° 틀어지고 5번 쪽으로 붙음)
     side_guard_mm: 50.0                    # 꺾는 중·들어가는 중 리모까지 이보다 가까우면 멈추고 재정렬. 0 = 끔
     final_head_tol_deg: 4.0                # 끝 정렬: 방향이 이보다 틀어지면 한 번 더 (시간이 아까우면 크게)
     final_lat_tol_mm: 30.0                 # 끝 정렬: 차체 중심이 칸 가운데에서 이보다 벗어나면 한 번 더
@@ -234,19 +234,25 @@ parking_node:
     skip_wait_line: true                   # 11/12: 흰 선 안 기다리고 바로 1·3번 짝 찾기 (mission_node m4_direct와 같이 켬/끔)
     follow_max_direct_mm: 3500.0           # 짝 없이 이만큼 가면 멈춤 (도면: M4 시작 ~3.8m, 꺾는 곳 ~6.56m, 차선 끝 8.13m)
     wait_blocked_before_pair: true         # 짝 찾기 전 앞이 막히면 주차를 끝내지 말고 서서 기다림
-    turn_ref: target                       # 11/13: 목표 = 1·3번 중심선 ∩ 5번 중심선(가까이서 잰 중앙값), 1번 꼭짓점 기준으로 꺾는 시점 계산.
+    turn_ref: path                         # 11/13 캡틴 경로: 1·3·5번 인식 -> 정지(1초, 서서 다시 잼) -> Q로 전진/후진 -> 최대 조향 원호 -> 앞범퍼 R 정지
+                                           #   목표 l5 = 5번 중심(없으면 1·3번 중점), Q(뒷바퀴) = l5 - arc_radius_mm. (target = 꼭짓점 기준 꺾기)
+    arc_radius_mm: 529.0                   # path: 최대 조향 뒷바퀴 축 회전 반경 (실측 곡률 1.89). 틀리면 Q가 틀어짐 -> 실차 확인
+    settle_sec: 1.0                        # path: 다 인식하면 서서 다시 재는 시간
+    stop_turn_deg: 86.0                    # path: 86도 넘게 돈 뒤 앞범퍼 R에서 정지. 87도에 바퀴 펴면 실차는 2~4도 더 돎(calib 3번)
+    stop_hard_mm: 200.0                    # path: 앞범퍼 -> 정면 20cm 안이면 몇 도든 정지
+#   (이전 target 설명) 목표 = 1·3번 중심선 ∩ 5번 중심선(가까이서 잰 중앙값), 1번 꼭짓점 기준으로 꺾는 시점 계산.
                                            #   상자 크기·간격과 무관 (corner = 리모 폭 가정, pair = 예전 짝 중점 평균)
     turn_lead_lidar_mm: 273.0              # target: 라이다가 목표 27.3cm 전에 오면 꺾기 (= turn_lead 320 - 라이다 47). 실차로 맞출 것
     turn_from_corner_mm: 140.0             #   라이다가 모서리 선을 이만큼 지나면 꺾기 (turn_lead 320 환산. 실차로 맞출 것)
-    stop_from_col5_mm: 220.0               # 11/12: 꺾은 뒤 앞범퍼 -> 5번 22cm면 정지 (리모가 칸 가운데면 칸 끝 선 약 6cm 전)
+    stop_from_col5_mm: 300.0               # 11/13 캡틴 R: 앞범퍼 -> 5번 30cm면 정지 (리모·오늘 상자 기준 앞뒤 모두 칸 안, 22 -> 30)
     publish_lane_cfg: false                # 11/12: 차선 오프셋은 미션 노드가 보냄 (m4_target_offset_mm). 둘이 보내면 1초마다 덮어씀
     guard_stop_mm: 20.0                    # 재정렬 끈 상태에서 꺾는 중 리모에 2cm보다 가까우면 박기 전에 정지
     # 11/13 실차 (캡틴): 앞 15cm 안 물체면 멈춤, 후진 15cm, 전진<->후진 0.5초 멈춤, 양옆 리모 정중앙에 세우기
     front_stop_mm: 150.0                   # 앞범퍼 앞 이 안 물체 = 막힘 -> 멈추고 후진 (예전 60)
     back_mm: 150.0                         # 막혔을 때 후진 거리 (예전 50: 5cm씩 4번 왔다갔다)
     switch_pause_sec: 0.5                  # 전진 <-> 후진 바꿀 때 멈춤
-    center_on_sides: true                  # 양옆 리모가 보이면 그 정중앙 선을 따라 들어감 (예전엔 깊이에만 씀)
-    center_check: true                     # 끝에서 양옆 리모 정중앙에서 center_tol_mm 넘게 벗어났으면 45cm 빼서 정중앙 선 따라 다시 (최대 2번)
+    center_on_sides: false                 # 11/13 캡틴: 끔 (원을 접선까지). true면 70°부터 양옆 리모 정중앙 선을 따라 들어감
+    center_check: false                    # 11/13 캡틴: 끔 (경로 방식은 한 번에 넣기, 후진·재진입 안 함). true면 끝에서 양옆 리모 정중앙에서 center_tol_mm 넘게 벗어났으면 45cm 빼서 정중앙 선 따라 다시 (최대 2번)
     center_retries: 2
     center_tol_mm: 15.0                    # 시뮬레이션 18개: 끝 옆 오차 평균 19 -> 8mm, 최대 35 -> 13mm
     center_pullout_mm: 450.0
