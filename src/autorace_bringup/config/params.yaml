@@ -39,6 +39,7 @@ lane_node:
     yellow_guard_gain: 2.0
     yellow_guard_one_side_only: true       # 11/15: 양쪽이 다 노란 실선(일반 구간)이면 지킴 안 함 (직선에서 좌우로 왔다갔다 원인). M7 바깥 차로만
     yellow_guard_three_lane_only: true     # 11/15: 지킴은 M7 3차선에서만. 코너 앞(바깥 선이 앞쪽에서 휘어 들어옴)·M2 한쪽 선 모드에서 '붙었다'로 착각해 과하게 꺾던 것
+    corner_kappa_gain: 1.1                 # 11/15: 차선이 커브라고 할 때(|곡률|>0.6) 조향 1.1배 (커브마다 아슬아슬). 코너 시뮬레이션: 바깥 36 -> 26 mm, 안쪽 112 -> 120 mm(선까지 17 mm). 1.2면 안쪽 여유 10 mm
 
 mission_node:
   ros__parameters:
@@ -60,7 +61,7 @@ mission_node:
     zigzag_len_mm: 1800.0
     leave_mm: 600.0
     state_max_mm: 10000.0
-    stop_target_mm: 50.0                   # 11/14: 모든 정지선 5cm(50mm) 앞에 정지 (예전 30.0 = 너무 타이트하게 멈춤)
+    stop_target_mm: 100.0                  # 11/15: 50 -> 100. 50으로도 실차는 정지선 직전에 섬 (카메라 사각 0.55 m를 오도메트리로 세고 제동 밀림이 더 큼). 목표: 실제 약 5 cm 앞
     stop_brake_mm: 30.0                    # TODO 실측
     ped_wait_sec: 3.5
     obstacle_source_ready: false           # obstacle 노드 완성 후 true

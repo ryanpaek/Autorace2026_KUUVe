@@ -83,7 +83,7 @@ def test_pedestrian_stop_precision_and_wait():
         if fsm.sub == 'go':
             break
     assert stopped_at is not None
-    assert line_at - stopped_at == pytest.approx(50.0, abs=10)   # 11/14: 정지선 5cm(50mm) 앞 정지
+    assert line_at - stopped_at == pytest.approx(100.0, abs=10)  # 11/15: 정지선 10cm 목표 (실차는 밀려서 약 5cm)
     assert sim.t - t_stop >= 3.0
     assert cmd.source == 'lane'
 
