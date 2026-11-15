@@ -96,6 +96,15 @@ mission_node:
     route_align_on_reset: true             # 출발선·연습 시작점·/route/set_s에서 차가 경로 방향으로 반듯이 놓였다고 보고 방향 맞춤
     route_lost_misses: 2                   # 도면 선을 연속 2개 못 보고 지나치면 길 잃음 -> FSM은 표지·카메라·거리로만 (0 = 끔)
     route_anchor_max_mm: 3000.0            # 카메라로 확인한 미션 선으로 위치 다시 맞출 때 최대 허용 차이
+    # 11/15 (1114 bag 네 판 위치 분석)
+    route_fix_max_dpsi_deg: 15.0           # 차가 경로와 이보다 비스듬하면 흰 가로선으로 s 안 맞춤 (M7: 10°+두 선, M8: 안 씀)
+    route_corner_anchor: true              # 90° 코너를 IMU로 다 돈 순간 s = 코너 끝 (M7·M2 뒤 1~2 m 뒤처짐 바로잡기)
+    route_corner_window_mm: 3000.0         #   지금 s가 코너 끝에서 이 안일 때만
+    route_corner_k_gain: 1.1               # 차선 노드에 주는 도면 코너 곡률 배율 (실차 크게 돎 -> 조금 더 일찍·많이)
+    m7_corner_k_gain: 1.1                  # M7 직전 코너 IMU 곡률 미리보기 배율
+    m1_corner_k_gain: 1.1                  # 신호등 앞 코너 곡률 배율
+    stop_pretrack: true                    # M6·M1 준비 전부터 횡단보도 정지선을 카메라로 따라감 (정지 1순위 = 카메라 선)
+    stop_pretrack_mm: 1500.0               #   도면상 정지선이 이 거리 안일 때부터
 
 obstacle_node:
   ros__parameters:
@@ -262,3 +271,8 @@ parking_node:
     center_pullout_mm: 450.0
     guard_back: true                       # 옆 2cm 감시에 걸리면 그 자리에서 끝내지 말고 15cm 후진 뒤 다시 (최대 3번)
     guard_back_max: 3
+
+ackermann_bridge:
+  ros__parameters:
+    # 11/15: 1114 bag R640 코너에서 실제 곡률(IMU)이 명령의 약 80% -> 조향 전체 1.2배 (최대 조향 0.40 rad는 그대로)
+    steer_gain: 1.2

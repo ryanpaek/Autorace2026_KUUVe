@@ -641,15 +641,71 @@ def test_green_on_arrival_passes_without_stopping():
     """11/14: stop_on_green_arrival false -> 초록이 확정돼 있으면 정지선에서 안 섬. 아무것도 못 봤으면 서서 초록을 기다림."""
     fsm = MissionFSM({'start_state': 'M1_TRAFFIC', 'stop_on_green_arrival': False,
                       'route_points': {'m1_stop_line': 3000.0}})
-    srcs = []
-    for i in range(40):
+    srcs, subs = [], []
+    for i in range(60):
         d = 2000.0 + 40.0 * i
         cmd = fsm.step(Inputs(t=0.1 * i, dist_mm=d, route_s=d, confirmed_classes={'green': 1}))
         srcs.append(cmd.source)
+        subs.append((d, fsm.sub))
     assert 'stop' not in srcs and fsm.state == 'M4_PARKING'
+    # 11/15: 초록이 일찍 보여도 'go'는 정지 지점에 도착했을 때만 (그 전엔 approach)
+    first_go = next(d for d, sb in subs if sb == 'go')
+    assert first_go >= 3000.0 - 120.0
     wait = MissionFSM({'start_state': 'M1_TRAFFIC', 'stop_on_green_arrival': False,
                        'route_points': {'m1_stop_line': 3000.0}})
     for i in range(60):
         d = min(2000.0 + 40.0 * i, 3000.0)
         cmd = wait.step(Inputs(t=0.1 * i, dist_mm=d, route_s=d, confirmed_classes={}))
     assert wait.sub == 'stopped' and cmd.source == 'stop'
+
+
+def test_green_seen_early_then_red_still_stops():
+    """11/15: 접근 중 초록을 봤어도 정지선 도착 때 초록이 아니면(빨강으로 바뀜) 선다."""
+    fsm = MissionFSM({'start_state': 'M1_TRAFFIC', 'stop_on_green_arrival': False,
+                      'route_points': {'m1_stop_line': 3000.0}})
+    for i in range(80):
+        d = min(1500.0 + 40.0 * i, 3000.0)
+        cls = {'green': 1} if d < 2400.0 else {}
+        cmd = fsm.step(Inputs(t=0.1 * i, dist_mm=d, route_s=d, confirmed_classes=cls))
+        assert fsm.sub != 'go'
+    assert fsm.sub == 'stopped' and cmd.source == 'stop'
+
+
+def test_m3_stop_uses_camera_line_tracked_in_zigzag():
+    """11/15: M6 지그재그 중 본 횡단보도 정지선을 M3 정지에 그대로 쓴다 (도면 위치가 틀려도 카메라 기준)."""
+    fsm = MissionFSM({'start_state': 'M6_ZIGZAG', 'route_points': {'m3_stop_line': 11365.0,
+                                                                  'm6_zigzag_end': 11100.0,
+                                                                  'm3_crosswalk_end': 11905.0}})
+    fsm.sub = 'zigzag'
+    true_line = 11365.0 + 200.0          # 도면 위치가 200 mm 틀림 (실제 선이 더 멀다)
+    stop_at = None
+    for i in range(400):
+        d = 10000.0 + 20.0 * i            # 실제 앞바퀴 위치 = d, 도면 s도 d (도면 선만 400 mm 틀림)
+        rem = true_line - d
+        lane = {'crosswalk_lines_mm': [rem]} if 450.0 < rem < 1500.0 else {}
+        cmd = fsm.step(Inputs(t=0.1 * i, dist_mm=d, route_s=d, lane=lane))
+        if fsm.state == 'M3_PEDESTRIAN' and fsm.sub == 'stopped' and stop_at is None:
+            stop_at = d
+        if stop_at is not None:
+            break
+    assert stop_at is not None
+    assert fsm.stop.how == 'camera'
+    assert abs(true_line - stop_at) < 120.0      # 도면(200 mm 앞)이 아니라 카메라 선 앞에서 섬
+
+
+def test_stop_relocks_to_route_consistent_line_after_false_line():
+    """11/15: 처음 잡은 가짜 횡단보도 선(도면과 600 mm 다름)을 따라가다가 도면과 맞는 진짜 선이 보이면 갈아탄다."""
+    fsm = MissionFSM({'start_state': 'M1_TRAFFIC', 'route_points': {'m1_stop_line': 3000.0}})
+    stop_at = None
+    for i in range(200):
+        d = 1500.0 + 10.0 * i
+        lane = {}
+        if d < 1560.0:
+            lane = {'crosswalk_lines_mm': [2400.0 - d]}       # 가짜 선 (s 2400)
+        elif 2100.0 < d < 2550.0:
+            lane = {'crosswalk_lines_mm': [3000.0 - d]}       # 진짜 정지선
+        fsm.step(Inputs(t=0.1 * i, dist_mm=d, route_s=d, lane=lane, confirmed_classes={}))
+        if fsm.sub == 'stopped':
+            stop_at = d
+            break
+    assert stop_at is not None and abs(3000.0 - stop_at) < 120.0

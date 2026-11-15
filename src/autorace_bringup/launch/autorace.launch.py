@@ -83,7 +83,7 @@ def generate_launch_description():
         # 위치 확인용 수동 주행: mission_node가 /cmd_vel을 내지 않는다 (teleop으로 조종, 11/11)
         DeclareLaunchArgument('manual', default_value='false'),
         Node(package='autorace_mission', executable='ackermann_bridge', name='ackermann_bridge',
-             output='screen', condition=IfCondition(use_bridge)),
+             parameters=[params], output='screen', condition=IfCondition(use_bridge)),
         Node(package='autorace_lane', executable='lane_node', name='lane_node',
              parameters=[params, {'bev_config': bev}], output='screen'),
         Node(package='autorace_mission', executable='mission_node', name='mission_node',
