@@ -151,7 +151,7 @@ class AvoidParams:
     center_bonus: float = 0.3
     #   옆 차로(1·3)에서 장애물을 지난 뒤 가운데 앞이 center_return_free 넘게 비고(옆에 지나가는 것도 없음) 갈 길이 비면
     #   가운데로 돌아옴. 섬 앞 center_from_m 안(출구·표지 판단 구간)에서는 안 함. 차로를 바꾼 뒤 center_return_sec 지나서만
-    center_return: bool = True
+    center_return: bool = False       # 11/15 실차: 1차선 앞이 비었는데도 2차선으로 갔다 다시 1차선 -> 끔 (표지 보러 섬 앞에서 모으기는 따로 있음)
     center_return_free: float = 2.6   # 11/15: 1.6 -> 2.6. 차로 바꾸는 기준(1.5 m)과 겹쳐 가운데로 돌아오다 바로 다시 나가던 것
     center_return_sec: float = 1.0
     center_before_island: bool = True  # 11/12 밤: 표지를 모르면 섬 앞에서 가능하면 2차로로 모아 표지를 보게 함

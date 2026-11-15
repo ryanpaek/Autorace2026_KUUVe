@@ -117,6 +117,7 @@ DEFAULT_PARAMS = {
     # 11/15 바닥 갈림길 글자 A/B (차선 노드 floor_letter, 구멍 수로 구분): 최근 floor_letter_window 프레임 중 floor_letter_need 번
     #   같으면 '이 갈림길에 들어왔다'로 확정 -> 표지(YOLO)·회피 노드 차로보다 우선 (차가 실제로 있는 쪽). M7 끝 ~ M2_EXIT
     'floor_letter_use': True,
+    'floor_need_exit_agree': True,   # 11/15: 회피가 끝난 차로(A/B)를 알면 바닥 글자가 같을 때만 씀 (글자 잘못 읽어 반대 갈래로 가던 것)
     'floor_letter_window': 6,
     'floor_letter_need': 3,
     # 11/15 실차 '라바콘 끝난 뒤 커브에서 시작 차로 선을 따라가 꼬임': 좌상단 코너(R640, 오른쪽 90°)는 바깥쪽 바로 옆이 출발 차로라
@@ -379,6 +380,8 @@ class MissionFSM:
             self.axis_yaw = (inp.yaw + self.p['m7_corner_dir'] * math.pi / 2.0) if use else None
             self.m2m = None                          # 합류 강제 S자 (다음 판 위해 지움)
             self.floor_fork, self.floor_buf = None, []
+            self.floor_blocked = False
+            self._floor_conflict_logged = False
         from_exit = state == 'M8_CONES' and prev_state == 'M2_EXIT' and self.p.get('m2_exit', True)
         if state == 'M2_EXIT':
             # 11/14: 합류 끝 ~ 라바콘 시작선. M8 접근에 있던 좌하단 코너 IMU 미리보기·코너 지킴을 여기로 옮김
@@ -802,7 +805,8 @@ class MissionFSM:
 
     def _watch_floor_letter(self, inp) -> None:
         """바닥 글자 A/B 투표 -> self.floor_fork (한 번 정하면 그 판 끝까지)."""
-        if not self.p.get('floor_letter_use', True) or getattr(self, 'floor_fork', None) is not None:
+        if (not self.p.get('floor_letter_use', True) or getattr(self, 'floor_fork', None) is not None
+                or getattr(self, 'floor_blocked', False)):
             return
         buf = getattr(self, 'floor_buf', None)
         if buf is None:
@@ -821,11 +825,19 @@ class MissionFSM:
         self._remember_fork(inp)
         self._watch_floor_letter(inp)
         ff = getattr(self, 'floor_fork', None)
+        exit_lane = inp.obstacle.get('m7_exit')
+        if ff in ('A', 'B') and exit_lane in ('A', 'B') and ff != exit_lane and self.p.get('floor_need_exit_agree', True):
+            # 11/15 실차 '1차선(A)으로 들어갔는데 B로 가서 합류에서 탈선': 바닥 글자(구멍 수)가 잡음 하나로 바뀌면 차가 실제로 있는
+            #   차로(회피가 끝난 차로)와 반대 갈래를 따라감 -> 둘이 다르면 차로를 믿음
+            if not getattr(self, '_floor_conflict_logged', False):
+                self._floor_conflict_logged = True
+                self.log.append(f'floor letter {ff} ignored: car ended M7 in lane {exit_lane}')
+            ff = None
+            self.floor_fork, self.floor_blocked = None, True   # 합류 S자도 이 글자를 안 쓰게, 이 판에선 다시 안 봄
         if ff in ('A', 'B') and self.fork_choice != ff:
             self.fork_choice = ff                      # 바닥 글자 = 차가 실제로 들어간 갈림길
-        exit_lane = inp.obstacle.get('m7_exit')
         if ff in ('A', 'B'):
-            exit_lane = ff                             # 바닥 글자가 회피 노드 차로 추정보다 정확
+            exit_lane = ff                             # 바닥 글자가 회피 노드 차로 추정보다 정확 (회피 차로를 모르거나 같을 때)
         if self.fork_choice is None and self.p['fork_from_m7_exit'] and exit_lane in ('A', 'B'):
             self.fork_choice = exit_lane          # 이미 그 차로에 있다
         if (self.sub == '' and exit_lane in ('A', 'B') and self.fork_choice in ('A', 'B')

@@ -837,7 +837,8 @@ def test_m2_merge_starts_from_camera_offset():
 
 def test_floor_letter_decides_fork_over_sign_and_m7_exit():
     """11/15 실차: 표지를 못 보거나 잘못 보고 B로 들어감 -> 바닥 글자로 실제 갈림길을 알고 그쪽 모드·합류 방향."""
-    fsm = MissionFSM({'start_state': 'M2_FORK', 'route_points': {'m2_island_end': 20000.0, 'm2_merge_end': 20554.0}})
+    fsm = MissionFSM({'start_state': 'M2_FORK', 'route_points': {'m2_island_end': 20000.0, 'm2_merge_end': 20554.0},
+                      'floor_need_exit_agree': False})                  # 11/15 기본은 회피 차로와 같을 때만 (아래 시험)
     fsm.fork_choice, fsm.axis_yaw = 'A', 0.0                           # 표지는 A로 읽음
     cmd = None
     for i in range(6):
@@ -911,3 +912,18 @@ def test_m1_forced_corner_off_uses_old_corner_help():
     fsm._goto('M1_TRAFFIC', Inputs(t=0.0, dist_mm=0.0, yaw=0.0, lane={}), 'cones done')
     cmd = fsm.step(Inputs(t=0.05, dist_mm=10.0, yaw=0.0, confirmed_classes=set(), lane={}))
     assert cmd.lane['mode'] != 'heading'
+
+
+def test_floor_letter_ignored_when_it_disagrees_with_m7_lane():
+    """11/15 실차: 1차선(A)으로 섬을 지났는데 B로 가서 합류에서 탈선. 바닥 글자(구멍 수)를 잘못 읽어도 차가 실제로 있는
+    차로(회피가 끝난 차로)를 따름. 회피 차로를 모르면 바닥 글자를 씀"""
+    fsm = MissionFSM({'start_state': 'M2_FORK'})
+    for i in range(6):
+        cmd = fsm.step(Inputs(t=0.1 * i, dist_mm=10.0 * i, yaw=0.0, lane={'floor_letter': 'B'},
+                              obstacle={'m7_exit': 'A'}))
+    assert fsm.fork_choice == 'A' and cmd.lane['mode'] == 'left_only'
+    assert any('floor letter B ignored' in m for m in fsm.log)
+    fsm2 = MissionFSM({'start_state': 'M2_FORK'})
+    for i in range(6):
+        cmd = fsm2.step(Inputs(t=0.1 * i, dist_mm=10.0 * i, yaw=0.0, lane={'floor_letter': 'B'}, obstacle={}))
+    assert fsm2.fork_choice == 'B'
