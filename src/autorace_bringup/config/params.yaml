@@ -99,6 +99,7 @@ mission_node:
     m4_target_offset_mm: 50.0              # 11/12: 주차 노드에 넘긴 뒤 차선 왼쪽 5cm 붙기 (주차 노드 publish_lane_cfg: false와 같이)
     fork_len_mm: 2300.0                    # 도면 기준, 모의맵 실측으로 확인
     fork_default: A
+    floor_need_exit_agree: true            # 11/15: 회피가 끝난 차로(A/B)를 알면 바닥 글자가 같을 때만 씀 (1차선으로 들어갔는데 글자 잘못 읽어 B 쪽 선을 따라가 합류에서 탈선). false = 바닥 글자 우선
     stop_on_green_arrival: false           # 11/14: 도착 때 초록이 확정돼 있으면 서지 않고 통과 (빨강·아무것도 못 봤으면 정지선에서 서서 초록 기다림)
     # 도면 경로 지도 (route_file은 launch가 config/track_route.yaml로 넣어 줌)
     route_gate_mm: 250.0                   # 흰 선을 도면 선으로 인정하는 오차 (달린 거리만큼 넓어짐)

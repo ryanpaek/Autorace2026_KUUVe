@@ -197,8 +197,9 @@ def test_choose_prefers_one_lane_move_to_center():
 
 
 def test_returns_to_center_after_passing():
-    """3차로에 있고 가운데 앞이 비면 가운데로 돌아옴"""
+    """3차로에 있고 가운데 앞이 비면 가운데로 돌아옴 (center_return 켰을 때. 11/15부터 기본 끔)"""
     pl = _pl_center()
+    pl.p.center_return = True
     pl.pose.y = -0.52
     pl.target = -1
     pl.last_switch = -10.0
@@ -636,3 +637,13 @@ def test_shift_arc_straightens_into_outer_lane_without_overshoot():
         if sa:
             assert ymax <= 0.52 + 0.04, ymax
             assert abs(y - 0.52) < 0.05
+
+
+def test_stays_in_side_lane_when_free_by_default():
+    """11/15 실차: 1차선 앞이 비었는데 2차선으로 갔다 다시 1차선 -> 기본은 그대로 1차선 (섬 앞 표지 모으기 구간 밖)"""
+    pl = _pl_center()
+    pl.pose.y = 0.52
+    pl.target = 1
+    pl.last_switch = -10.0
+    pl.step(5.0)
+    assert pl.target == 1
