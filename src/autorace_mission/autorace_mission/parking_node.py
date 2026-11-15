@@ -277,6 +277,15 @@ class ParkingV2:
         self.t_phase = self.d_phase = self.yaw_phase = None
         self.yaw_turn0 = None
         self.turn_travel = 0.0
+        # 11/15 도는 중 바로잡기: 실제 회전반경을 재서 이대로 가면 칸 가운데에서 얼마나 벗어날지 예측 -> 끊어 넣기
+        self.r_ref = None          # (turn_travel, 돈 각도 rad) 재기 시작점
+        self.r_meas = None         # 잰 회전반경 (뒷바퀴 축, mm). 한 번 바로잡은 뒤로는 고정
+        self.fix_n = 0             # 도는 중 바로잡은 횟수
+        self.fix_phi = None        # 마지막으로 바로잡은 각도 (도)
+        self.fix_pred = None       # 마지막 예측 옆 오차 (mm, + = 차로 진행 방향으로 지나침 = 칸에서 차 왼쪽)
+        self.straight_left = 0.0   # 덜 돌 것 같을 때 바퀴 펴고 더 갈 거리 (mm)
+        self.back_k = None         # 이번 BACK 곡률 (None이면 back_kappa)
+        self.center_pull_len = None  # 이번 가운데 다시 맞추기 후진 거리
         self.backs = 0
         self.realigns = 0
         self.seen_ahead = False
@@ -1005,20 +1014,31 @@ class ParkingV2:
             if inp['t'] - self.t_phase >= p['pause_sec']:
                 self.yaw_turn0 = inp['yaw']
                 self._enter('TURN', inp)
+            elif self._presteer_due(p['pause_sec'], inp):
+                return self._out(p['presteer_speed'], KAPPA_FULL_RIGHT)
             else:
                 return self._out(0.0, 0.0)
 
         if self.phase == 'SWITCH':          # 전진 <-> 후진 사이 멈춤
             if inp['t'] - self.t_phase >= p.get('switch_pause_sec', 0.0):
                 self._enter(self.switch_to, inp)
+            elif self.switch_to in ('TURN', 'BACK') and self._presteer_due(p.get('switch_pause_sec', 0.0), inp):
+                # 다음 동작 조향을 미리 (TURN = 오른쪽 최대, BACK = 이번 후진 곡률)
+                if self.switch_to == 'TURN':
+                    if inp['blocked']:
+                        return self._out(0.0, 0.0)           # 앞이 막혔으면 앞으로는 안 굴림
+                    return self._out(p['presteer_speed'], KAPPA_FULL_RIGHT)
+                k = p['back_kappa'] if self.back_k is None else self.back_k
+                return self._out(-p['presteer_speed'], k)
             else:
                 return self._out(0.0, 0.0)
 
         if self.phase == 'BACK':            # ④-1 앞이 막혀서(또는 옆 감시·가운데 다시 맞추기) 후진
             moved = inp['dist_mm'] - self.d_phase
             if moved >= (self.back_len or p['back_mm']):
+                self.back_k = None
                 return self._switch('TURN', inp)
-            return self._out(-p['back_speed'], p['back_kappa'])
+            return self._out(-p['back_speed'], p['back_kappa'] if self.back_k is None else self.back_k)
 
         if self.phase == 'TURN':            # ④ 오른쪽 최대 조향 전진 + ⑤ 양옆 확인까지 반복
             moved = inp['dist_mm'] - self.d_phase
@@ -1125,6 +1145,10 @@ class ParkingV2:
                     return self._done('FAIL_TURN_TOO_LONG', inp)
                 straight = (p['straighten_yaw_deg'] > 0
                             and self._turned_deg(inp) >= p['straighten_yaw_deg'])
+                if not straight:
+                    fix = self._turn_fix(inp, max(0.0, moved))
+                    if fix is not None:
+                        return fix
                 col5_ok = p['follow_col5'] and self.col5 is not None and self.col5_n >= p['col5_min_frames']
                 if col5_ok and (straight or p['col5_early']):
                     # 바퀴 편 뒤: 5번 세로선(× 1·3번 가로선)을 따라 들어감
@@ -1150,6 +1174,10 @@ class ParkingV2:
                     # 뒤로 빠졌다가(PULLOUT) 정중앙 선을 따라 다시 들어감(ENTER). 0.5초씩 멈춤
                     self.center_tries += 1
                     self.err = ('center', round(off), self.center_tries)
+                    # 11/15: 많이 벗어났을수록 더 빼서 옆으로 옮길 거리를 확보 (1114_03: 450 mm로 2번 해도 64 mm 남음)
+                    base = p.get('center_pullout_mm', p['pullout_mm'])
+                    self.center_pull_len = min(max(base, p.get('center_pullout_max_mm', base)),
+                                               base + p.get('center_pullout_per_mm', 0.0) * abs(off))
                     self.stop_how = None
                     self.line = self._centered_line()
                     return self._switch('PULLOUT', inp)
@@ -1177,7 +1205,8 @@ class ParkingV2:
 
         if self.phase == 'PULLOUT':         # (재정렬) 칸 가운데 선을 따라 뒤로 빠지기
             moved = inp['dist_mm'] - self.d_phase
-            if moved >= (p.get('center_pullout_mm', p['pullout_mm']) if self.center_tries else p['pullout_mm']):
+            if moved >= ((self.center_pull_len or p.get('center_pullout_mm', p['pullout_mm']))
+                         if self.center_tries else p['pullout_mm']):
                 self.seen_ahead = False
                 return self._switch('ENTER', inp)
             else:
@@ -1186,7 +1215,7 @@ class ParkingV2:
                 k = 0.0
                 if p['pullout_steer'] and self._front_s(inp) <= -(p['parked_half_len_mm'] + p['pullout_clear_mm']):
                     k = pursuit_kappa_on_line(self.px, self.py, inp['yaw'] or 0.0, self.line,
-                                              p['pursuit_look_mm'], reverse=True)
+                                              self._look(), reverse=True)
                 return self._out(-p['realign_speed'], max(-2.0, min(2.0, k)))
 
         if self.phase == 'ENTER':           # (재정렬) 칸 가운데 선을 따라 다시 들어가기
@@ -1211,13 +1240,87 @@ class ParkingV2:
                 self.err = ('guard', round(self._side_gap(inp)))
                 self._enter('PULLOUT', inp)
                 return self._out(0.0, 0.0)
-            if moved >= p['pullout_mm'] + p['enter_max_extra_mm']:
+            if moved >= max(p['pullout_mm'], self.center_pull_len or 0.0) + p['enter_max_extra_mm']:
                 return self._done('FAIL_ENTER_TOO_LONG', inp)
-            k = pursuit_kappa_on_line(self.px, self.py, inp['yaw'] or 0.0, self.line,
-                                      p['pursuit_look_mm'])
+            k = pursuit_kappa_on_line(self.px, self.py, inp['yaw'] or 0.0, self.line, self._look())
             return self._out(p['realign_speed'], max(-2.0, min(2.0, k)))
 
         return self._out(0.0, 0.0)          # ⑥ DONE
+
+    def _look(self):
+        """선 따라가기 앞보기 거리. 가운데 다시 맞출 때는 짧게(옆으로 더 빨리 붙음)."""
+        if self.center_tries and self.p.get('center_look_mm', 0.0) > 0.0:
+            return self.p['center_look_mm']
+        return self.p['pursuit_look_mm']
+
+    def _presteer_due(self, pause_sec, inp):
+        """멈춤 끝 presteer_sec 동안 아주 느리게 굴리며 다음 조향을 미리 꺾는다 (11/15).
+
+        브리지는 0.02 m/s 미만이면 조향을 0으로 보내서, 섰다 출발할 때마다 바퀴가 0부터 꺾이며 원이 커졌다
+        (1114 bag 주차 TURN 첫 구간 반경 717 mm, 그 뒤 590~620 mm). 이 동안 약 1 cm 움직인다."""
+        ps = self.p.get('presteer_sec', 0.0)
+        return ps > 0.0 and inp['t'] - self.t_phase >= max(0.0, pause_sec - ps)
+
+    def _turn_fix(self, inp, moved):
+        """도는 중 바로잡기 (11/15, 1114 bag): 최대 조향 원이 계획(arc_radius_mm)보다 크면 칸에서 왼쪽으로 치우친다.
+
+        1114_02/03/04 주차 TURN: IMU로 잰 실제 회전반경 590~720 mm (계획 529) -> 02 끝 위치 156 mm 왼쪽.
+        - turn_fix_from_deg부터 잰 '돈 거리 / 돈 각도'로 실제 반경 R을 구하고(바퀴가 꺾이는 동안은 빼고),
+          이대로 90°까지 돌면 뒷바퀴가 칸 가운데 선에서 얼마나 지나칠지 = rear_s + R(1 - sin φ) 를 예측한다.
+        - 지나칠 것(+) 같으면: 멈추고 왼쪽 최대 조향으로 짧게 후진 -> 뒤로 빠지면서 차 머리가 칸 쪽으로 더 돈다
+          (한 번 끊어 넣기). 후진 각 Δ = asin(sin φ + e / 2R) - φ, 거리 = R Δ.
+        - 덜 갈 것(-) 같으면: 바퀴를 펴고 |e| / cos φ 만큼 더 간 뒤 다시 꺾는다.
+        반환: 이번 틱 명령 (바로잡는 중이 아니면 None)
+        """
+        p = self.p
+        if self.straight_left > 0.0:
+            self.straight_left -= moved
+            if self.straight_left > 0.0:
+                return self._out(p['turn_speed'], 0.0)
+        if (not p.get('turn_fix', False) or self.pair_line is None or self.q_s is None
+                or inp['yaw'] is None):
+            return None
+        phi_deg = self._turned_deg(inp)
+        phi = math.radians(phi_deg)
+        if self.r_meas is None:
+            if self.r_ref is None:
+                if phi_deg >= p['turn_fix_meas_from_deg']:
+                    self.r_ref = (self.turn_travel, phi)
+                return None
+            dphi = phi - self.r_ref[1]
+            if dphi >= math.radians(p['turn_fix_meas_span_deg']):
+                r_now = (self.turn_travel - self.r_ref[0]) / dphi
+                r_lo, r_hi = p['turn_fix_r_range_mm']
+                if not (r_lo <= r_now <= r_hi):
+                    return None                            # 미끄러짐·후진 섞임 등: 이번엔 안 고침
+                if phi_deg < p['turn_fix_from_deg']:
+                    return None
+                self.r_meas = r_now
+            else:
+                return None
+        if phi_deg > p['turn_fix_to_deg'] or self.fix_n >= p['turn_fix_max']:
+            return None
+        if self.fix_phi is not None and phi_deg < self.fix_phi + p['turn_fix_gap_deg']:
+            return None
+        r = self.r_meas
+        e = self._rear_s() + r * (1.0 - math.sin(phi))
+        self.fix_pred = round(e)
+        if abs(e) <= p['turn_fix_tol_mm']:
+            return None
+        self.fix_n += 1
+        self.fix_phi = phi_deg
+        if e > 0.0:
+            target = min(0.99, math.sin(phi) + e / (2.0 * r))
+            d = min(p['turn_fix_back_max_mm'], r * max(0.0, math.asin(target) - phi))
+            if d < 10.0:
+                return None
+            self.err = ('turn_fix_back', round(e), round(d), round(r), round(phi_deg))
+            self.back_k = -KAPPA_FULL_RIGHT          # 왼쪽 최대 조향으로 후진 = 머리가 칸 쪽으로 더 돎
+            return self._switch('BACK', inp, back_len=d)
+        d = min(p['turn_fix_straight_max_mm'], -e / max(0.2, math.cos(phi)))
+        self.err = ('turn_fix_straight', round(e), round(d), round(r), round(phi_deg))
+        self.straight_left = d
+        return self._out(p['turn_speed'], 0.0)
 
     def _done(self, result, inp):
         """끝내기: 정지 + 차선 오프셋 원래대로."""
@@ -1230,7 +1333,7 @@ class ParkingV2:
         """/parking/state에 실을 내용."""
         return {'phase': self.phase, 'done': self.phase == 'DONE', 'result': self.result,
                 'backs': self.backs, 'realigns': self.realigns, 'last_err': self.err,
-                'row': self.row, 'stop_how': self.stop_how, 'trigger': self.trigger, 'turn_ref': self.turn_ref_used, 'corner_s': None if self.corner_s is None else round(self.corner_s), 'corner_n': self.corner_n, 'turn_at': self.turn_at, 'target_s': None if self.target_s is None else round(self.target_s), 'target_src': self.target_src, 'n_c5': len(self.tgt_c5), 'n_pm': len(self.tgt_pm), 'q_s': self.q_s,
+                'row': self.row, 'stop_how': self.stop_how, 'trigger': self.trigger, 'turn_ref': self.turn_ref_used, 'corner_s': None if self.corner_s is None else round(self.corner_s), 'corner_n': self.corner_n, 'turn_at': self.turn_at, 'target_s': None if self.target_s is None else round(self.target_s), 'target_src': self.target_src, 'n_c5': len(self.tgt_c5), 'n_pm': len(self.tgt_pm), 'q_s': self.q_s, 'r_meas': None if self.r_meas is None else round(self.r_meas), 'fix_n': self.fix_n, 'fix_pred': self.fix_pred,
                 'end_mm': None if self.end_d is None else round(self.end_d)}
 
 
@@ -1299,8 +1402,25 @@ DEFAULTS = {
     'center_max_dir_deg': 25.0,    #   두 띠로 구한 방향이 차와 이보다 틀어지면 안 믿음
     'center_check': False,     # 11/13: 끝에서 정중앙에서 final_lat_tol_mm 넘게 벗어났으면 center_back_mm 후진 뒤 다시 (params true)
     'center_retries': 2,
+    # 11/15 도는 중 바로잡기 (_turn_fix). 경로(path) 방식에서만
+    'presteer_sec': 0.4,              # 11/15: 멈춤 끝 이 시간 동안 다음 조향을 미리 (0 = 끔)
+    'presteer_speed': 0.025,          #   그때 속도 (브리지가 조향을 보내는 최소 0.02 m/s 위)
+    'turn_fix': True,
+    'turn_fix_meas_from_deg': 12.0,   # 바퀴가 다 꺾인 뒤부터 회전반경을 잼 (출발 직후는 바퀴가 따라오는 중)
+    'turn_fix_meas_span_deg': 12.0,   #   이만큼 도는 동안의 거리로 잼
+    'turn_fix_from_deg': 30.0,        # 이 각도부터 예측해서 바로잡음
+    'turn_fix_to_deg': 65.0,          #   이 각도까지만 (늦으면 옆 리모에 가까움)
+    'turn_fix_gap_deg': 12.0,         #   두 번째 바로잡기는 이만큼 더 돈 뒤
+    'turn_fix_max': 2,
+    'turn_fix_tol_mm': 35.0,          # 예측 옆 오차가 이보다 크면 바로잡음
+    'turn_fix_back_max_mm': 200.0,
+    'turn_fix_straight_max_mm': 150.0,
+    'turn_fix_r_range_mm': [450.0, 900.0],   # 잰 반경이 이 밖이면 믿지 않음
     'center_tol_mm': 15.0,     #   끝에서 차체 중심이 양옆 정중앙에서 이보다 벗어나면 다시 맞춤 (시뮬레이션 18개: 30 -> 최대 30mm, 15 -> 최대 13mm)
     'center_back_mm': 200.0,
+    'center_pullout_per_mm': 2.0,     # 11/15: 옆 오차 1 mm당 후진 거리 2 mm 더 (450 + 2 x |off|)
+    'center_pullout_max_mm': 700.0,   #   최대
+    'center_look_mm': 180.0,          #   다시 들어갈 때 앞보기 (기본 250보다 짧게)
     'center_pullout_mm': 450.0,    #   가운데 다시 맞출 때 뒤로 빠지는 거리 (앞범퍼가 옆 리모 끝을 지나 방향까지 고칠 몫)
     'guard_back': False,       # 11/13: 옆 감시(guard_stop_mm)에 걸리면 끝내지 말고 back_mm 후진 뒤 다시 (params true)
     'guard_back_max': 3,
