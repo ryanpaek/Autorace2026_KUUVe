@@ -4,12 +4,12 @@
   python3 path_check.py m7_left.csv --png      # m7_left.png 그림도 저장 (matplotlib 있으면)
 
 보는 것: 기록 길이·시간·평균 속도, 끝 위치/방향(재생 기준 vs odom), 최대 곡률(차 한계 1.89),
-뒤로 간 구간, odom·IMU 회전 부호가 같은지, odom 속도값 부호.
+전진/후진 구간(후진은 그림에서 점선), odom·IMU 회전 부호가 같은지, odom 속도값 부호.
 """
 import argparse
 import math
 
-from path_common import MAX_CURV, load_path, read_rows, wrap
+from path_common import MAX_CURV, load_segments, read_rows, wrap
 
 
 def f(r, k):
@@ -32,9 +32,12 @@ def main():
     print(f'{a.csv}: {len(rows)}줄, {f(rows[-1], "t"):.1f} s, ' + ('새 형식(xs 있음)' if new else '예전 형식(xs 없음) → 다시 기록 권장'))
 
     # 속도
-    v = [f(r, 'vx') for r in rows if f(r, 'vx') is not None and abs(f(r, 'vx')) > 0.02]
-    if v:
-        print(f'odom 속도값: 평균 {sum(v) / len(v):+.3f} m/s (움직인 구간)  → 재생 속도를 이 값에 맞추면 기록과 가장 비슷')
+    vf = [f(r, 'vx') for r in rows if f(r, 'vx') is not None and f(r, 'vx') > 0.02]
+    vr = [-f(r, 'vx') for r in rows if f(r, 'vx') is not None and f(r, 'vx') < -0.02]
+    if vf or vr:
+        print('기록 평균 속도: ' + (f'전진 {sum(vf) / len(vf):.3f} m/s' if vf else '전진 없음')
+              + (f', 후진 {sum(vr) / len(vr):.3f} m/s' if vr else '')
+              + '  → 재생 speed / --rev_speed를 이 값에 맞추면 기록과 가장 비슷')
 
     # 부호: odom 방향 변화 vs IMU 자이로 적분 (돈 구간만)
     turn_o = turn_i = 0.0
@@ -78,19 +81,23 @@ def main():
     # 경로
     for pose in (['fused', 'odom'] if new else ['imu', 'odom']):
         try:
-            P, info = load_path(a.csv, pose)
+            segs, info = load_segments(a.csv, pose)
         except ValueError as e:
             print(e)
             continue
-        if len(P) < 2:
+        if not segs:
             print(f'[{pose}] 경로 점 없음')
             continue
-        kmax = max(abs(k) for k in P.k)
-        ymin, ymax = min(P.y), max(P.y)
-        print(f'[{pose:5s}] 길이 {P.length:.2f} m, 끝 x={P.x[-1]:.3f} y={P.y[-1]:+.3f} 방향 {math.degrees(P.h[-1] - P.h[0]):+.1f}°, '
-              f'옆으로 {ymin:+.2f}~{ymax:+.2f} m, 최대 곡률 {kmax:.2f}'
-              + (' ← 차 한계 근처(너무 급함)' if kmax > 0.9 * MAX_CURV else '')
-              + (f', 뒤로 간 거리 {info["reverse_m"]:.2f} m ← 전진만으로 다시 기록' if info['reverse_m'] > 0.05 else ''))
+        kmax = max(abs(k) for g in segs for k in g.k)
+        ally = [y for g in segs for y in g.y]
+        last = segs[-1]
+        print(f'[{pose:5s}] 구간 ' + ' → '.join(f'{"전진" if g.dir > 0 else "후진"} {g.length:.2f}m' for g in segs)
+              + f', 끝 x={last.x[-1]:.3f} y={last.y[-1]:+.3f} 방향 {math.degrees(last.h[-1] - segs[0].h[0]):+.1f}°, '
+              f'옆으로 {min(ally):+.2f}~{max(ally):+.2f} m, 최대 곡률 {kmax:.2f}'
+              + (' ← 차 한계 근처(너무 급함)' if kmax > 0.9 * MAX_CURV else ''))
+        for j, g in enumerate(segs):
+            print(f'         {j + 1}. {"전진" if g.dir > 0 else "후진"} {g.length:.2f} m: '
+                  f'({g.x[0]:+.2f}, {g.y[0]:+.2f}) → ({g.x[-1]:+.2f}, {g.y[-1]:+.2f}), 차 방향 {math.degrees(g.h[-1] - segs[0].h[0]):+.0f}°')
 
     if a.png:
         try:
@@ -103,8 +110,9 @@ def main():
         fig, ax = plt.subplots(figsize=(8, 4))
         for pose, c in ((('fused', 'tab:green'), ('odom', 'tab:gray')) if new else (('imu', 'tab:green'), ('odom', 'tab:gray'))):
             try:
-                P, _ = load_path(a.csv, pose)
-                ax.plot(P.x, P.y, color=c, label=pose)
+                segs, _ = load_segments(a.csv, pose)
+                for j, g in enumerate(segs):
+                    ax.plot(g.x, g.y, color=c, ls='-' if g.dir > 0 else '--', label=pose if j == 0 else None)
             except ValueError:
                 pass
         for yl in (-0.52, 0, 0.52):

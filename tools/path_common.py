@@ -123,10 +123,13 @@ class PoseFusion:
 
 # ---------------- 경로 ----------------
 class Path:
-    """기록 CSV → 일정 간격 점 (x, y, 방향, 곡률, 누적거리 s)"""
+    """한 방향(전진 또는 후진) 구간. 점 (x, y, 차 방향 h, 곡률 k, 누적거리 s).
+    dir = +1 전진 / -1 후진. h는 '차가 향한 방향'(후진이면 진행 방향의 반대).
+    k = 차 방향 변화 / 진행 거리 (진행 거리는 부호 없음). 명령 곡률(부호 있는 거리 기준)은 dir * k."""
 
-    def __init__(self, xs, ys, yaws):
+    def __init__(self, xs, ys, yaws, direction=1):
         self.x, self.y, self.h, self.k, self.s = xs, ys, yaws, [], []
+        self.dir = 1 if direction >= 0 else -1
         acc = 0.0
         for i in range(len(xs)):
             if i:
@@ -161,7 +164,8 @@ class Path:
         return self.k[i]
 
     def project(self, x, y, i0, window=60):
-        """가까운 선분에 투영. 반환 (i, s, 옆 오차 e(왼쪽 +), 경로 방향)"""
+        """가까운 선분에 투영. 반환 (i, s, e, 경로 차 방향)
+        e = 차 방향 기준 왼쪽 + 옆 오차 (후진 구간도 차 기준)"""
         best = None
         hi = min(len(self.x) - 1, i0 + window)
         for i in range(max(0, i0 - 5), hi):
@@ -173,16 +177,18 @@ class Path:
             d = math.hypot(x - px, y - py)
             if best is None or d < best[0]:
                 L = math.sqrt(L2)
-                e = ((x - ax) * vy - (y - ay) * vx) / L if L > 1e-9 else 0.0
-                best = (d, i, self.s[i] + u * L, -e, math.atan2(vy, vx) if L > 1e-9 else self.h[i])
-        _, i, s, e, h = best
-        # 끝점 넘어간 경우(u=1에서 멈춤) s는 앞으로 늘려 줌
-        if i == len(self.x) - 2:
-            hx, hy = math.cos(h), math.sin(h)
-            over = (x - self.x[-1]) * hx + (y - self.y[-1]) * hy
+                cross = ((x - ax) * vy - (y - ay) * vx) / L if L > 1e-9 else 0.0
+                h_travel = math.atan2(vy, vx) if L > 1e-9 else None
+                best = (d, i, self.s[i] + u * L, -cross, h_travel)
+        _, i, s, e_travel, h_travel = best
+        if h_travel is None:
+            h_travel = self.h[i] if self.dir > 0 else self.h[i] + math.pi
+        if i == len(self.x) - 2:        # 끝점 넘어가면 s를 앞으로 늘림
+            over = (x - self.x[-1]) * math.cos(h_travel) + (y - self.y[-1]) * math.sin(h_travel)
             if over > 0:
                 s = self.s[-1] + over
-        return i, s, e, h
+        h_car = h_travel if self.dir > 0 else wrap(h_travel + math.pi)
+        return i, s, self.dir * e_travel, h_car
 
 
 def read_rows(path):
@@ -198,9 +204,32 @@ def _f(r, k):
         return None
 
 
-def load_path(path, pose='fused'):
+def _resample(pts, direction):
+    xs, ys, hs = [pts[0][0]], [pts[0][1]], [pts[0][2]]
+    for x, y, h in pts[1:]:
+        d = math.hypot(x - xs[-1], y - ys[-1])
+        while d >= SPACING:
+            u = SPACING / d
+            nx, ny = xs[-1] + u * (x - xs[-1]), ys[-1] + u * (y - ys[-1])
+            xs.append(nx)
+            ys.append(ny)
+            hs.append(hs[-1] + u * wrap(h - hs[-1]))
+            d = math.hypot(x - nx, y - ny)
+    if math.hypot(pts[-1][0] - xs[-1], pts[-1][1] - ys[-1]) > 0.002:
+        xs.append(pts[-1][0])
+        ys.append(pts[-1][1])
+        hs.append(pts[-1][2])
+    for i in range(1, len(hs)):
+        hs[i] = hs[i - 1] + wrap(hs[i] - hs[i - 1])
+    return Path(xs, ys, hs, direction)
+
+
+CUSP_MIN = 0.03     # 이보다 짧게 반대로 간 건 흔들림으로 보고 무시 (m)
+
+
+def load_segments(path, pose='fused'):
     """pose: fused(odom 거리 + IMU 방향, 새 기록) / imu(옛 xf,yf) / odom(odom 위치·방향)
-    반환 (Path, 정보 dict). 뒤로 간 구간이 있으면 정보에 표시."""
+    반환 ([Path, ...], 정보). 전진·후진이 바뀌는 곳마다 구간을 나눈다."""
     rows = read_rows(path)
     cols = {'fused': ('xs', 'ys', 'yaws'), 'imu': ('xf', 'yf', 'yawf'), 'odom': ('x', 'y', 'yaw')}[pose]
     if pose == 'fused' and rows and 'xs' not in rows[0]:
@@ -210,34 +239,68 @@ def load_path(path, pose='fused'):
         x, y, h = _f(r, cols[0]), _f(r, cols[1]), _f(r, cols[2])
         if x is None or y is None or h is None:
             continue
-        raw.append((x, y, h, _f(r, 's')))
-    info = {'rows': len(rows), 'used': len(raw), 'reverse_m': 0.0}
+        raw.append((x, y, h))
+    info = {'rows': len(rows), 'used': len(raw), 'fwd_m': 0.0, 'rev_m': 0.0, 'n_seg': 0}
     if len(raw) < 2:
-        return Path([], [], []), info
-    # 뒤로 간 거리 (s 열이 있으면 그걸로, 없으면 방향 기준 투영)
+        return [], info
+    # 부호 있는 누적 거리: 위치 변화를 차 방향에 투영 (s 열과 같은 뜻, 예전 CSV도 됨)
+    sg = [0.0]
     for a, b in zip(raw, raw[1:]):
-        if a[3] is not None and b[3] is not None:
-            d = b[3] - a[3]
+        d = math.hypot(b[0] - a[0], b[1] - a[1])
+        if d < 1e-6:
+            sg.append(sg[-1])
+            continue
+        fwd = (b[0] - a[0]) * math.cos(a[2]) + (b[1] - a[1]) * math.sin(a[2])
+        sg.append(sg[-1] + (d if fwd >= 0 else -d))
+    # 방향 바뀌는 점(cusp) 찾기: 현재 방향의 끝값에서 반대로 CUSP_MIN 넘게 가면 그 끝값이 cusp
+    cuts = [0]
+    cur = 0
+    ext_i = 0
+    for i in range(1, len(sg)):
+        if cur == 0:
+            if abs(sg[i] - sg[0 if len(cuts) == 1 else cuts[-1]]) > CUSP_MIN:
+                cur = 1 if sg[i] > sg[cuts[-1]] else -1
+                ext_i = i
+            continue
+        if (sg[i] - sg[ext_i]) * cur > 0:
+            ext_i = i
+        elif (sg[ext_i] - sg[i]) * cur > CUSP_MIN:
+            cuts.append(ext_i)
+            cur = -cur
+            ext_i = i
+    end_i = ext_i if cur != 0 else len(sg) - 1
+    cuts.append(end_i)
+    segs = []
+    for a, b in zip(cuts, cuts[1:]):
+        if b - a < 1:
+            continue
+        d = 1 if sg[b] >= sg[a] else -1
+        pts = raw[a:b + 1]
+        seg = _resample(pts, d)
+        if seg.length < 0.01:
+            continue
+        if segs and segs[-1].dir == d:          # 같은 방향이 이어지면 합침
+            prev = segs[-1]
+            seg = _resample(list(zip(prev.x, prev.y, prev.h)) + pts[1:], d)
+            segs[-1] = seg
         else:
-            d = (b[0] - a[0]) * math.cos(a[2]) + (b[1] - a[1]) * math.sin(a[2])
-        if d < 0:
-            info['reverse_m'] -= d
-    # 일정 간격으로 다시 뽑기 (방향은 기록된 IMU 방향을 그대로 씀)
-    xs, ys, hs = [raw[0][0]], [raw[0][1]], [raw[0][2]]
-    for x, y, h, _ in raw[1:]:
-        d = math.hypot(x - xs[-1], y - ys[-1])
-        while d >= SPACING:
-            u = SPACING / d
-            nx, ny = xs[-1] + u * (x - xs[-1]), ys[-1] + u * (y - ys[-1])
-            xs.append(nx)
-            ys.append(ny)
-            hs.append(hs[-1] + u * wrap(h - hs[-1]))
-            d = math.hypot(x - nx, y - ny)
-    if math.hypot(raw[-1][0] - xs[-1], raw[-1][1] - ys[-1]) > 0.002:
-        xs.append(raw[-1][0])
-        ys.append(raw[-1][1])
-        hs.append(raw[-1][2])
-    # 방향을 이어지게 (unwrap)
-    for i in range(1, len(hs)):
-        hs[i] = hs[i - 1] + wrap(hs[i] - hs[i - 1])
+            segs.append(seg)
+    for g in segs:
+        info['fwd_m' if g.dir > 0 else 'rev_m'] += g.length
+    info['n_seg'] = len(segs)
+    return segs, info
+
+
+def load_path(path, pose='fused'):
+    """예전 호환: 구간을 하나로 (방향 구분 없이). 새 코드는 load_segments를 쓸 것"""
+    segs, info = load_segments(path, pose)
+    if not segs:
+        return Path([], [], []), info
+    if len(segs) == 1:
+        return segs[0], info
+    xs, ys, hs = [], [], []
+    for g in segs:
+        xs += g.x
+        ys += g.y
+        hs += g.h
     return Path(xs, ys, hs), info

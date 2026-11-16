@@ -11,7 +11,9 @@
   곡률 = 기록 경로 곡률(조금 앞) - k_e x 옆 오차 - k_psi x 방향 오차
   → 위치와 방향을 둘 다 맞추고, 기록 곡률을 미리 넣어서 늦게 꺾지 않음
   --ctrl pp 는 예전 pure pursuit (위치 목표점만)
-멈추는 경우: 끝점 도착 / 옆 오차 30 cm 또는 방향 오차 50° 넘음 / 센서 부호 이상 / odom·imu 끊김
+전진·후진: 기록에 후진이 있으면 방향이 바뀌는 곳마다 구간을 나눠 그대로 재생한다.
+  구간 끝에서 멈추고(--pause초 쉼) 다음 구간 방향으로 출발. 후진 속도는 --rev_speed
+멈추는 경우: 마지막 구간 끝점 도착 / 옆 오차 30 cm 또는 방향 오차 50° 넘음 / 센서 부호 이상 / odom·imu 끊김
 """
 import argparse
 import math
@@ -24,7 +26,7 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Imu
 
-from path_common import MAX_CURV, PoseFusion, load_path, read_rows, wrap, yaw_of
+from path_common import MAX_CURV, PoseFusion, load_segments, read_rows, wrap, yaw_of
 
 WHEELBASE = 0.222        # m, 브리지 유효 축거 (ackermann 타입으로 직접 낼 때)
 
@@ -44,7 +46,10 @@ class Follower(Node):
         super().__init__('path_follower')
         self.a = a
         self.pose_mode = pick_pose(a.csv, a.pose)
-        self.path, info = load_path(a.csv, 'imu' if self.pose_mode == 'imu' else self.pose_mode)
+        self.segs, info = load_segments(a.csv, self.pose_mode)
+        self.seg_i = 0
+        self.path = self.segs[0] if self.segs else None
+        self.pause_until = None
         self.idx = 0
         self.finished = False
         self.origin = None
@@ -74,16 +79,15 @@ class Follower(Node):
         self.create_subscription(Odometry, '/odom', self.on_odom, qos_profile_sensor_data)
         self.create_subscription(Imu, '/imu', self.on_imu, qos_profile_sensor_data)
         self.create_timer(0.1, self.watchdog)
-        if len(self.path) < 10:
-            print(f'[오류] 경로 점이 {len(self.path)}개뿐: CSV가 짧거나 비었음')
+        if not self.segs or sum(len(g) for g in self.segs) < 10:
+            print('[오류] 경로 점이 너무 적음: CSV가 짧거나 비었음')
             self.finished = True
             return
-        kmax = max(abs(k) for k in self.path.k)
-        print(f'경로 {self.path.length:.2f} m, 끝 위치 x={self.path.x[-1]:.3f} y={self.path.y[-1]:+.3f} '
-              f'방향 {math.degrees(self.path.h[-1] - self.path.h[0]):+.1f}°, 최대 곡률 {kmax:.2f} (차 한계 {MAX_CURV:.2f}), '
-              f'위치 기준 {self.pose_mode}')
-        if info['reverse_m'] > 0.05:
-            print(f'[경고] 기록에 뒤로 간 구간 {info["reverse_m"]:.2f} m → 그 부분은 못 따라감. 전진만으로 다시 기록 권장')
+        kmax = max(abs(k) for g in self.segs for k in g.k)
+        last = self.segs[-1]
+        print(f'경로: 구간 {len(self.segs)}개 (' + ' → '.join(f'{"전진" if g.dir > 0 else "후진"} {g.length:.2f}m' for g in self.segs)
+              + f'), 끝 위치 x={last.x[-1]:.3f} y={last.y[-1]:+.3f} 방향 {math.degrees(last.h[-1] - self.segs[0].h[0]):+.1f}°, '
+              f'최대 곡률 {kmax:.2f} (차 한계 {MAX_CURV:.2f}), 위치 기준 {self.pose_mode}')
         if kmax > 0.9 * MAX_CURV:
             print('[경고] 기록 경로가 차가 돌 수 있는 한계에 가까움 → 조향이 끝까지 붙음. 더 완만하게 다시 기록 권장')
 
@@ -113,7 +117,7 @@ class Follower(Node):
             print(why)
         if self.n_cmd:
             print(f'  요약: 최대 옆 오차 {self.max_e * 100:.1f} cm, 조향 한계에 붙은 비율 {100 * self.n_sat / self.n_cmd:.0f}%, '
-                  f'진행 {self.s:.2f}/{self.path.length:.2f} m')
+                  f'구간 {self.seg_i + 1}/{len(self.segs)} 진행 {self.s:.2f}/{self.path.length:.2f} m')
         self.finished = True
 
     def watchdog(self):
@@ -181,28 +185,45 @@ class Follower(Node):
         if bad and self.pose_mode != 'odom':
             self.finish(f'[정지] {bad}')
             return
+        if self.pause_until is not None:            # 구간 사이: 멈춰서 기다림
+            self.send(0.0, 0.0)
+            if t < self.pause_until or not self.fu.is_still(self.stamp(m)):
+                return
+            self.pause_until = None
+            print(f'구간 {self.seg_i + 1}/{len(self.segs)} 출발 ({"전진" if self.path.dir > 0 else "후진"} {self.path.length:.2f} m)')
         P = self.path
         self.idx, s, e, hp = P.project(x, y, self.idx)
         epsi = wrap(yaw - hp)
         self.s, self.e, self.epsi = s, e, epsi
         self.max_e = max(self.max_e, abs(e))
         if s >= P.length - self.a.stop_early:
-            self.finish(f'종료: 끝점 도착 (옆 오차 {e * 100:+.1f} cm, 방향 오차 {math.degrees(epsi):+.1f}°, 추정 위치 기준 → 줄자로도 재세요)')
+            msg = f'옆 오차 {e * 100:+.1f} cm, 방향 오차 {math.degrees(epsi):+.1f}°'
+            if self.seg_i + 1 < len(self.segs):
+                self.send(0.0, 0.0)
+                print(f'구간 {self.seg_i + 1} 끝 ({msg}) → 멈춤')
+                self.seg_i += 1
+                self.path = self.segs[self.seg_i]
+                self.idx = 0
+                self.pause_until = t + self.a.pause
+                return
+            self.finish(f'종료: 끝점 도착 ({msg}, 추정 위치 기준 → 줄자로도 재세요)')
             return
         if abs(e) > self.a.max_err or abs(epsi) > math.radians(50):
             self.finish(f'[정지] 경로에서 너무 벗어남: 옆 {e * 100:+.0f} cm, 방향 {math.degrees(epsi):+.0f}° '
                         f'(출발 자세가 기록 때와 다르거나 센서 부호 문제)')
             return
-        v = self.a.speed
-        if self.a.ctrl == 'pp':
+        d = P.dir
+        v = d * (self.a.speed if d > 0 else self.a.rev_speed)
+        if self.a.ctrl == 'pp' and d > 0:
             L = self.a.lookahead
             tgt = next((i for i in range(self.idx, len(P)) if math.hypot(P.x[i] - x, P.y[i] - y) >= L), len(P) - 1)
             dx, dy = P.x[tgt] - x, P.y[tgt] - y
             l2 = max(dx * dx + dy * dy, 1e-4)
             curv = 2 * (-math.sin(yaw) * dx + math.cos(yaw) * dy) / l2
         else:
-            kff = P.k_at(s + v * self.a.preview)
-            curv = kff - self.a.k_e * e - self.a.k_psi * math.sin(epsi)
+            # 곡률은 부호 있는 거리 기준 (후진이면 기록 곡률·방향 오차 항 부호가 바뀜. 옆 오차 항은 그대로)
+            kff = d * P.k_at(s + abs(v) * self.a.preview)
+            curv = kff - self.a.k_e * e - d * self.a.k_psi * math.sin(epsi)
         sat = abs(curv) >= MAX_CURV
         curv = max(-MAX_CURV, min(MAX_CURV, curv))
         self.n_cmd += 1
@@ -210,7 +231,7 @@ class Follower(Node):
         self.send(v, curv)
         if t - self.last_print >= 1.0:
             self.last_print = t
-            print(f'  진행 {s:.2f}/{P.length:.2f} m  옆 오차 {e * 100:+.1f} cm  방향 오차 {math.degrees(epsi):+.1f}°  '
+            print(f'  [{self.seg_i + 1}/{len(self.segs)} {"전진" if d > 0 else "후진"}] 진행 {s:.2f}/{P.length:.2f} m  옆 오차 {e * 100:+.1f} cm  방향 오차 {math.degrees(epsi):+.1f}°  '
                   f'곡률 {curv:+.2f}{" (한계)" if sat else ""}')
 
 
@@ -225,11 +246,15 @@ def main():
     ap.add_argument('--k_e', type=float, default=6.0, help='옆 오차 게인 (1/m^2)')
     ap.add_argument('--k_psi', type=float, default=3.4, help='방향 오차 게인 (1/m)')
     ap.add_argument('--preview', type=float, default=0.3, help='s, 기록 곡률을 이만큼 앞에서 미리 봄 (조향 지연 보정)')
+    ap.add_argument('--rev_speed', type=float, default=None, help='m/s, 후진 구간 속도 (기본 = speed)')
+    ap.add_argument('--pause', type=float, default=0.5, help='s, 전진↔후진 바뀔 때 멈춰 있는 시간')
     ap.add_argument('--max_err', type=float, default=0.30, help='m, 옆 오차가 이보다 크면 정지')
     ap.add_argument('--lookahead', type=float, default=0.3, help='m, --ctrl pp일 때만')
     ap.add_argument('--topic', default='/cmd_vel')
     ap.add_argument('--type', choices=['twist', 'ackermann'], default='twist')
     a = ap.parse_args()
+    if a.rev_speed is None:
+        a.rev_speed = a.speed
     try:
         from rclpy.signals import SignalHandlerOptions
         rclpy.init(signal_handler_options=SignalHandlerOptions.NO)

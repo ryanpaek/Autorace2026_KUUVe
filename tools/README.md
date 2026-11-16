@@ -14,6 +14,8 @@ CSV는 **명령을 친 폴더**에 저장되므로 데이터 폴더(예: `~/auto
 > 재생 조향은 위치 목표점 하나(pure pursuit) 대신 **옆 오차 + 방향 오차 + 기록 곡률 미리 넣기**로 바꿨다.
 > 돌 때 odom 방향과 IMU 방향 부호가 반대면 기록 중 경고, 재생 중 정지한다 (한쪽으로 끝까지 꺾이던 증상의 원인 후보).
 > 예전 CSV(`xs` 열 없음)는 자동으로 `--pose odom`으로 재생된다.
+> **후진 지원**: 기록에 후진이 있으면 전진↔후진이 바뀌는 곳(3 cm 넘게 반대로 간 곳)마다 구간을 나눠
+> 그 순서대로 재생한다. 구간 끝에서 멈추고 `--pause`초 쉰 뒤 다음 방향으로 출발.
 
 > 정지 시간·거리 측정 스크립트(`stop_test_ack.py`)는 [`calib/20261102_stop_test_ack.py`](../calib/20261102_stop_test_ack.py)에 있다.
 > 사용법은 [calib/USAGE.md](../calib/USAGE.md), 결과는 [calib/README.md](../calib/README.md) 4번.
@@ -101,6 +103,8 @@ rm ~/autorace_tools/line1.csv
 | `--k_e` | 6.0 | 옆 오차 게인 (1/m²). 크면 빨리 붙지만 출렁임 |
 | `--k_psi` | 3.4 | 방향 오차 게인 (1/m) |
 | `--preview` | 0.3 | s, 조향 지연 보정용으로 기록 곡률을 미리 봄 |
+| `--rev_speed` | = speed | m/s, 후진 구간 속도 |
+| `--pause` | 0.5 | s, 전진↔후진 바뀔 때 멈춰 있는 시간 |
 | `--max_err` | 0.30 | m, 옆 오차가 이보다 크거나 방향 오차 50° 넘으면 정지 |
 | `--topic` | `/cmd_vel` | 발행 토픽 |
 | `--type` | `twist` | `twist` 또는 `ackermann` |
