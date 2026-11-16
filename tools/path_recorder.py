@@ -1,57 +1,47 @@
-import csv, math, sys, rclpy
+"""키보드로 몬 길을 CSV로 기록 (재생: path_follower.py, 점검: path_check.py).
+
+  python3 path_recorder.py m7_left.csv
+  처음 1초는 차를 움직이지 말 것 (자이로 편향 측정). 끝나면 k로 세우고 Ctrl+C.
+
+열:
+  t                 시간 (s)
+  x, y, yaw         odom 위치·방향 (출발점 기준)
+  vx, wz            odom 속도값
+  cmd_vx, cmd_wz    /cmd_vel 명령
+  xs, ys, yaws, s   ★ 재생에 쓰는 위치: odom이 잰 거리 + IMU 방향 (path_common.PoseFusion)
+  gz                IMU 자이로 z
+"""
+import csv
+import math
+import sys
+
+import rclpy
+from geometry_msgs.msg import Twist
+from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
-from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Imu
-from geometry_msgs.msg import Twist
 
-def yaw_of(q):
-    return math.atan2(2*(q.w*q.z + q.x*q.y), 1 - 2*(q.y*q.y + q.z*q.z))
+from path_common import PoseFusion, wrap, yaw_of
 
-def wrap(a):
-    return math.atan2(math.sin(a), math.cos(a))
-
-class Fusion:
-    """odom 속도 + IMU 자이로로 만든 위치 (방향은 IMU 기준). 시작 1초는 정지 상태로 보고 자이로 편향을 측정."""
-    CAL = 1.0
-    def __init__(self):
-        self.x = self.y = self.yaw = 0.0
-        self.bias, self.n = 0.0, 0
-        self.t_cal0 = self.t_imu = self.t_odom = None
-    @property
-    def ready(self):
-        return self.t_cal0 is not None and self.t_imu is not None and self.t_imu - self.t_cal0 >= self.CAL
-    def on_imu(self, t, gz):
-        if self.t_cal0 is None:
-            self.t_cal0 = t
-        if t - self.t_cal0 < self.CAL:
-            self.n += 1
-            self.bias += (gz - self.bias) / self.n
-        elif self.t_imu is not None:
-            self.yaw += (gz - self.bias) * (t - self.t_imu)
-        self.t_imu = t
-    def on_odom(self, t, v):
-        if self.ready and self.t_odom is not None:
-            dt = t - self.t_odom
-            self.x += v * math.cos(self.yaw) * dt
-            self.y += v * math.sin(self.yaw) * dt
-        self.t_odom = t
 
 class Recorder(Node):
     def __init__(self, path):
         super().__init__('path_recorder')
         self.f = open(path, 'w', newline='')
         self.w = csv.writer(self.f)
-        self.w.writerow(['t', 'x', 'y', 'yaw', 'vx', 'wz', 'cmd_vx', 'cmd_wz', 'xf', 'yf', 'yawf'])
+        self.w.writerow(['t', 'x', 'y', 'yaw', 'vx', 'wz', 'cmd_vx', 'cmd_wz', 'xs', 'ys', 'yaws', 's', 'gz'])
         self.cmd = (0.0, 0.0)
         self.origin = None
         self.t0 = None
-        self.fu = Fusion()
+        self.gz = 0.0
+        self.fu = PoseFusion()
         self.rows = 0
         self.last = None
         self.failed = False
         self.t_begin = self.now()
         self.tick = 0
+        self.warned = None
         self.create_subscription(Odometry, '/odom', self.on_odom, qos_profile_sensor_data)
         self.create_subscription(Imu, '/imu', self.on_imu, qos_profile_sensor_data)
         self.create_subscription(Twist, '/cmd_vel', self.on_cmd, 10)
@@ -68,13 +58,14 @@ class Recorder(Node):
         self.cmd = (m.linear.x, m.angular.z)
 
     def on_imu(self, m):
-        self.fu.on_imu(self.stamp(m), m.angular_velocity.z)
+        self.gz = m.angular_velocity.z
+        self.fu.on_imu(self.stamp(m), self.gz)
 
     def on_odom(self, m):
         t = self.stamp(m)
         p = m.pose.pose.position
         yaw = yaw_of(m.pose.pose.orientation)
-        self.fu.on_odom(t, m.twist.twist.linear.x)
+        self.fu.on_odom(t, p.x, p.y, yaw, m.twist.twist.linear.x)
         if self.origin is None:
             self.origin = (p.x, p.y, yaw)
             self.t0 = t
@@ -83,9 +74,9 @@ class Recorder(Node):
         xr = math.cos(yaw0) * dx + math.sin(yaw0) * dy
         yr = -math.sin(yaw0) * dx + math.cos(yaw0) * dy
         yawr = wrap(yaw - yaw0)
-        fu = [self.fu.x, self.fu.y, wrap(self.fu.yaw)] if self.fu.ready else ['', '', '']
+        fu = [self.fu.x, self.fu.y, self.fu.yaw, self.fu.s] if self.fu.ready else ['', '', '', '']
         self.w.writerow([round(t - self.t0, 3), xr, yr, yawr,
-                         m.twist.twist.linear.x, m.twist.twist.angular.z, *self.cmd, *fu])
+                         m.twist.twist.linear.x, m.twist.twist.angular.z, *self.cmd, *fu, self.gz])
         self.rows += 1
         self.last = (xr, yr, yawr, fu)
         if self.rows % 50 == 0:
@@ -98,11 +89,22 @@ class Recorder(Node):
                 print('[오류] 5초 동안 /odom 안 옴: 드라이버, 조종기 끄기, 브리지 확인')
                 self.failed = True
             return
+        if self.fu.t_imu is None and t - self.t_begin > 3.0 and not self.warned:
+            self.warned = 'imu'
+            print('[오류] /imu 안 옴 → xs, ys 열이 비어서 재생은 --pose odom만 가능')
+        bad = self.fu.sign_problem()
+        if bad and self.warned != bad:
+            self.warned = bad
+            print(f'[경고] {bad} → 이대로면 재생이 안 맞음')
         self.tick += 1
         if self.tick % 2 == 0 and self.last:
             xr, yr, yawr, fu = self.last
-            imu = f'IMU yaw {math.degrees(fu[2]):.0f}°' if fu[0] != '' else 'IMU 보정 중/없음'
-            print(f'  기록 {self.rows}줄  x={xr:.2f} y={yr:.2f}  odom yaw {math.degrees(yawr):.0f}°  {imu}')
+            if fu[0] != '':
+                print(f'  기록 {self.rows}줄  거리 {self.fu.dist:.2f}m  x={fu[0]:.2f} y={fu[1]:+.2f}  '
+                      f'방향 IMU {math.degrees(fu[2]):+.0f}° / odom {math.degrees(yawr):+.0f}°')
+            else:
+                print(f'  기록 {self.rows}줄  (자이로 보정 중)  odom x={xr:.2f} y={yr:+.2f}')
+
 
 def main():
     path = sys.argv[1] if len(sys.argv) > 1 else 'lap_log.csv'
@@ -118,14 +120,20 @@ def main():
         node.f.close()
         if node.last:
             xr, yr, yawr, fu = node.last
-            print(f'저장 완료: {node.rows}줄, 끝 위치 x={xr:.3f} y={yr:.3f}')
+            print(f'저장 완료: {node.rows}줄 → {path}')
             if fu[0] != '':
-                print(f'끝 방향: odom {math.degrees(yawr):.1f}° / IMU {math.degrees(fu[2]):.1f}° (크게 다르면 odom 방향이 틀어진 것)')
-            else:
-                print('IMU 값이 없어 xf, yf 열은 비어 있음 (재생은 --pose odom만 가능)')
+                print(f'끝 위치 (재생 기준) x={fu[0]:.3f} y={fu[1]:+.3f} 방향 {math.degrees(fu[2]):+.1f}°  '
+                      f'/ odom x={xr:.3f} y={yr:+.3f} 방향 {math.degrees(yawr):+.1f}°')
+            bad = node.fu.sign_problem()
+            if bad:
+                print(f'[경고] {bad}')
+            if node.fu.v_bad == 0 and node.fu.sign_bad_turn == 0:
+                print(f'부호 점검 통과 (회전 비교 {node.fu.sign_ok_turn}번)')
+            print(f'점검: python3 path_check.py {path}')
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
+
 
 if __name__ == '__main__':
     main()
