@@ -32,6 +32,14 @@ lane_node:
     route_ff_weight_lost: 0.8
     yaw_kp: 1.5
     curve_slowdown: 0.3
+    # 11/16 동적 lookahead: 기준경로곡률 rk(웨이포인트 2차 맞춤) -> Ld sigmoid(400~600) -> 목표점·속도. 기본 차선 주행(normal, yellow)만.
+    #   켜기: ros2 param set /lane_node dyn_look true  (디버깅 화면 BEV에 rk·Ld·속도 배율 표시)
+    dyn_look: false
+    dyn_look_min_mm: 400.0
+    dyn_look_max_mm: 600.0
+    dyn_look_kmid: 0.9
+    dyn_look_slope: 6.0
+    dyn_speed_min: 0.8
     # 11/14: 노란 실선은 절대 이탈하면 안 되는 트랙 바깥 경계선 -> 접근 시 안쪽으로 강하게 조향
     yellow_solid_guard: true
     yellow_guard_margin_mm: 200.0
