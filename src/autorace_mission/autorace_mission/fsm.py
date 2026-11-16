@@ -93,6 +93,7 @@ DEFAULT_PARAMS = {
     'cones_len_mm': 4300.0,      # 도면: M8 진입(갈림길 끝) ~ 좌하단 코너 ~ 라바콘 구간(약2.2m) 끝 + 여유
     # M8 라바콘 (obstacle 노드의 ConeFollower). false면 위 cones_len_mm 동안 차선 주행으로 통과
     'cones_source_ready': False,
+    'cones_line_camera_first': True,  # 11/16: 라바콘 시작선 카메라 1순위 (도면과 달라도 같은 선 3프레임이면)
     'cones_enter_before_mm': 0.0,    # 도면 위치 예비: 시작선 이만큼 앞(앞바퀴)에서 라바콘 모드 (1순위는 카메라로 선 통과)
     'cones_enter_cone_mm': 150.0,    # 11/14 밤: 400 -> 150 원복 (d4d4c70 라바콘 변경 되돌림, 실차 '라바콘 인식 못 함')
     'cones_corner_close_mm': 0.0,    # 11/14 밤: 250 -> 0 = 끔 (d4d4c70 원복). >0이면 70° 넘게 돌았고 콘이 이 안이면 콘 모드
@@ -644,9 +645,13 @@ class MissionFSM:
         정지선 정지와 같은 방식: 카메라가 본 거리에서 그 뒤 달린 거리를 뺀다
         (선은 앞바퀴 약 350mm 앞에서 화면 아래로 사라진다). 도면 위치는 처음 잡는 선을 고르는 데에도 쓴다."""
         if self.line is None:
+            # 11/16: 라바콘 시작선은 카메라 1순위. 도면 위치(s)가 M7·M2를 지나며 1 m 넘게 틀어져
+            #   (1114 분석) 맞는 카메라 선을 gate로 버리던 것 -> 같은 선이 3프레임 연속이면 도면과 달라도 받음
+            cam_first = name == 'm8_start_line' and self.p.get('cones_line_camera_first', True)
             self.line = StopApproach(0.0, 0.0, self.p['stop_lost_ok_mm'], key='stoplines_mm',
                                      freeze_mm=self.p['stop_freeze_mm'],
-                                     route_gate_mm=self.p['stop_route_gate_mm'])
+                                     route_gate_mm=self.p['stop_route_gate_mm'],
+                                     camera_first=cam_first)
             self.line.route_line_s = self._rp(name)
         rem = self.line.remaining(inp)
         if rem is not None and self.line.seen_d is not None:
