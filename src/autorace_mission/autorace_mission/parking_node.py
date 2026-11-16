@@ -1502,12 +1502,12 @@ DEFAULTS = {
     'fixed_slow_speed': 0.10,  #   선 25cm 앞부터 이 속도 이하
     'fixed_line_max_mm': 4000.0,   # 주차 모드 시작 뒤 이만큼 가도 선을 못 보면 FAIL_NO_LINE (정지)
     'fixed_pause_sec': 0.3,    # 선에서 멈추는 시간
-    'fixed_move_mm': 1000.0,   # 멈춘 자리부터 직진 거리 (11/16 캡틴 조종기 기록 100.2cm)
+    'fixed_move_mm': 870.0,    # 멈춘 자리부터 직진 거리 (11/16 캡틴 실차 확정)
     'fixed_move_speed': 0.10,
     'fixed_heading_gain': 2.0,     # 직진 중 멈출 때 방향 유지 (1/m per rad)
     'fixed_turn_pause_sec': 0.3,   # 104cm 뒤 멈춤 (끝 presteer_sec 동안 조향 미리 꺾기). 0이면 멈추지 않고 바로 꺾음
     'fixed_turn_deg': 87.0,    # 오른쪽 최대 조향을 이만큼(IMU) 돌면 끝. 실차는 펴라 한 뒤 2~4도 더 돎 -> 약 90도
-    'fixed_turn_mm': 560.0,    # >0이면 최대 조향으로 이만큼 가면 끝 (각도와 먼저 닿는 쪽). 11/16 캡틴 조종기 기록 56.1cm (-66.7도)
+    'fixed_turn_mm': 0.0,      # >0이면 최대 조향으로 이만큼 가면 끝 (각도와 먼저 닿는 쪽). 11/16 캡틴 실차 확정: 0 (87도로 끝)
     'fixed_turn_speed': 0.12,
     'fixed_straight_mm': 0.0,  # 바퀴 편 뒤 직진 거리 (0 = 바로 정지)
     'turn_from_corner_mm': 140.0,  # corner: 라이다가 1번 모서리 선을 이만큼 지나면 꺾기.

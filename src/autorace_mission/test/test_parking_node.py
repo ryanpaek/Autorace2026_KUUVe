@@ -571,11 +571,15 @@ def test_path_done_logs_once_flag():
 
 # --- 11/13 실차: 양옆 정중앙, 앞 15cm, 후진 15cm, 전진<->후진 0.5초, 옆 감시에 걸리면 후진 뒤 다시 -----------------
 
-def _yaml_parking():
+def _yaml_parking(path_mode=True):
+    """params.yaml 주차 값. path_mode: 11/16부터 기본이 fixed라, 예전 경로 방식 시험은 turn_ref만 path로 둔다."""
     import yaml
     path = os.path.join(os.path.dirname(__file__), '..', '..', 'autorace_bringup', 'config', 'params.yaml')
     d = yaml.safe_load(open(path, encoding='utf-8'))['parking_node']['ros__parameters']
-    return {k: v for k, v in d.items() if k in pn.DEFAULTS}
+    out = {k: v for k, v in d.items() if k in pn.DEFAULTS}
+    if path_mode:
+        out['turn_ref'] = 'path'
+    return out
 
 
 def test_corridor_mid_between_inner_faces():
@@ -591,6 +595,8 @@ def test_params_yaml_values_from_captain():
     assert p['front_stop_mm'] == 150.0 and p['back_mm'] == 150.0 and p['switch_pause_sec'] == 0.5
     assert p['guard_back'] and p['center_on_sides'] is False and p['follow_col5'] is False   # 11/13 캡틴: 원을 접선까지
     assert p['center_check'] is True       # 11/14 캡틴: 다시 켬 (끝에서 선 밟음). 11/13 15:49엔 끔
+    q = _yaml_parking(path_mode=False)
+    assert q['turn_ref'] == 'fixed' and q['fixed_move_mm'] == 870.0 and q['fixed_turn_mm'] == 0.0   # 11/16 캡틴 실차 확정
 
 
 def _step_inp(t, dist, blocked=False, yaw=0.0):
@@ -767,7 +773,7 @@ def test_fixed_turn_mm_ends_turn_early():
 
 
 def test_fixed_defaults_captain_values():
-    assert pn.DEFAULTS['fixed_move_mm'] == 1000.0 and pn.DEFAULTS['fixed_turn_mm'] == 560.0 and pn.DEFAULTS['fixed_line_target_mm'] == 56.0
+    assert pn.DEFAULTS['fixed_move_mm'] == 870.0 and pn.DEFAULTS['fixed_turn_mm'] == 0.0 and pn.DEFAULTS['fixed_line_target_mm'] == 56.0
     assert pn.DEFAULTS['fixed_line_target_mm'] == pn.DEFAULTS['front_bumper_from_axle_mm']
 
 
