@@ -59,3 +59,14 @@ ros2 topic echo /avoid/state     # phase(CRUISE/STOP/ALIGN/EXEC), now_lane, targ
 로그 `[M7 재생]`: 시작할 때 어떤 녹화 파일을 쓰는지, 차로 선택 이유, 정렬 전후 오차, 재생 끝 오차.
 M7만 연습: `/mission/set_state M7_OBSTACLE` (차를 3차선 시작선 30 cm 앞에).
 조정: `ros2 param set /avoid_node trigger_mm 560.0`, `latency_s`, `align_before false`(정렬 끄기) 등 (config/m7_replay_params.yaml).
+
+## 11/17 새벽 검토 반영 (녹화·재생 일치, 차로 판단, 차선 놓침)
+- **녹화 = 재생 일치 (시뮬레이션, path_recorder.py 실제 코드로 녹화)**: 재생이 쓰는 경로와 실제 녹화 궤적 차이 최대 0.8 cm
+  (odom 방향 +12% 오차가 있어도: 거리는 odom, 방향은 IMU). 재생 중 실제 궤적과 녹화 경로 차이 최대 3.4 cm, 평균 1.3~1.6 cm.
+- **녹화 파일 점검**: `python3 src/limo_obstacle_avoid/tools/m7_replay_sim.py --check --left m7_left.csv --right m7_right.csv`
+  → 장애물 앞 546 mm에서 시작했을 때 차체와 장애물 최소 간격. 3 cm보다 가까우면 차로 고를 때 '막힘'으로 보고 섬.
+- 녹화 파일 끝 옆 위치가 그 방향이 아니면 안 씀. 예전 기록기 파일(IMU 열 없음)은 로그에 표시.
+- 차로 판단: 선 종류(1차선 왼쪽 노란 실선 / 2차선 양쪽 흰 점선 / 3차선 오른쪽 노란 실선)가 안 맞으면 보정 안 함,
+  차로 번호는 양쪽 선이 8° 안일 때만 투표, 바깥 차로인데 안쪽에 노란 실선(3번 연속) = 노란선 밖 → 옆 위치를 밖으로.
+- 차선 놓침: 재생 노드는 카메라 없이도 odom+IMU로 달림. 추정이 15 cm 넘게 벌어지면 같은 쪽 차이 8번 연속일 때 반 반영.
+  `/avoid/state`: cam_fix_n, cam_type_rej, cam_dy_cm.
