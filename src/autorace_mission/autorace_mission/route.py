@@ -205,8 +205,9 @@ class RouteTracker:
                  gate_max_mm: float = 800.0, max_range_mm: float = 900.0,
                  gain: float = 0.6, odom_scale: float = 1.0, ordered_gate_mm: float = 0.0,
                  same_gate_mm: float = 200.0, crosswalk_gate_mm: float = 400.0,
-                 lost_misses: int = 0):
+                 lost_misses: int = 0, xw_only_crosswalk: bool = True):
         self.route = route
+        self.xw_only_crosswalk = xw_only_crosswalk
         # 예측 위치와 도면 선이 gate 안이어야 같은 선으로 본다.
         # 마지막 보정 뒤 많이 달렸을수록 오도메트리 오차가 커지므로 m당 gate_per_m씩 넓힌다
         # (기본 6%: LIMO 바퀴 미끄러짐 여유). 이웃 선끼리 가장 가까운 간격(약 540)보다 커지지 않게 상한.
@@ -313,6 +314,10 @@ class RouteTracker:
                     return False
                 if self.crosswalk_gate_mm > 0.0 and lm['s'] - s_line > self.crosswalk_gate_mm:
                     return False
+            elif is_xw and self.xw_only_crosswalk:
+                # 11/15: 뒤에 횡단보도 막대가 있는 선은 정지선뿐이다. 보통 선(앞 선·시작선)과 짝짓지 않는다
+                #   (1114_03/04: s가 1.8 m 뒤처진 채 신호등 정지선을 920 mm 앞 m1_pre_line으로 착각 -> 0.9 m 일찍 섬)
+                return False
             return True
 
         if self.ordered_gate_mm > 0.0 and self.last_idx is not None:
@@ -359,6 +364,87 @@ class RouteTracker:
         }
 
 
+def line_fix_allowed(dpsi: Optional[float], state: str, lane_status: Optional[str],
+                     max_dpsi_deg: float = 15.0, strict_states=('M7_OBSTACLE',),
+                     strict_dpsi_deg: float = 10.0, block_states=('M8_CONES',)) -> bool:
+    """흰 가로선으로 s를 맞춰도 되는 순간인가 (11/15, 1114 bag 네 판).
+
+    - 차가 경로와 비스듬하면(회피·라바콘·코너) 카메라가 옆 노란선·컵 띠를 가로선으로 잡는다.
+      1114_02/04: M7 회피 중 비스듬히 본 노란선을 m7_start_line으로 맞춰 s를 1.0~1.1 m 뒤로 당김.
+    - M7은 더 엄격하게: 경로와 10° 안 + 두 선이 다 보일 때만.
+    - M8(라바콘 사이를 지그재그)은 아예 안 씀. 1114_03/04: 컵 띠·비스듬한 선으로 s를 0.33~0.8 m 잘못 당김.
+      라바콘 뒤 코너는 CornerAnchor가 맞춘다.
+    dpsi(차 방향 - 경로 방향)를 모르면 막지 않는다 (예전 동작).
+    """
+    if state in block_states:
+        return False
+    if dpsi is None:
+        return True
+    lim = strict_dpsi_deg if state in strict_states else max_dpsi_deg
+    if abs(math.degrees(dpsi)) > lim:
+        return False
+    if state in strict_states and lane_status != 'BOTH':
+        return False
+    return True
+
+
+class CornerAnchor:
+    """IMU로 90° 코너를 다 돈 순간 s를 코너 끝으로 맞춘다 (11/15).
+
+    1114 bag 네 판: 출발~M7까지 코너 중간에서 s 오차 2~13 cm(선 보정이 잘 됨).
+    M7·M2(후진·제자리·선 놓침) 뒤에는 M2 출구 코너 -0.5~-2.2 m, 신호등 앞 코너 -1.8 m.
+    도면 코너는 진입·출구 방향이 정해져 있으므로, 최근 lookback_mm 안에 진입 방향이었고
+    지금 출구 방향이면 '방금 그 코너를 나왔다'고 본다. 코너마다 한 번만.
+    heading은 도면 좌표계 차 방향(IMU + 정렬값).
+    """
+
+    def __init__(self, route: 'RouteMap', min_turn_deg: float = 60.0, entry_tol_deg: float = 20.0,
+                 exit_tol_deg: float = 10.0, window_mm: float = 3000.0, lookback_mm: float = 2500.0,
+                 offset_mm: float = 0.0, min_err_mm: float = 200.0):
+        self.route = route
+        self.entry_tol = math.radians(entry_tol_deg)
+        self.exit_tol = math.radians(exit_tol_deg)
+        self.window_mm = window_mm
+        self.lookback_mm = lookback_mm
+        self.offset_mm = offset_mm
+        self.min_err_mm = min_err_mm
+        self.corners = []           # (s0, s1, 진입 방향, 출구 방향)
+        for g in route.segs:
+            if g.kind == 'arc' and abs(g.a1 - g.a0) >= math.radians(min_turn_deg):
+                # 출구 방향 ±exit_tol 안에 처음 들어오는 지점 = 코너 끝 - 반지름 x exit_tol
+                self.corners.append((g.s0, g.s0 + g.length - g.radius * self.exit_tol,
+                                     g.heading(0.0), g.heading(g.length)))
+        self.reset()
+
+    def reset(self) -> None:
+        self.done = set()
+        self.hist: List[Tuple[float, float]] = []
+        self.last: Optional[dict] = None
+
+    def update(self, dist_mm: float, s: float, heading: Optional[float]) -> Optional[float]:
+        """맞출 s를 돌려준다 (없으면 None). dist_mm은 앞으로 가면 늘어나는 누적 거리."""
+        if heading is None:
+            return None
+        self.hist.append((dist_mm, heading))
+        while self.hist and dist_mm - self.hist[0][0] > self.lookback_mm:
+            self.hist.pop(0)
+        for i, (s0, s1, h_in, h_out) in enumerate(self.corners):
+            if i in self.done or abs(s - s1) > self.window_mm:
+                continue
+            if abs(_wrap(heading - h_out)) > self.exit_tol:
+                continue
+            if not any(abs(_wrap(h - h_in)) <= self.entry_tol for _, h in self.hist):
+                continue
+            self.done.add(i)
+            s_new = s1 + self.offset_mm
+            err = s_new - s
+            self.last = {'corner': i, 'err_mm': round(err)}
+            if abs(err) < self.min_err_mm:
+                return None
+            return s_new
+        return None
+
+
 def motion_sign(dx_m: float, dy_m: float, odom_yaw: Optional[float], twist_x: float,
                 cmd_v: Optional[float]) -> Tuple[int, str]:
     """이번 오도메트리 걸음이 전진(+1)인지 후진(-1)인지와 그 근거 (11/11).
@@ -391,8 +477,11 @@ class MapPose:
 
     def __init__(self, route: RouteMap, front_axle_mm: float = 200.0,
                  valid_mm: float = 3000.0, alpha: float = 0.2,
-                 jump_gate_mm: float = 200.0, jump_frames: int = 10):
+                 jump_gate_mm: float = 200.0, jump_frames: int = 10,
+                 curve_fix: bool = True, curve_alpha: float = 0.3):
         self.route = route
+        self.curve_fix = curve_fix
+        self.curve_alpha = curve_alpha
         # 11/11: 차선 노드 offset은 '카메라가 보는 차로'의 중심 기준이다. 차가 옆 차로에 있거나
         # 차로를 벗어나 엉뚱한 선 두 개를 잡으면 d가 가운데(0)로 튀었다 -> 
         #   (1) 도면상 차로 중심 후보(3차선·갈림길 A/B) 중 지금 추정에 가장 가까운 차로로 맞추고
@@ -462,7 +551,8 @@ class MapPose:
         if (lane.get('status') != 'BOTH' or lane.get('low_conf') or lane.get('model') != 'poly'
                 or lane.get('heading_rad') is None or lane.get('offset_mm') is None):
             return False
-        if abs(self.route.curvature(s)) > 1e-6 or abs(self.route.curvature(s + 600.0)) > 1e-6:
+        curve = abs(self.route.curvature(s)) > 1e-6 or abs(self.route.curvature(s + 600.0)) > 1e-6
+        if curve and not self.curve_fix:
             return False
         if self.route.in_taper(s) or self.route.in_taper(s + 600.0):
             return False                        # 차로가 벌어지거나 모이는 곳: 선 방향이 경로와 다름
@@ -487,6 +577,14 @@ class MapPose:
                 return False
             how += ', accepted after repeats'
         self._disagree = 0
+        if curve:
+            # 11/15: 곡선에서도 두 선이 보이면 좌우 d만 조금씩 당긴다 (방향 보정값은 직선에서만).
+            #   1114 bag: 곡선·M2 뒤 d가 0.5~1.4 m 벌어진 채 다음 직선까지 감 (디버그·3D 화면에서 차가 트랙 밖)
+            self.d += self.curve_alpha * (new_d - self.d)
+            self.lane_center = c
+            self.lane_fix = f'ok curve ({how}, lane d {c:+.0f})'
+            self._d_fix_dist = dist_mm
+            return True
         off = _wrap(self.route.heading(s) - (imu_yaw + hd))
         if self.yaw_off is None:
             self.yaw_off = off

@@ -67,6 +67,10 @@ DEFAULT_PARAMS = {
     # 카메라 사각지대(앞바퀴 약 350mm 안) 직전부터는 뒤따르는 횡단보도 블록을 정지선으로 다시 잡기 쉽다 (11/09)
     'stop_freeze_mm': 450.0,
     'stop_route_gate_mm': 300.0,  # 처음 잡는 선이 도면 예측과 이만큼 넘게 다르면 버림 (끝선 540mm 뒤)
+    'stop_camera_first': False,   # 11/15: True면 도면 예측과 달라도 같은 횡단보도 선이 3프레임 연속이면 카메라 선을 씀
+                                  #   (1114 리플레이: 코너 끝 가짜 횡단보도 선을 잡아 0.7 m 일찍 섬 -> 끔. 도면 위치는 코너 맞추기로 정확)
+    'stop_pretrack': True,        # 11/15: M6·M1 준비 전부터 횡단보도 정지선을 카메라로 따라감
+    'stop_pretrack_mm': 1500.0,   #   도면상 정지선이 이 거리 안일 때부터 (지그재그 시작선도 횡단보도 선으로 잡혀서 너무 멀리선 안 봄)
     'arm_on_crosswalk_mm': 1200.0,  # 표지판을 못 봐도 횡단보도가 이 거리 안이면 정지 준비
     'ped_wait_sec': 3.5,         # 규정: 3초 이상 대기, 15초 안에 출발
     'leave_mm': 600.0,           # 출발 후 다음 미션으로 넘어가기까지 거리 (횡단보도 깊이 약 570mm를 벗어나게)
@@ -155,6 +159,7 @@ DEFAULT_PARAMS = {
     'm1_corner_preview': True,
     'm1_corner_start_mm': 200.0,     # 도면 위치를 모를 때: M1 진입 -> 코너 시작 (도면: 끝선 -> 코너 280 mm, handover가 끝선 근처)
     'm1_corner_k_gain': 1.0,
+    'm7_corner_k_gain': 1.0,
     'm1_corner_speed': 0.20,         # 코너 다 돌 때까지 속도
     # 코너(M8·M1 미리보기) 동안 차로 중심에서 바깥쪽으로 이만큼 (안쪽 선 밟던 것, 11/13). 차선이 보일 때만 효과 (target_offset_mm)
     'corner_outward_mm': 30.0,
@@ -257,7 +262,7 @@ class StopApproach:
 
     def __init__(self, target_mm: float, brake_mm: float, lost_ok_mm: float,
                  key: str = 'crosswalk_lines_mm', freeze_mm: float = 0.0,
-                 route_gate_mm: float = 0.0):
+                 route_gate_mm: float = 0.0, camera_first: bool = False):
         self.target_mm = target_mm
         self.brake_mm = brake_mm
         self.lost_ok_mm = lost_ok_mm
@@ -269,6 +274,12 @@ class StopApproach:
         self.seen_at = None      # 그때의 누적 주행 거리
         self.route_line_s = None  # 도면상 정지선 s. 카메라가 선을 못 볼 때만 쓰는 예비값
         self.how = None          # 'camera' | 'route' (디버그)
+        # 11/15: 횡단보도 정지선(막대가 뒤따르는 선)은 카메라가 1순위. 도면 예측과 gate 넘게 달라도
+        #   가장 가까운 카메라 선을 쓴다 (도면은 여러 선 중 고를 때만). 1114_03/04: 도면 위치가 1~1.8 m 틀려
+        #   맞는 카메라 선을 버리고 도면으로 섬 -> 정지선 0.85 m 앞에서 섬
+        self.camera_first = camera_first
+        self.persist_frames = 3
+        self.allow_route_start = True   # False: 카메라로 못 봤으면 도면 위치로 출발점을 잡지 않음 (준비 전 따라가기용)
 
     def _route_pred(self, inp: Inputs) -> Optional[float]:
         if self.route_line_s is None or inp.route_s is None:
@@ -283,6 +294,15 @@ class StopApproach:
             lines = inp.lane.get('stoplines_mm') or []
         frozen = (self.freeze_mm > 0.0 and self.seen_d is not None
                   and self._predicted(inp) < self.freeze_mm)
+        if lines and not frozen and self.seen_d is not None and self.route_gate_mm > 0.0:
+            # 11/15: 처음 잡은 선이 가짜(횡단보도 막대로 잘못 표시된 다른 선)였으면, 도면 예측 gate 안에 있고
+            #   지금 따라가는 선과는 gate 넘게 다른 카메라 선이 보일 때 그 선으로 갈아탄다 (1114_04 리플레이: 코너 끝 가짜 선)
+            rp, pred = self._route_pred(inp), self._predicted(inp)
+            if rp is not None and abs(pred - rp) >= self.route_gate_mm:
+                near = [d for d in lines if abs(d - rp) < self.route_gate_mm and abs(d - pred) > 150.0]
+                if near:
+                    d = min(near, key=lambda x: abs(x - rp))
+                    self.seen_d, self.seen_at, self.how = d, inp.dist_mm, 'camera'
         if lines and not frozen:
             if self.seen_d is not None:
                 ref, gate = self._predicted(inp), 150.0
@@ -294,10 +314,10 @@ class StopApproach:
             else:
                 cand = min(lines, key=lambda d: abs(d - ref))
                 if abs(cand - ref) >= gate:
-                    cand = None
+                    cand = self._camera_persist(lines[0], inp) if (self.camera_first and self.seen_d is None) else None
             if cand is not None:
                 self.seen_d, self.seen_at, self.how = cand, inp.dist_mm, 'camera'
-        if self.seen_d is None and self.freeze_mm > 0.0 and self.route_gate_mm > 0.0:
+        if self.seen_d is None and self.freeze_mm > 0.0 and self.route_gate_mm > 0.0 and self.allow_route_start:
             rp = self._route_pred(inp)
             if rp is not None and rp < self.freeze_mm:
                 # 이미 카메라 사각지대 근처에서 시작: 도면 위치를 출발점으로 오도메트리로 센다
@@ -310,6 +330,16 @@ class StopApproach:
         if travelled > self.seen_d + self.lost_ok_mm:
             return None
         return self.seen_d - travelled
+
+    def _camera_persist(self, d: float, inp: Inputs) -> Optional[float]:
+        """도면 예측과 다른 카메라 선은 같은 선이 persist_frames 연속(오도메트리로 이어서 150 mm 안)일 때만 받는다."""
+        prev = getattr(self, '_rej', None)
+        if prev is not None and abs((prev[0] - (inp.dist_mm - prev[1])) - d) < 150.0:
+            n = prev[2] + 1
+        else:
+            n = 1
+        self._rej = (d, inp.dist_mm, n)
+        return d if n >= self.persist_frames else None
 
     def _predicted(self, inp: Inputs) -> float:
         if self.seen_d is None:
@@ -339,7 +369,9 @@ class MissionFSM:
         self.sub_t = self.sub_dist = 0.0
         self.stop: Optional[StopApproach] = None
         self.stop_line_name: Optional[str] = None    # 지금 정지 접근 중인 도면 선 이름 (위치 다시 잡기용)
-        self.pre_stop = None                          # 지그재그 중에 미리 잰 횡단보도 정지선 (M3가 이어받음)
+        # 정지 준비 전에 미리 재 둔 정지선: 지그재그 중 M3 정지선(11/15 밤), 신호등 준비 전 M1 정지선(11/15)
+        self.pre_stop: Optional[StopApproach] = None
+        self.pre_stop_name: Optional[str] = None
         self.count = 0                               # 서브 상태 안에서 쓰는 연속 카운터
         self.log = []
         self.parking_sign = False                    # 주차 표지를 봤나 (M1~M4 동안 투표, 상태가 바뀌어도 유지)
@@ -425,7 +457,7 @@ class MissionFSM:
         if state == 'M2_FORK':
             self.m2m = None
         if state == 'M6_ZIGZAG':
-            self.pre_stop = None
+            self.pre_stop, self.pre_stop_name = None, None
             self.zz_at = None
             self.zz_capped = False
             self.ped_seen = False                        # M6~M3에서 본 보행자 표지 (상태가 바뀌면 투표는 지워지므로 따로 기억)
@@ -486,6 +518,8 @@ class MissionFSM:
             k *= p.get('m8_corner_k_gain', 1.0)
         elif self.state == 'M1_TRAFFIC':
             k *= p.get('m1_corner_k_gain', 1.0)
+        else:
+            k *= p.get('m7_corner_k_gain', 1.0)      # 11/15: M7 직전 코너도 배율 (실차가 크게 돎)
         if turned < math.radians(5.0):
             # 차선 노드는 미리보기의 route_ff_preview_mm(300) 앞 값을 쓴다 -> 그만큼 밀어 코너 시작에서 꺾게 (일찍 꺾어 안쪽을 자르지 않게)
             start = start_mm - since + p['m7_corner_lead_mm']
@@ -562,21 +596,42 @@ class MissionFSM:
         st = StopApproach(target, self.p['stop_brake_mm'],
                           self.p['stop_lost_ok_mm'],
                           freeze_mm=self.p['stop_freeze_mm'],
-                          route_gate_mm=self.p['stop_route_gate_mm'])
+                          route_gate_mm=self.p['stop_route_gate_mm'],
+                          camera_first=self.p.get('stop_camera_first', False))
         st.route_line_s = self._rp(line) if line else None
         st.passed_mm = self.p.get('stop_passed_mm', 120.0)
         return st
 
     def _arm_stop(self, inp: Inputs, line: Optional[str] = None) -> None:
         self._sub('approach', inp)
-        pre = getattr(self, 'pre_stop', None)
+        pre = self.pre_stop if self.pre_stop_name == line else None
         if line == 'm3_stop_line' and pre is not None and (pre.seen_d is not None or pre.route_line_s is not None):
             self.stop = pre                              # 지그재그 중에 미리 잰 정지선을 이어받음
             self.log.append(f'M3 uses pre-tracked stop line ({pre.how})')
+        elif line == 'm1_stop_line' and pre is not None and pre.seen_d is not None and pre.remaining(inp) is not None:
+            # 11/15: 신호등 준비 전부터 카메라로 따라온 정지선을 그대로 쓴다
+            self.stop = pre
+            self.log.append(f'{line}: camera line tracked before arming ({pre.remaining(inp):.0f}mm)')
         else:
             self.stop = self._new_stop(line)
-        self.pre_stop = None
+        self.pre_stop, self.pre_stop_name = None, None
         self.stop_line_name = line
+
+    def _pretrack_stop(self, inp: Inputs) -> None:
+        """신호등 정지 준비 전부터 횡단보도 정지선을 카메라로 따라간다 (M1 준비 전 -> M1 정지선)."""
+        # M3 정지선은 지그재그(M6) 처리 안에서 미리 잰다 (m3_pretrack). 여기서는 신호등(M1)만.
+        name = 'm1_stop_line' if (self.state == 'M1_TRAFFIC' and self.sub == '') else None
+        if name is None or not self.p.get('stop_pretrack', True):
+            if self.state not in ('M6_ZIGZAG', 'M3_PEDESTRIAN', 'M1_TRAFFIC'):
+                self.pre_stop, self.pre_stop_name = None, None
+            return
+        s0 = self._rp(name)
+        if inp.route_s is not None and s0 is not None and s0 - inp.route_s > self.p.get('stop_pretrack_mm', 1500.0):
+            return                       # 도면상 아직 멀다 (다른 횡단보도 선과 헷갈리지 않게)
+        if self.pre_stop_name != name:
+            self.pre_stop, self.pre_stop_name = self._new_stop(name), name
+            self.pre_stop.allow_route_start = False  # 준비 전엔 도면 출발점(route 모드)으로 시작하지 않는다
+        self.pre_stop.remaining(inp)
 
     def _line_crossed(self, inp: Inputs, name: str) -> Optional[bool]:
         """흰 가로선을 앞바퀴가 지났나 (1순위 카메라, 2순위 도면 위치). 둘 다 모르면 None.
@@ -635,6 +690,7 @@ class MissionFSM:
             _, d = self._since(inp)
             if d > self.p['state_max_mm']:
                 self._next(inp, f'FALLBACK: state distance limit {d:.0f}mm (no sign/line seen)')
+        self._pretrack_stop(inp)
         cmd = getattr(self, '_s_' + self.state)(inp)
         cmd.note = cmd.note or f'{self.state}/{self.sub}'
         return cmd
@@ -694,7 +750,7 @@ class MissionFSM:
         if self.p.get('m3_pretrack', True):
             if getattr(self, 'pre_stop', None) is None and (
                     self._crosswalk_near(inp) or self._past(inp, 'm3_stop_line', -self.p['arm_on_crosswalk_mm'])):
-                self.pre_stop = self._new_stop('m3_stop_line')
+                self.pre_stop, self.pre_stop_name = self._new_stop('m3_stop_line'), 'm3_stop_line'
                 self.log.append('M6: crosswalk stop line pre-tracked for M3')
             if getattr(self, 'pre_stop', None) is not None:
                 self.pre_stop.remaining(inp)
@@ -1212,19 +1268,24 @@ class MissionFSM:
         p = self.p
         red = self._vote(inp, 'red', 'yellow')
         green = self._vote(inp, 'green')
+        # 11/15: 초록은 정지 지점에 도착한 그 순간에 확정돼 있을 때만 통과. 그 전에 본 초록으로는 출발(go)하지 않는다
+        #   (예전: 접근 중 아무 때나 초록이 확정되면 바로 go -> 정지선에서 다시 안 봄). 아니면 일단 서서 초록 기다림
         if inp.confirmed_classes is not None:
             if red and self.sub not in ('approach', 'stopped'):
                 self._arm_stop(inp, 'm1_stop_line')
-            elif green and not red and self.sub in ('', 'approach'):
-                self._sub('go', inp)
         if self.sub == '':
             if red or green or self._stop_near(inp, 'm1_stop_line'):
                 self._arm_stop(inp, 'm1_stop_line')
             else:
                 return Command('lane', self._m1_lane(inp, p['base_speed']))
         if self.sub == 'approach':
-            if green and not red and not p['stop_on_green_arrival']:
+            # 정지선 위치를 전혀 모르면(카메라도 도면도 없음) 거리를 판단할 수 없으니 초록이면 예전처럼 진행
+            unknown = self.stop.remaining(inp) is None
+            pass_green = green and not red and (unknown or not p['stop_on_green_arrival'])
+            if (self.stop.should_stop(inp) or unknown) and pass_green:
+                self._anchor(self.stop_line_name, self.stop, self.stop.remaining(inp))
                 self._sub('go', inp)
+                self.log.append('M1 green at stop line -> pass')
             elif self.stop.should_stop(inp):
                 self._anchor(self.stop_line_name, self.stop, self.stop.remaining(inp))
                 self._sub('stopped', inp)

@@ -195,6 +195,11 @@
     lane_fix_while_changing: true   # 11/12: 옮기는 중·10~20° 틀어져도 양쪽 선이 보이면 반만 반영 (늘 차선 인식)
     lane_fix_change_deg: 20.0
     lane_fix_change_scale: 0.5
+    lane_fix_check_types: true   # 11/14: 선 색이 지금 차로와 맞을 때만 보정 (1차선=왼쪽 노랑·오른쪽 흰). 트랙 밖 바닥을 흰 선으로 본 가짜 차로로 끌려가던 것 (1114_02)
+    outside_fix: true            # 11/14: 바깥 차로인데 안쪽 선이 노란 실선으로 3프레임 = 노란선 밖 -> 옆 위치를 노란선 바깥 5cm로 옮겨 안쪽으로 돌아옴
+    outside_frames: 3
+    outside_max_deg: 25.0
+    outside_margin: 0.05
     lane_row: 0.55           # 차선 노드 offset 을 재는 행 (기준점 앞 m)
 
     # ── 멈춤 탈출 (11/09): 막혀서 0.8초 서 있으면 0.25 m 후진하며 크게 꺾어 다시 계획 (최대 3번) ──
@@ -210,6 +215,6 @@
     trail_step: 0.05
     rollback_lookahead: 0.30
     rollback_reverse_scale: 0.10  # 11/14: 기억후진 시 원래 꺾었던 조향의 반대 방향 10% 조향
-    rollback_max_dist: 0.40   # 11/12 0.3 -> 0.4
+    rollback_max_dist: 0.60   # 11/12 0.3 -> 0.4, 11/14 0.4 -> 0.6 (1114_02: 0.4는 두 번 다 '갈 길 없음')
     recover_lookahead: 0.20   # 11/12 0.25 -> 0.20: 후진 뒤 최소 회전반경까지 꺾음
     rollback_time: 15.0

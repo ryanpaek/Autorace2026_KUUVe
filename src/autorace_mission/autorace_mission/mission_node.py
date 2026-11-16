@@ -45,7 +45,8 @@ from std_msgs.msg import Bool, Empty, Float32, String
 
 from autorace_mission.command_inbox import CommandInbox
 from autorace_mission.fsm import DEFAULT_PARAMS, SEQUENCE, Inputs, MissionFSM
-from autorace_mission.route import MapPose, RouteMap, RouteTracker, motion_sign
+from autorace_mission.route import (CornerAnchor, MapPose, RouteMap, RouteTracker, line_fix_allowed,
+                                    motion_sign, _wrap)
 from autorace_mission.stage import stage_info
 
 # /mission/set_state로 점프할 때 차를 놓는 곳 (도면 경로 지점 + 오프셋 mm)
@@ -108,12 +109,20 @@ class MissionNode(Node):
         self.declare_parameter('route_lost_misses', 2)
         # 카메라로 확인한 미션 선으로 s를 다시 맞출 때, 지금 s와 이보다 크게 다르면 오검출로 보고 안 맞춤
         self.declare_parameter('route_anchor_max_mm', 3000.0)
+        # 11/15 (1114 bag 네 판): 차가 경로와 이 각도보다 비스듬하면 흰 가로선으로 s를 안 맞춤 (M7은 10°+두 선, M8은 안 씀)
+        self.declare_parameter('route_fix_max_dpsi_deg', 15.0)
+        # 11/15: 도면 90° 코너를 IMU로 다 돈 순간 s를 코너 끝으로 (M7·M2 뒤 1~2 m 뒤처짐 바로잡기)
+        self.declare_parameter('route_corner_anchor', True)
+        # 11/15: 차선 노드에 주는 도면 코너 곡률 배율 (M6 앞 코너 등. 실차가 명령보다 덜 돌아서 크게 돎)
+        self.declare_parameter('route_corner_k_gain', 1.0)
+        self.declare_parameter('route_corner_window_mm', 3000.0)
 
         params = {k: self.get_parameter(k).value for k in DEFAULT_PARAMS
                   if not isinstance(DEFAULT_PARAMS[k], dict)}
         self.route = None
         self.tracker = None
         self.mappose = None
+        self.corner_anchor = None
         self.route_active = False
         path = self.get_parameter('route_file').value
         if path:
@@ -128,6 +137,8 @@ class MissionNode(Node):
                                             lost_misses=int(self.get_parameter('route_lost_misses').value))
                 params['route_points'] = self.route.points
                 self.mappose = MapPose(self.route)
+                self.corner_anchor = CornerAnchor(
+                    self.route, window_mm=float(self.get_parameter('route_corner_window_mm').value))
                 self.get_logger().info(f'route map: {path} ({self.route.length / 1000:.1f} m, '
                                        f'{len(self.route.landmarks)} lines)')
             except Exception as e:      # 지도 파일이 깨져도 거리 기준으로 달린다
@@ -259,10 +270,12 @@ class MissionNode(Node):
         except json.JSONDecodeError:
             pass
 
-    def _route_reset(self, s: float, why: str, align: bool = False):
+    def _route_reset(self, s: float, why: str, align: bool = False, keep_corners: bool = False):
         if self.tracker is None:
             return
         self.tracker.reset(s, self.route_dist_mm)
+        if self.corner_anchor is not None and not keep_corners:
+            self.corner_anchor.reset()
         self.route_active = True
         aligned = ''
         if (align and self.mappose is not None
@@ -443,8 +456,20 @@ class MissionNode(Node):
         if self.route_active:
             lines = self.lane.get('stoplines_mm') if self.new_lane else None
             xw = self.lane.get('crosswalk_lines_mm') if self.new_lane else None
+            if lines and self.mappose is not None:
+                e = self.mappose.heading_error(self.tracker.s, self.yaw)
+                if not line_fix_allowed(e, self.fsm.state, self.lane.get('status'),
+                                        float(self.get_parameter('route_fix_max_dpsi_deg').value)):
+                    lines = None
             route_s = self.tracker.update(self.route_dist_mm, lines, xw)
             self.new_lane = False
+            ca, mp = self.corner_anchor, self.mappose
+            if (ca is not None and mp is not None and mp.yaw_off is not None and self.yaw is not None
+                    and self.get_parameter('route_corner_anchor').value):
+                s_new = ca.update(self.route_dist_mm, route_s, _wrap(self.yaw + mp.yaw_off))
+                if s_new is not None:
+                    self._route_reset(s_new, f'corner anchor (IMU, {s_new - route_s:+.0f}mm)', keep_corners=True)
+                    route_s = s_new
             self.route_s_map = route_s
             if self.tracker.lost:
                 # 길 잃음: 틀린 위치로 미션·모드를 바꾸지 않게 FSM에는 '경로 정보 없음'으로 준다
@@ -516,7 +541,8 @@ class MissionNode(Node):
                 {'step_mm': 100.0, 'k': ck, 'lost': False, 'm7_corner': True})))
         if rs is not None:
             step = 100.0
-            ks = [round(self.route.curvature(rs + i * step), 4) for i in range(14)]
+            kg = float(self.get_parameter('route_corner_k_gain').value)
+            ks = [round(kg * self.route.curvature(rs + i * step), 4) for i in range(14)]
             msg = {'s': round(rs), 'step_mm': step, 'k': ks,
                    'lost': bool(self.tracker.lost), 'dir': self.move_dir, 'rev_src': self.rev_src}
             if ck is not None:

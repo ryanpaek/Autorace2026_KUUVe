@@ -411,6 +411,58 @@ def test_target_lane_beside_obstacle_does_not_flip_back():
     assert pl.target == 1                                               # 예전: -1로 뒤집음
 
 
+# ---------------------------------------------------------------- 11/14: 선 종류 확인 · 노란선 밖 (1114_02)
+Y = {'color': 'yellow', 'dashed': False}
+WD = {'color': 'white', 'dashed': True}
+WS = {'color': 'white', 'dashed': False}
+
+
+def typed(off_mm, left, right, h_deg=0.0, status='BOTH'):
+    d = lane(off_mm, h_deg, status)
+    d.update(line_left=left, line_right=right)
+    return d
+
+
+def test_lane_fix_rejects_wrong_line_colors():
+    """1차선(+0.52)이라 믿는데 카메라가 (왼쪽 흰 실선=트랙 밖 바닥, 오른쪽 노란선)을 한 차로로 봄 -> 보정 안 함."""
+    pl = running(0.40)
+    pl.target = 1                 # 1차선에 있다고 믿는 중 (lane_fix_commit: 목표 차로 = 가까운 차로일 때만 보정)
+    for _ in range(20):
+        assert not pl.lane_fix(typed(0.0, WS, Y, status='BOTH'))
+    assert abs(pl.pose.y - 0.40) < 1e-6 or pl.pose.y > 0.40      # 가짜 차로로 끌려가지 않음 (노란선 밖 보정은 바깥으로만)
+    assert pl.status()['lane_fix_type_rej'] >= 1
+    ok = running(0.45)
+    ok.target = 1
+    for _ in range(20):
+        assert ok.lane_fix(typed(0.0, Y, WD))                      # 맞는 조합은 그대로 보정
+    assert abs(ok.pose.y - 0.52) < 0.01
+    mid = running(0.05)
+    assert mid.lane_fix(typed(0.0, WD, WD)) and not mid.lane_fix(typed(0.0, Y, WD))
+    right = running(-0.50)
+    right.target = -1
+    assert right.lane_fix(typed(0.0, WD, Y)) and not right.lane_fix(typed(0.0, Y, WD))
+
+
+def test_outside_yellow_moves_pose_beyond_line():
+    """1차선이라 믿는데 오른쪽 선이 노란 실선으로 3프레임 연속 -> 옆 위치를 노란선 바깥(0.52+0.26+0.05)으로."""
+    pl = running(0.40)
+    pl.lane_fix(typed(0.0, WS, Y))
+    pl.lane_fix(typed(0.0, WS, Y))
+    assert abs(pl.pose.y - 0.40) < 1e-6                            # 2프레임은 아직
+    pl.lane_fix(typed(0.0, WS, Y))
+    assert abs(pl.pose.y - (0.52 + 0.26 + 0.05)) < 1e-6
+    assert pl.status()['outside_fix_n'] == 1
+    assert any('노란선 밖' in e[1] for e in pl.events)
+    tilted = running(0.40)                                         # 노란선이 화면을 가로지를 만큼 틀어져 있으면 안 함
+    for _ in range(5):
+        tilted.lane_fix(typed(0.0, WS, Y, h_deg=35.0))
+    assert tilted.status()['outside_fix_n'] == 0
+    mirror = running(-0.40)                                        # 3차선(오른쪽 바깥)도 반대로
+    for _ in range(3):
+        mirror.lane_fix(typed(0.0, Y, WS))
+    assert abs(mirror.pose.y + 0.83) < 1e-6
+
+
 def test_camera_yellow_solid_guard_forces_inward_steering():
     """11/14: 오도메트리 y가 안쪽이어도 카메라(/lane/status)에서 노란 실선에 접근하면 즉시 안쪽으로 최대 조향."""
     pl = running(y0=0.20, psi0=0.0)

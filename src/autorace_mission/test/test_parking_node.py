@@ -87,7 +87,8 @@ def camera_lines(fx, fy, th):
     return sorted(d for d in out if 350.0 <= d <= 1900.0)
 
 
-def drive(parked, target, overrides=None, y0=240.0, fov_deg=360.0, camera=False, log=None, hide=(), out=None):
+def drive(parked, target, overrides=None, y0=240.0, fov_deg=360.0, camera=False, log=None, hide=(), out=None,
+          r_min=None, steer_lag_mm=0.0):
     """주차 논리(ParkingV2)를 가상 트랙에서 끝까지 돌린다 -> (칸 안 모서리 수, 충돌, 결과).
 
     hide: 라이다가 못 보는 리모의 parked 안 순서 (충돌 검사에는 그대로 들어감)
@@ -98,6 +99,7 @@ def drive(parked, target, overrides=None, y0=240.0, fov_deg=360.0, camera=False,
     boxes = [parked_box(i) for i in parked]
     x, y, th, dist, t, dt, offset, hit = -900.0, y0, 0.0, 0.0, 0.0, 0.05, 0.0, False
     info = {'done': False, 'result': ''}
+    kap_prev = 0.0
     for _ in range(int(60 / dt)):
         fx, fy = x + WB * math.cos(th), y + WB * math.sin(th)
         seen = [b for i, b in enumerate(boxes) if i not in hide]
@@ -124,7 +126,16 @@ def drive(parked, target, overrides=None, y0=240.0, fov_deg=360.0, camera=False,
         if logic.lane_cfg:
             offset = logic.lane_cfg.get('target_offset_mm', 0.0)
         kap = 0.0 if abs(v) < 1e-6 else (lane_w if k is None else v * k) / v
-        kap = max(-1 / R_MIN, min(1 / R_MIN, kap))           # 실제 차 최대 곡률
+        rm = R_MIN if r_min is None else r_min               # 11/15: 실차 최대 조향 회전반경 (1114 bag 실측 약 640)
+        kap = max(-1 / rm, min(1 / rm, kap))                 # 실제 차 최대 곡률
+        if steer_lag_mm > 0.0:
+            # 조향 서보가 따라오는 시간 (11/15): 끝에서 끝(2/R)까지 steer_lag_mm / 0.12 m/s 초.
+            # 브리지는 속도 0.02 m/s 미만이면 조향을 0으로 보낸다 -> 섰다 출발하면 바퀴가 0부터 다시 꺾임
+            want = kap if abs(v) >= 0.02 else 0.0
+            rate = (2.0 / rm) / (steer_lag_mm / 120.0)       # 1/mm per s
+            step = rate * dt
+            kap = kap_prev + max(-step, min(step, want - kap_prev))
+        kap_prev = kap
         d = v * 1000 * dt
         if abs(kap) < 1e-9:
             x, y = x + d * math.cos(th), y + d * math.sin(th)
@@ -594,8 +605,10 @@ def test_blocked_pauses_then_backs_back_mm_then_pauses_again():
     lg.yaw_turn0 = 0.0
     v, _, _ = lg.step(_step_inp(0.05, 0.0, blocked=True))
     assert lg.phase == 'SWITCH' and v == 0.0
-    v, _, _ = lg.step(_step_inp(0.30, 0.0))
+    v, _, _ = lg.step(_step_inp(0.05 + 0.5 - 0.45, 0.0))
     assert lg.phase == 'SWITCH' and v == 0.0                       # 0.5초 전: 아직 멈춤
+    v, _, _ = lg.step(_step_inp(0.30, 0.0))
+    assert lg.phase == 'SWITCH' and -0.03 <= v < 0.0               # 11/15: 끝 0.4초는 후진 조향을 미리 (아주 느리게)
     v, _, _ = lg.step(_step_inp(0.56, 0.0))
     assert lg.phase == 'BACK' and v < 0.0
     v, _, _ = lg.step(_step_inp(1.5, 100.0))
@@ -653,6 +666,7 @@ def test_center_check_works_without_center_on_sides(ov):
     예전엔 center_on_sides일 때만 재서 center_check가 아무 일도 안 했다 (회전반경 -4cm: 가운데서 +48mm 그대로)."""
     o = dict(_yaml_parking(), **ov)
     o['center_on_sides'], o['center_check'] = False, True
+    o['turn_fix'] = False          # 11/15: 도는 중 바로잡기를 켜면 처음부터 가운데라 다시 맞추기가 안 일어남 -> 이 시험은 끔
     out, log = {}, []
     n_in, hit, result = drive(FIVE, 2, o, fov_deg=210.0, camera=True, out=out, log=log)
     x, y, th = out['pose']
@@ -661,6 +675,31 @@ def test_center_check_works_without_center_on_sides(ov):
     assert (n_in, hit) == (4, False) and result.startswith('PARKED')
     assert abs(lat) <= 20.0, lat
     assert any((i.get('last_err') or (None,))[0] == 'center' for i in log)
+
+
+
+@pytest.mark.parametrize('r_true,lag', [(600.0, 0.0), (640.0, 120.0), (700.0, 120.0), (530.0, 120.0)])
+def test_turn_fix_keeps_center_when_real_radius_differs(r_true, lag):
+    """11/15 (1114 bag): 실제 최대 조향 반경 590~720 mm, 조향 서보 지연. 가운데 다시 맞추기 없이(center_check 끔)도
+    도는 중 바로잡기 + 반경 640 + 미리 꺾기로 칸 가운데 40 mm 안. 예전(529, 바로잡기 없음)은 R 640에서 +118~125 mm(모서리 3개)."""
+    o = dict(_yaml_parking(), center_check=False)
+    out = {}
+    n_in, hit, result = drive(FIVE, 2, o, fov_deg=210.0, camera=True, out=out, r_min=r_true, steer_lag_mm=lag)
+    x, y, th = out['pose']
+    x0, x1, _, _ = cell(2)
+    lat = x + 105.0 * math.cos(th) - (x0 + x1) / 2.0
+    assert (n_in, hit) == (4, False) and result.startswith('PARKED')
+    assert abs(lat) <= 40.0, lat
+
+
+def test_turn_fix_backs_with_left_lock_when_overshooting():
+    """계획 반경 529인데 실제 700: 도는 중 왼쪽 최대 조향 후진(끊어 넣기)이 일어난다."""
+    o = dict(_yaml_parking(), center_check=False, arc_radius_mm=529.0)
+    log = []
+    drive(FIVE, 2, o, fov_deg=210.0, camera=True, log=log, r_min=700.0)
+    fixes = [i['last_err'] for i in log if i.get('last_err') and i['last_err'][0] == 'turn_fix_back']
+    assert fixes and fixes[0][1] > 35
+    assert any(i['phase'] == 'BACK' for i in log)
 
 
 def test_back_uses_opposite_10_percent_steering():
