@@ -424,3 +424,30 @@ def test_stopline_tilted_up_to_15deg():
     draw_polyline_mm(img, cfg, np.array([-400.0, 400.0]), 720.0 + math.tan(math.radians(15)) * np.array([-400.0, 400.0]),
                      thick_mm=40.0)
     assert detect_stoplines(img, cfg.vehicle_col, cfg, old) == []      # 끄면 예전과 같음
+
+
+def test_preview_kappa_from_waypoints_and_dynamic_lookahead():
+    """11/16: 웨이포인트(차에서 거리 d) 2차 맞춤 기준경로곡률. 방향 오차는 곡률에 안 섞이고, 곡선이면 lookahead가 줄어든다."""
+    import math
+    from autorace_lane.lane_core import preview_kappa, resample_waypoints
+    d = np.linspace(550.0, 1300.0, 40)
+    for k_true in (0.0, 0.5, 1.2):
+        for psi in (0.0, math.radians(6.0)):
+            x = 1000.0 * (0.04 + psi * d / 1000.0 + 0.5 * k_true * (d / 1000.0) ** 2)
+            pts = np.stack([x, np.sqrt(np.maximum(d * d - x * x, 1.0))], axis=1)
+            k, info = preview_kappa(resample_waypoints(pts, 50.0), 550.0, 1300.0)
+            assert k == pytest.approx(k_true, abs=0.08), (k_true, psi)
+    assert preview_kappa(None, 550.0, 1300.0) is None
+    cfg = synth.make_cfg(ref_bottom=550.0)
+    looks = {}
+    for name, img in (('straight', synth.straight_lane(cfg, width_mm=500)),
+                      ('R1000', synth.arc_lane(cfg, 1000, 'right', 500))):
+        f = LaneFollower(cfg, LaneParams(lane_color='yellow', dyn_look=True))
+        for _ in range(12):
+            out = f.process_bev(img, np.zeros_like(img), speed=0.4)
+        looks[name] = out.lookahead_mm
+        assert out.preview_kappa is not None
+    assert looks['straight'] == pytest.approx(600.0, abs=5) and looks['R1000'] < 470.0
+    f = LaneFollower(cfg, LaneParams(lane_color='yellow'))                 # 기본 끔: lookahead 그대로
+    out = f.process_bev(synth.arc_lane(cfg, 1000, 'right', 500), None, speed=0.4)
+    assert out.lookahead_mm == pytest.approx(LaneParams().lookahead_mm)

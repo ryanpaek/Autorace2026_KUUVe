@@ -324,6 +324,26 @@ class LaneParams:
     realign_speed: float = 0.6         # 그동안 속도 비율
     corner_kappa_gain: float = 1.1     # 코너 시뮬레이션: 바깥 36 -> 26 mm, 안쪽 112 -> 120 mm (안쪽 선까지 17 mm). 1.2면 안쪽 여유 10 mm
     corner_gain_from: float = 0.6
+    # 11/16 동적 lookahead (기본 끔). 기본 차선 주행(normal 모드, 흰 선 안 쓰는 구간, 비켜 가기 없음)에서만 동작.
+    #   1) 기준경로곡률 rk: 조향에 쓰는 중앙선 점열을 waypoint_step_mm 간격 웨이포인트로 다시 찍고, 기준점에서
+    #      preview_min~max_mm 안 점들의 '차에서 거리 d'에 대해 옆 위치 x = a + b*d + (rk/2)*d^2 를 맞춤
+    #      (a·b가 옆 치우침·방향 오차를 먹어 곡률만 남음. 점마다 2x/d^2만 쓰면 방향 5°가 곡률 0.19로 섞임).
+    #      웨이포인트가 짧으면(급곡선 안) 원 맞춤 곡률.
+    #   2) Ld = min + (max - min) / (1 + exp(slope * (|rk| - kmid)))  (sigmoid, 직선 = max, 급곡선 = min). EMA 후
+    #      같은 프레임 목표점을 Ld로 다시 잡는다.
+    #   3) 속도 배율 = speed_min + (1 - speed_min) * (Ld - min) / (max - min)  (curve_slowdown 대신)
+    dyn_look: bool = False
+    waypoint_step_mm: float = 50.0     # 20점/m. 계산 시간은 10~250점/m 모두 0.04 ms 안팎 -> 잡음·선 두께(20 mm) 기준
+    preview_min_mm: float = 550.0      # 기준점에서 거리 (BEV 맨 아래 = 550)
+    preview_max_mm: float = 1300.0
+    preview_min_pts: int = 6
+    preview_min_span_mm: float = 300.0
+    dyn_look_min_mm: float = 400.0
+    dyn_look_max_mm: float = 600.0
+    dyn_look_kmid: float = 0.9         # 1/m. sigmoid 가운데 (R~1.1 m)
+    dyn_look_slope: float = 6.0        # sigmoid 기울기 (클수록 계단 같음)
+    dyn_look_alpha: float = 0.5        # Ld EMA (1.0 = 필터 없음)
+    dyn_speed_min: float = 0.8         # Ld = min일 때 속도 배율 (1.0이면 속도는 안 바꿈)
     yellow_guard_look_mm: float = 600.0   # 노란 실선까지 거리를 잴 때 이 앞까지만 (400으로 줄이면 M7 1차로 시뮬레이션 흔들림 37 -> 89 mm)
     yellow_guard_min_urg: float = 0.35    # 지킴이 걸리는 순간 최소 세기 (0이면 margin에서 0부터 hard까지 서서히)
 
@@ -389,11 +409,12 @@ class LaneOutput:
     mem_pts: int = 0                    # 기억 점 수 (차선 기억이 켜졌을 때)
     ff_kappa: Optional[float] = None    # 도면 곡률 (왼쪽 +, 1/m). 미리 넣기가 켜졌을 때
     lookahead_mm: Optional[float] = None
+    preview_kappa: Optional[float] = None  # 11/16 웨이포인트 기준경로곡률 (왼쪽 +, 1/m)
     debug: dict = field(default_factory=dict)
 
     def status_dict(self) -> dict:
         d = {k: getattr(self, k) for k in (
-            'mem_pts', 'ff_kappa', 'lookahead_mm',
+            'mem_pts', 'ff_kappa', 'lookahead_mm', 'preview_kappa',
             'kappa', 'speed_scale', 'status', 'source', 'offset_mm',
             'heading_rad', 'path_kappa', 'low_conf', 'stoplines_mm',
             'crosswalk_lines_mm', 'end_lines_mm', 'line_left', 'line_right', 'lane_id',
@@ -971,6 +992,49 @@ def direct_target(left_pix, right_pix, status: str, half_mm: float, lookahead_mm
     return tgt, low, c
 
 
+def resample_waypoints(pts: np.ndarray, step_mm: float) -> Optional[np.ndarray]:
+    """진행 순서 점열을 길이 step_mm 간격 웨이포인트로 다시 찍는다."""
+    if pts is None or len(pts) < 2 or step_mm <= 0.0:
+        return None
+    seg = np.hypot(*np.diff(pts, axis=0).T)
+    s = np.concatenate([[0.0], np.cumsum(seg)])
+    if s[-1] < step_mm:
+        return None
+    ss = np.arange(0.0, s[-1] + 1e-6, step_mm)
+    return np.stack([np.interp(ss, s, pts[:, 0]), np.interp(ss, s, pts[:, 1])], axis=1)
+
+
+def preview_kappa(wp: Optional[np.ndarray], d_min: float, d_max: float, min_pts: int = 6,
+                  min_span_mm: float = 300.0) -> Optional[Tuple[float, dict]]:
+    """웨이포인트(차 기준 mm, x 오른쪽+)의 차에서 거리 d로 기준경로곡률 (1/m, 오른쪽 +).
+
+    x = a + b*d + (k/2)*d^2 최소제곱. 점마다 2x/d^2(그 점까지 가는 원)도 debug로 돌려준다."""
+    if wp is None or len(wp) < min_pts:
+        return None
+    d = np.hypot(wp[:, 0], wp[:, 1])
+    m = (d >= d_min) & (d <= d_max)
+    if m.sum() < min_pts or float(d[m].max() - d[m].min()) < min_span_mm:
+        return None
+    dm, xm = d[m] / 1000.0, wp[m, 0] / 1000.0
+    try:
+        c = np.polyfit(dm, xm, 2)
+    except (np.linalg.LinAlgError, ValueError):
+        return None
+    k = float(2.0 * c[0])
+    if not math.isfinite(k):
+        return None
+    pp = 2.0 * xm / (dm * dm)
+    return k, {'n': int(m.sum()), 'd_mm': (round(float(d[m].min())), round(float(d[m].max()))),
+               'pp_median': round(float(np.median(pp)), 3)}
+
+
+def dyn_lookahead(rk: float, p: 'LaneParams') -> float:
+    """기준경로곡률 |rk| (1/m) -> Ld (mm). 하한~상한 사이 sigmoid (직선 = 상한)."""
+    z = p.dyn_look_slope * (abs(rk) - p.dyn_look_kmid)
+    z = max(-50.0, min(50.0, z))
+    return p.dyn_look_min_mm + (p.dyn_look_max_mm - p.dyn_look_min_mm) / (1.0 + math.exp(z))
+
+
 def pp_kappa_with_latency(tgt, kappa_cmd_left: float, speed: float, latency_sec: float) -> float:
     """목표점(x 오른쪽+, y 전방+, mm)으로 가는 Pure Pursuit 곡률 (1/m, 오른쪽 +).
 
@@ -1479,6 +1543,8 @@ class LaneFollower:
         if hasattr(self, 'memory'):
             self.memory.clear()
         self.arc_cand = {'L': None, 'R': None}
+        self.dyn_look_mm = None
+        self.preview_k = None
 
     def set_mode(self, mode: str, yaw: Optional[float] = None,
                  yaw_ref: Optional[float] = None,
@@ -1522,6 +1588,12 @@ class LaneFollower:
         if p.lookahead_per_mps:
             look = float(np.clip(p.lookahead_mm + p.lookahead_per_mps * (speed - 0.3),
                                  min(p.lookahead_mm, 450.0), p.lookahead_max_mm))
+        dyn_on = (p.dyn_look and self.mode == 'normal' and p.lane_color != 'both'
+                  and p.target_offset_mm == 0.0)
+        if dyn_on and getattr(self, 'dyn_look_mm', None) is not None:
+            look = float(self.dyn_look_mm)          # 첫 목표는 직전 Ld로 (아래에서 이번 rk로 다시 잡음)
+        elif not dyn_on:
+            self.dyn_look_mm = None
         if p.dilate_px > 0:
             k = 2 * int(p.dilate_px) + 1
             bev_lane = cv2.dilate(bev_lane, np.ones((k, k), np.uint8))
@@ -1616,6 +1688,32 @@ class LaneFollower:
                                       direct[2])
                     else:
                         direct = (at, False, np.array([[0.0, cfg.ref_to_bev_bottom_mm], at]))
+        # 11/16 기준경로곡률 rk -> Ld (dyn_look 설명). 같은 프레임 목표점을 Ld로 다시 잡는다
+        src_pts = direct[2] if direct is not None else (cl.pts_mm if cl is not None else None)
+        pk = (preview_kappa(resample_waypoints(src_pts, p.waypoint_step_mm), p.preview_min_mm, p.preview_max_mm,
+                            p.preview_min_pts, p.preview_min_span_mm) if src_pts is not None else None)
+        rk = None
+        if pk is not None:
+            rk = -pk[0]                              # 왼쪽 +
+            out.debug['preview'] = pk[1]
+        elif cl is not None and cl.circle is not None:
+            rk = -circle_geometry(cl.circle)[0]      # 급곡선 안: 원 맞춤 곡률
+            out.debug['preview'] = 'circle'
+        out.preview_kappa = rk
+        if dyn_on:
+            want = dyn_lookahead(rk, p) if rk is not None else (self.dyn_look_mm or p.dyn_look_max_mm)
+            prev = self.dyn_look_mm if self.dyn_look_mm is not None else want
+            self.dyn_look_mm = prev + p.dyn_look_alpha * (want - prev)
+            if direct is not None and abs(self.dyn_look_mm - look) > 5.0:
+                look = float(self.dyn_look_mm)
+                d2 = direct_target(lpix_mm, rpix_mm, det.status, p.lane_width_mm / 2.0, look, p.lane_width_mm,
+                                   p.corner_outer_extra_mm, p.walk_smooth_pts, p.walk_kink_deg,
+                                   p.far_start_mm, p.pair_agree_ratio)
+                if d2 is not None:
+                    direct = (d2[0], d2[1], d2[2])
+                    out.debug['direct'] = d2[2]
+            else:
+                look = float(self.dyn_look_mm)
         if cl is None and direct is not None:
             # 원·다항식이 안 돼도 목표점은 있다 (코너 출구처럼 선이 옆으로 누운 경우)
             c = direct[2]
@@ -1796,6 +1894,10 @@ class LaneFollower:
         out.kappa = self.kappa_cmd
         if source != 'stop':
             out.speed_scale = 1.0 - p.curve_slowdown * min(1.0, abs(out.kappa) / p.kappa_max)
+            if dyn_on and self.dyn_look_mm is not None and source in ('lane', 'memory'):
+                span = max(p.dyn_look_max_mm - p.dyn_look_min_mm, 1.0)
+                frac = min(1.0, max(0.0, (self.dyn_look_mm - p.dyn_look_min_mm) / span))
+                out.speed_scale = p.dyn_speed_min + (1.0 - p.dyn_speed_min) * frac   # Ld 기반 (curve_slowdown 대신)
             if p.preview_slowdown > 0.0:
                 # 꺾기 전에 감속: 앞에 보이는 원호 곡률, 도면상 1 m 안 최대 곡률
                 kp = 0.0
@@ -2061,6 +2163,10 @@ def draw_debug(out: LaneOutput, cfg: BevConfig) -> np.ndarray:
     cv2.line(img, (vc, cfg.bev_h - 15), (vc, cfg.bev_h - 1), (255, 255, 255), 2)
     txt = f'{out.status} {out.source} k={out.kappa:+.2f}'
     cv2.putText(img, txt, (6, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+    if out.lookahead_mm is not None:
+        rk = '-' if out.preview_kappa is None else f'{out.preview_kappa:+.2f}'
+        cv2.putText(img, f'rk={rk} Ld={out.lookahead_mm:.0f} v x{out.speed_scale:.2f}', (6, 58),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 1)
     if out.stoplines_mm:
         cv2.putText(img, f'stop {out.stoplines_mm[0]:.0f}mm', (6, 38),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
