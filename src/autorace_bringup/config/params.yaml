@@ -284,11 +284,11 @@ parking_node:
     fixed_first_min_mm: 250.0              # 처음 잡는 주차선은 25cm보다 멀리 보인 것만 (통주행 M4 시작 때 12cm 앞 횡단보도 끝 선 무시)
     fixed_brake_mm: 0.0                    # 정지 명령 뒤 밀리는 거리 (미측정)
     fixed_pause_sec: 0.3
-    fixed_move_mm: 950.0                   # 11/16 실차: 104 -> 100 -> 95cm (캡틴)
+    fixed_move_mm: 1000.0                  # 11/16 캡틴 조종기 주행 기록: 직진 100.2cm (104 -> 100 -> 95 -> 100)
     fixed_move_speed: 0.10
     fixed_turn_pause_sec: 0.3              # 0이면 멈추지 않고 바로 꺾음 (서보가 늦게 꺾여 원이 커질 수 있음)
     fixed_turn_deg: 87.0                   # 최대 조향 끝 = IMU 87도 (실차는 2~4도 더 돎)
-    fixed_turn_mm: 350.0                   # 11/16 캡틴 실차: 최대 조향 35cm에서 끝 (87도와 먼저 닿는 쪽). 반경 590이면 약 34도
+    fixed_turn_mm: 560.0                   # 11/16 캡틴 조종기 주행 기록: 오른쪽 56.1cm, -66.7도 (87도와 먼저 닿는 쪽)
     fixed_straight_mm: 0.0                 # 바퀴 편 뒤 직진 (미정, 0 = 바로 정지)
     fixed_line_max_mm: 4000.0              # 선을 못 보고 이만큼 가면 FAIL_NO_LINE (정지)
                                            #   목표 l5 = 5번 중심(없으면 1·3번 중점), Q(뒷바퀴) = l5 - arc_radius_mm. (target = 꼭짓점 기준 꺾기)
