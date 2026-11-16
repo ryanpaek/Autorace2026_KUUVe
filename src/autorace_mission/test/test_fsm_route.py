@@ -179,7 +179,7 @@ def test_m2_old_option_sign_wins_and_logs_conflict():
     """fork_follow_m7_exit false(예전): 표지 A인데 B 차로에서 끝남 -> 표지 쪽 left_only."""
     fsm = _m2_fsm(fork_follow_m7_exit=False)
     fsm.fork_choice = 'A'
-    cmd = fsm.step(Inputs(t=0.0, dist_mm=0.0, route_s=18300.0, obstacle={'m7_exit': 'B'}))
+    cmd = fsm.step(Inputs(t=0.0, dist_mm=0.0, route_s=18100.0, obstacle={'m7_exit': 'B'}))
     assert fsm.fork_choice == 'A' and cmd.lane.get('mode') == 'left_only'
     assert any('fork conflict' in l and 'follow sign' in l for l in fsm.log)
 
@@ -188,7 +188,7 @@ def test_m2_default_follows_lane_on_conflict():
     """기본(11/11): 표지 A인데 회피가 B 차로에서 끝남 -> 이미 섬 옆이라 B 차로 바깥선(right_only)을 따름."""
     fsm = _m2_fsm()
     fsm.fork_choice = 'A'
-    cmd = fsm.step(Inputs(t=0.0, dist_mm=0.0, route_s=18300.0, obstacle={'m7_exit': 'B'}))
+    cmd = fsm.step(Inputs(t=0.0, dist_mm=0.0, route_s=18100.0, obstacle={'m7_exit': 'B'}))
     assert fsm.fork_choice == 'B' and cmd.lane.get('mode') == 'right_only'
     assert any('fork conflict' in l and 'follow lane B' in l for l in fsm.log)
 
@@ -196,9 +196,23 @@ def test_m2_default_follows_lane_on_conflict():
 def test_m2_agreeing_sign_and_lane_unchanged():
     fsm = _m2_fsm()
     fsm.fork_choice = 'A'
-    cmd = fsm.step(Inputs(t=0.0, dist_mm=0.0, route_s=18300.0, obstacle={'m7_exit': 'A'}))
+    cmd = fsm.step(Inputs(t=0.0, dist_mm=0.0, route_s=18100.0, obstacle={'m7_exit': 'A'}))
     assert fsm.fork_choice == 'A' and cmd.lane.get('mode') == 'left_only'
     assert not any('fork conflict' in l for l in fsm.log)
+
+
+def test_m2_normal_mode_inside_branch():
+    """11/16: 섬 앞 끝 + 300 mm를 지나면 갈래 안은 양쪽 선 보통 차선 모드 (한쪽 선 모드는 선을 자주 놓침)."""
+    fsm = _m2_fsm()
+    fsm.fork_choice = 'A'
+    cmd = fsm.step(Inputs(t=0.0, dist_mm=0.0, route_s=18100.0, obstacle={'m7_exit': 'A'}))
+    assert cmd.lane.get('mode') == 'left_only'
+    cmd = fsm.step(Inputs(t=1.0, dist_mm=300.0, route_s=18400.0, obstacle={'m7_exit': 'A'}))
+    assert cmd.lane.get('mode') == 'normal' and cmd.lane.get('lane_width_mm') == fsm.p['fork_lane_width_mm']
+    off = _m2_fsm(fork_normal=False)
+    off.fork_choice = 'A'
+    cmd = off.step(Inputs(t=0.0, dist_mm=0.0, route_s=18400.0, obstacle={'m7_exit': 'A'}))
+    assert cmd.lane.get('mode') == 'left_only'
 
 
 def _m2_end_dist(to_tip):

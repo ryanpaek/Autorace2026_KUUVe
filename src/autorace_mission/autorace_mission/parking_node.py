@@ -1157,7 +1157,9 @@ class ParkingV2:
                     k = pursuit_kappa_on_line(self.px, self.py, inp['yaw'] or 0.0, self._cell(),
                                               p['pursuit_look_mm'])
                     return self._out(p['turn_speed'], max(-2.0, min(2.0, k)))
-                return self._out(p['turn_speed'], 0.0 if straight else KAPPA_FULL_RIGHT)
+                if straight:
+                    return self._out(p['turn_speed'], self._align_kappa(inp))
+                return self._out(p['turn_speed'], KAPPA_FULL_RIGHT)
 
         if self.phase == 'CHECK':           # (재정렬) 칸 가운데에 반듯하게 들어갔나
             rel = cell_line_from_neighbors(
@@ -1255,6 +1257,25 @@ class ParkingV2:
             return self.p['center_look_mm']
         return self.p['pursuit_look_mm']
 
+    def _align_kappa(self, inp):
+        """바퀴 편 뒤 칸 방향(세로)과 나란해지게 좌우로 살짝 (11/16 사용자: 너무 꺾었으면 왼쪽으로도).
+
+        칸 깊이 방향 = 짝 선(pair_line)의 u, 없으면 도는 시작 방향 - 90°. 곡률 = straight_align_gain x 방향 차 (왼쪽 +)."""
+        p = self.p
+        g = p.get('straight_align_gain', 0.0)
+        if g <= 0.0 or inp['yaw'] is None:
+            return 0.0
+        if self.pair_line is not None:
+            _, _, ux, uy = self.pair_line
+            target = math.atan2(uy, ux)
+        elif self.yaw_turn0 is not None:
+            target = self.yaw_turn0 - math.pi / 2.0
+        else:
+            return 0.0
+        err = math.atan2(math.sin(target - inp['yaw']), math.cos(target - inp['yaw']))
+        lim = p.get('straight_align_max_kappa', 1.5)
+        return max(-lim, min(lim, g * err))
+
     def _back_kappa(self):
         """BACK 곡률: 도는 중 바로잡기(끊어 넣기)면 정한 곡률, 아니면 back_kappa
         (0이고 back_reverse_scale > 0이면 11/14 기억후진: 앞으로 꺾던 조향의 반대 방향 조금)."""
@@ -1322,6 +1343,7 @@ class ParkingV2:
             return None
         self.fix_n += 1
         self.fix_phi = phi_deg
+        e *= p.get('turn_fix_gain', 1.0)              # 11/16: 잰 반경이 흔들려(1116_01 529 vs 실제 585~605) 예측의 일부만 고침
         if e > 0.0:
             target = min(0.99, math.sin(phi) + e / (2.0 * r))
             d = min(p['turn_fix_back_max_mm'], r * max(0.0, math.asin(target) - phi))
@@ -1418,6 +1440,9 @@ DEFAULTS = {
     # 11/15 도는 중 바로잡기 (_turn_fix). 경로(path) 방식에서만
     'presteer_sec': 0.4,              # 11/15: 멈춤 끝 이 시간 동안 다음 조향을 미리 (0 = 끔)
     'presteer_speed': 0.025,          #   그때 속도 (브리지가 조향을 보내는 최소 0.02 m/s 위)
+    'straight_align_gain': 3.0,       # 11/16: 바퀴 편 뒤 칸과 나란하게 (방향 0.1 rad 틀리면 곡률 0.3). 0 = 예전(바퀴 0)
+    'straight_align_max_kappa': 1.5,
+    'turn_fix_gain': 0.7,             # 11/16: 예측 옆 오차의 이만큼만 고침
     'turn_fix': True,
     'turn_fix_meas_from_deg': 12.0,   # 바퀴가 다 꺾인 뒤부터 회전반경을 잼 (출발 직후는 바퀴가 따라오는 중)
     'turn_fix_meas_span_deg': 12.0,   #   이만큼 도는 동안의 거리로 잼
