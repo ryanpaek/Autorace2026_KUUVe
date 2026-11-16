@@ -1255,7 +1255,7 @@ class ParkingV2:
 
     # ------------------------------------------------------------------
     # 11/16 캡틴 '고정 거리' 방식 (turn_ref: fixed). 라이다 판단 없이 선 + 오도메트리 + IMU만 씀.
-    # ① F_LINE   차선 따라가며 주차선(흰 가로선)을 찾고, 앞바퀴가 선 fixed_line_target_mm 앞에 오면 정지
+    # ① F_LINE   차선 따라가며 주차선(흰 가로선, 처음엔 25cm보다 먼 것만)을 찾고, 앞바퀴가 선 fixed_line_target_mm 앞에 오면 정지
     #            (선이 카메라 아래로 사라지면 마지막으로 본 거리 - 오도메트리로 셈. fsm.StopApproach와 같은 원리)
     # ② F_PAUSE  fixed_pause_sec 정지 (= 주차 모드로 바뀜)
     # ③ F_MOVE   멈춘 자리부터 오도메트리 fixed_move_mm 직진 (멈출 때 방향 유지)
@@ -1274,12 +1274,14 @@ class ParkingV2:
         moved = inp['dist_mm'] - self.d_phase
 
         if self.phase == 'F_LINE':
-            if moved < p['ignore_mm']:                    # 시작 직후 횡단보도 선 무시
-                return self._out(inp['lane_v'], None)
             lines = [d for d in inp['stoplines_mm'] if d >= p['line_min_mm']]
             if lines:
                 if self.end_d is None:
-                    cand = lines[0]
+                    # 처음 잡는 선은 fixed_first_min_mm보다 멀리서 보인 것만 (11/16 런 가이드):
+                    #   통주행 M4 시작 때 횡단보도 끝 선이 약 12cm 앞이라 버리고, 연습(주차 앞 선 30cm 앞에 놓고
+                    #   set_state)은 선이 약 35cm 앞이라 잡는다. (예전 ignore_mm 300은 연습 때 선을 버려 지나쳤음)
+                    far = [d for d in lines if d >= p['fixed_first_min_mm']]
+                    cand = far[0] if far else None
                 else:                                     # 이미 잡은 선과 가까운 것만 (다른 선으로 안 갈아탐)
                     pred = self.end_d - (inp['dist_mm'] - self.end_at)
                     near = [d for d in lines if abs(d - pred) < 150.0]
@@ -1495,6 +1497,7 @@ DEFAULTS = {
     'turn_ref': 'pair',        # 꺾는 기준: 'pair'(짝 중점) | 'corner'(1번 모서리, 리모 폭 가정) | 'center1'(1번 앞면 가운데) | 'target'(꼭짓점 기준 꺾기) | 'path'(캡틴 경로: 정지·Q로 이동·원호, 11/13)
     # 11/16 캡틴 '고정 거리' 방식 (turn_ref: fixed): 주차선 정지 -> 0.3초 -> 104cm 직진 -> 오른쪽 최대 조향 -> (직진) -> 정지
     'fixed_line_target_mm': 56.0,   # 앞바퀴가 주차선 이만큼 앞에서 정지 (11/16 캡틴: 앞범퍼가 선에 닿게 = front_bumper_from_axle_mm)
+    'fixed_first_min_mm': 250.0,   # 처음 잡는 주차선은 앞바퀴에서 이보다 멀리 보인 것만 (횡단보도 끝 선 무시)
     'fixed_brake_mm': 0.0,     #   정지 명령 뒤 밀리는 거리 (미측정 -> 0). 실차에서 지나치면 그만큼 넣기
     'fixed_slow_speed': 0.10,  #   선 25cm 앞부터 이 속도 이하
     'fixed_line_max_mm': 4000.0,   # 주차 모드 시작 뒤 이만큼 가도 선을 못 보면 FAIL_NO_LINE (정지)

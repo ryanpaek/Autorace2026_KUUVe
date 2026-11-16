@@ -782,3 +782,31 @@ def test_fixed_no_line_fails_and_stops():
             break
     assert info['result'] == 'FAIL_NO_LINE' and v == 0.0
     assert d == pytest.approx(pn.DEFAULTS['fixed_line_max_mm'], abs=20.0)
+
+
+def _fixed_lines(first_lines, line_at):
+    """앞바퀴 기준 선 거리를 직접 주는 1차원 시험: first_lines = 시작 때 보이는 다른 선들(mm), line_at = 주차선 거리."""
+    lg = pn.ParkingV2(dict(pn.DEFAULTS, **FIXED))
+    d, info, stop_d = 0.0, None, None
+    for i in range(3000):
+        ls = sorted([x - d for x in first_lines + [line_at] if 60.0 <= x - d <= 700.0])
+        v, k, info = lg.step({'t': i * 0.05, 'dist_mm': d, 'yaw': 0.0, 'lane_v': 0.18, 'lane_w': 0.0,
+                              'stoplines_mm': ls, 'clusters': [], 'blocked': False})
+        if lg.phase == 'F_PAUSE' and stop_d is None:
+            stop_d = d
+        d += v * 50.0
+        if info['done']:
+            break
+    return lg, stop_d
+
+
+def test_fixed_practice_line_30cm_ahead_is_caught():
+    """런 가이드: 주차 앞 선 30cm 앞(앞범퍼)에 놓고 set_state -> 앞바퀴 기준 약 356mm. 예전 ignore 300이면 지나침."""
+    lg, stop_d = _fixed_lines([], 356.0)
+    assert stop_d == pytest.approx(356.0 - 56.0, abs=15.0)
+
+
+def test_fixed_full_run_skips_crosswalk_end_line():
+    """통주행 M4 시작: 횡단보도 끝 선 약 120mm 앞, 주차선 약 1950mm 앞 -> 횡단보도 선에서 서지 않음."""
+    lg, stop_d = _fixed_lines([120.0], 1950.0)
+    assert stop_d == pytest.approx(1950.0 - 56.0, abs=15.0)
