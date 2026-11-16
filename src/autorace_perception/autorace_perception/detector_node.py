@@ -1,6 +1,8 @@
 """표지판·신호등 인식 노드.
 
 model_path 확장자로 백엔드를 고른다.
+  11/16: use_gpu true이고 같은 이름 .engine(또는 engine_path)이 있으면 GPU TensorRT (trt_runner).
+         이때는 ort_threads 제한 없음, infer_hz_gpu로 돎. 엔진이 없거나 GPU가 안 되면 아래처럼 CPU.
   .onnx -> onnxruntime (D-Racer와 같은 방식, dracer-yolo 레포의 export 사용)
   .pt   -> ultralytics (pip install ultralytics)
   ''    -> 모델 없이 빈 결과만 낸다 (나머지 스택을 먼저 돌려 볼 때)
@@ -26,6 +28,7 @@ from sensor_msgs.msg import CompressedImage, Image
 from std_msgs.msg import String
 
 from autorace_perception.class_commands import V3_CLASSES, canonical_class
+from autorace_perception.trt_runner import choose_backend
 from autorace_perception.yolo_onnx import decode, letterbox, to_tensor
 
 DEFAULT_CLASSES = list(V3_CLASSES)
@@ -52,6 +55,10 @@ class DetectorNode(Node):
         # onnxruntime 스레드 수. 0이면 기본값(코어 전부). 11/09 통주행: 기본값이면 LIMO(6코어)에서
         # 장당 536ms + 차선 노드 19Hz -> 9Hz로 떨어짐. 2로 제한해 나머지 코어를 차선·센서에 남긴다
         p('ort_threads', 2, readonly)
+        # 11/16: GPU(TensorRT). 엔진 = engine_path, 비면 model_path 옆 같은 이름 .engine
+        p('use_gpu', True, readonly)
+        p('engine_path', '', readonly)
+        p('infer_hz_gpu', 15.0, readonly)
         self.names = [str(c) for c in self.get_parameter('class_names').value]
         self.size = int(self.get_parameter('input_size').value)
         self.latest = None
@@ -68,13 +75,43 @@ class DetectorNode(Node):
         self.pub = self.create_publisher(String, '/perception/detections', 10)
         self.debug_pub = self.create_publisher(CompressedImage,
                                                '/perception/debug/compressed', 2)
-        self.create_timer(1.0 / float(self.get_parameter('infer_hz').value), self._on_timer)
+        hz = self.get_parameter('infer_hz_gpu' if self.backend == 'trt' else 'infer_hz').value
+        self.create_timer(1.0 / float(hz), self._on_timer)
+        self.get_logger().info(f'YOLO {self.backend or "없음"} {hz} Hz')
 
     def _load_model(self, path):
+        backend, bpath, why = choose_backend(path, self.get_parameter('engine_path').value,
+                                             bool(self.get_parameter('use_gpu').value))
+        if backend == 'trt':
+            try:
+                from autorace_perception.trt_runner import TrtRunner
+                self.trt = TrtRunner(bpath)
+                shape = tuple(self.trt.input_shape)
+                if shape != (1, 3, self.size, self.size):
+                    raise ValueError(f'engine input {shape} != input_size {self.size}')
+                self.trt(np.zeros(shape, np.float32))          # 첫 실행(느림)은 시작할 때
+                self.backend = 'trt'
+                self.get_logger().info(f'model loaded (GPU TensorRT): {bpath}')
+                return
+            except Exception as e:      # noqa: BLE001 - GPU 실패해도 CPU로 계속
+                self.get_logger().error(f'TensorRT 실패 -> CPU로: {e}')
+                backend, why = ('onnx' if path.endswith('.onnx') else ''), 'TensorRT 실패'
+        if why:
+            self.get_logger().warning(f'YOLO GPU 안 씀: {why}')
         if not path:
             self.get_logger().warning('model_path가 비어 있음: 빈 인식 결과만 발행합니다')
             return
         if path.endswith('.onnx'):
+            self._load_onnx(path)
+        else:
+            from ultralytics import YOLO
+            self.model = YOLO(path)
+            self.backend = 'ultralytics'
+        self.get_logger().info(f'model loaded ({self.backend}): {path}'
+                               f' (ort_threads={self.get_parameter("ort_threads").value})')
+
+    def _load_onnx(self, path):
+        if True:        # CPU onnxruntime, ort_threads 제한
             import onnxruntime as ort
             so = ort.SessionOptions()
             n = int(self.get_parameter('ort_threads').value)
@@ -91,12 +128,6 @@ class DetectorNode(Node):
                 raise ValueError(f'ONNX input {shape} does not match input_size={self.size}; '
                                  'choose a matching export and restart')
             self.backend = 'onnx'
-        else:
-            from ultralytics import YOLO
-            self.model = YOLO(path)
-            self.backend = 'ultralytics'
-        self.get_logger().info(f'model loaded ({self.backend}): {path}'
-                               f' (ort_threads={self.get_parameter("ort_threads").value})')
 
     def _on_image(self, msg):
         try:
@@ -127,9 +158,11 @@ class DetectorNode(Node):
         dets = []
         conf = float(self.get_parameter('conf_threshold').value)
         try:
-            if self.backend == 'onnx':
+            if self.backend in ('onnx', 'trt'):
                 canvas, scale, px, py = letterbox(frame, self.size)
-                out = self.session.run(None, {self.input_name: to_tensor(canvas)})[0]
+                x = to_tensor(canvas)
+                out = (self.trt(x) if self.backend == 'trt'
+                       else self.session.run(None, {self.input_name: x})[0])
                 dets = decode(out, self.names, frame.shape[:2], scale, px, py, self.size,
                               conf, float(self.get_parameter('nms_threshold').value))
             elif self.backend == 'ultralytics':
@@ -143,6 +176,15 @@ class DetectorNode(Node):
                                  'bbox': [int(x1), int(y1), int(x2 - x1), int(y2 - y1)]})
         except Exception as e:      # 한 프레임 실패로 노드가 죽지 않게
             self.get_logger().error(f'inference failed: {e}', throttle_duration_sec=5.0)
+            if self.backend == 'trt':   # 11/16: GPU가 돌다 실패하면 CPU로 바꿔 계속 (YOLO가 멈추지 않게)
+                self._trt_fail = getattr(self, '_trt_fail', 0) + 1
+                if self._trt_fail >= 3:
+                    self.get_logger().error('TensorRT 3번 실패 -> CPU(onnx)로 전환')
+                    self.backend = None
+                    path = self.get_parameter('model_path').value
+                    if path.endswith('.onnx'):
+                        self.trt = None
+                        self._load_onnx(path)
             return
         dt = (time.perf_counter() - t0) * 1000.0
         stamp = header.stamp.sec + header.stamp.nanosec * 1e-9
