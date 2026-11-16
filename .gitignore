@@ -12,3 +12,7 @@ runs/
 bags/
 lane_dataset/
 autorace_images/
+
+# TensorRT 엔진은 기계마다 리모에서 직접 만듦 (tools/build_trt.sh)
+models/*.engine
+models/*.engine.tmp

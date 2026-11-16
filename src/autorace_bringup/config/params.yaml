@@ -201,8 +201,12 @@ detector_node:
     input_size: 640                       # ONNX 고정 입력. 320 사용 시 모델 경로와 함께 변경·재시작
     conf_threshold: 0.7
     # 11/09: 스레드 제한 없이 10Hz로 돌리면 실제 1.8Hz + 차선 노드 절반 속도. 2스레드·5Hz로 제한
-    infer_hz: 5.0
-    ort_threads: 2
+    infer_hz: 5.0                          # CPU일 때
+    ort_threads: 2                         # CPU일 때만 (GPU면 안 씀)
+    # 11/16: GPU(TensorRT). model_path 옆 같은 이름 .engine 있으면 GPU, 없으면 위 CPU. 엔진: bash tools/build_trt.sh
+    use_gpu: true
+    engine_path: ''
+    infer_hz_gpu: 15.0
 
 class_command_node:
   ros__parameters:
