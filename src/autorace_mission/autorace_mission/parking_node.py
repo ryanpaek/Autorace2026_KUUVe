@@ -1502,7 +1502,7 @@ DEFAULTS = {
     'fixed_slow_speed': 0.10,  #   선 25cm 앞부터 이 속도 이하
     'fixed_line_max_mm': 4000.0,   # 주차 모드 시작 뒤 이만큼 가도 선을 못 보면 FAIL_NO_LINE (정지)
     'fixed_pause_sec': 0.3,    # 선에서 멈추는 시간
-    'fixed_move_mm': 1000.0,   # 멈춘 자리부터 직진 거리 (캡틴 실측 104cm -> 11/16 실차 100cm)
+    'fixed_move_mm': 950.0,    # 멈춘 자리부터 직진 거리 (캡틴 실측 104cm -> 11/16 실차 100 -> 95cm)
     'fixed_move_speed': 0.10,
     'fixed_heading_gain': 2.0,     # 직진 중 멈출 때 방향 유지 (1/m per rad)
     'fixed_turn_pause_sec': 0.3,   # 104cm 뒤 멈춤 (끝 presteer_sec 동안 조향 미리 꺾기). 0이면 멈추지 않고 바로 꺾음
