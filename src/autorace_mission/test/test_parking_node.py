@@ -738,7 +738,7 @@ def test_center_check_margin_and_short_pullout():
 # ---- 11/16 캡틴 고정 거리 방식 (turn_ref: fixed) ----
 # 시험 트랙(흰 선 -> 주차 구역 500mm)은 실제 트랙과 달라 직진 거리를 940으로 맞춰 논리만 시험한다.
 # 실제 값 1040은 캡틴이 실제 트랙에서 앞범퍼를 선에 대고 잰 값 (11/16).
-FIXED = {'turn_ref': 'fixed', 'front_stop_mm': 150.0, 'fixed_move_mm': 940.0}
+FIXED = {'turn_ref': 'fixed', 'front_stop_mm': 150.0, 'fixed_move_mm': 940.0, 'fixed_turn_mm': 0.0}   # 시험 트랙은 87도로 끝
 
 
 @pytest.mark.parametrize('r_min', [560.0, 590.0, 620.0, 650.0])
@@ -767,7 +767,7 @@ def test_fixed_turn_mm_ends_turn_early():
 
 
 def test_fixed_defaults_captain_values():
-    assert pn.DEFAULTS['fixed_move_mm'] == 950.0 and pn.DEFAULTS['fixed_line_target_mm'] == 56.0
+    assert pn.DEFAULTS['fixed_move_mm'] == 950.0 and pn.DEFAULTS['fixed_turn_mm'] == 350.0 and pn.DEFAULTS['fixed_line_target_mm'] == 56.0
     assert pn.DEFAULTS['fixed_line_target_mm'] == pn.DEFAULTS['front_bumper_from_axle_mm']
 
 
