@@ -284,7 +284,7 @@ parking_node:
     fixed_first_min_mm: 250.0              # 처음 잡는 주차선은 25cm보다 멀리 보인 것만 (통주행 M4 시작 때 12cm 앞 횡단보도 끝 선 무시)
     fixed_brake_mm: 0.0                    # 정지 명령 뒤 밀리는 거리 (미측정)
     fixed_pause_sec: 0.3
-    fixed_move_mm: 1040.0                  # 캡틴 실측 104cm
+    fixed_move_mm: 1000.0                  # 11/16 실차: 104cm면 조금 더 감 -> 100cm (캡틴)
     fixed_move_speed: 0.10
     fixed_turn_pause_sec: 0.3              # 0이면 멈추지 않고 바로 꺾음 (서보가 늦게 꺾여 원이 커질 수 있음)
     fixed_turn_deg: 87.0                   # 최대 조향 끝 = IMU 87도 (실차는 2~4도 더 돎)

@@ -767,7 +767,7 @@ def test_fixed_turn_mm_ends_turn_early():
 
 
 def test_fixed_defaults_captain_values():
-    assert pn.DEFAULTS['fixed_move_mm'] == 1040.0 and pn.DEFAULTS['fixed_line_target_mm'] == 56.0
+    assert pn.DEFAULTS['fixed_move_mm'] == 1000.0 and pn.DEFAULTS['fixed_line_target_mm'] == 56.0
     assert pn.DEFAULTS['fixed_line_target_mm'] == pn.DEFAULTS['front_bumper_from_axle_mm']
 
 
