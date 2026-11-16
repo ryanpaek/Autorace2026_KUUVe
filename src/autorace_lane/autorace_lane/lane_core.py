@@ -250,6 +250,10 @@ class LaneParams:
     floor_letter_hole_mm2: float = 600.0    # 구멍으로 셀 최소 넓이 (점선·잡음 구멍 제외)
     floor_letter_max_fill: float = 0.85     # 덩어리 상자 중 흰 비율이 이보다 크면 글자 아님 (가로선·막대)
     stopline_fill: float = 0.6        # 차로 안쪽 폭 중 흰 화소 비율이 이 이상이면 가로선
+    # 11/16: 비스듬한 가로선 (곡선 돌자마자 나오는 라바콘 시작선). 0°로 못 찾으면 띠를 ±이 각도까지 기울여(전단) 다시 찾는다.
+    #   0°에서 선이 잡히면 예전과 똑같다. 거리는 차로 가운데 열에서 잰다. 0 = 끔 (예전: 40 mm 선 약 ±11°까지)
+    stopline_max_angle_deg: float = 15.0
+    stopline_angle_step_deg: float = 2.5
     stopline_min_mm: float = 8.0
     stopline_max_mm: float = 80.0
     crosswalk_look_mm: float = 150.0  # 가로선 바로 뒤 이 거리 안에서 횡단보도 막대를 찾는다
@@ -400,6 +404,7 @@ class LaneOutput:
         d['circle_r_mm'] = round(cl.circle[2]) if cl is not None and cl.circle is not None else None
         d['inner'] = self.debug.get('inner')      # 코너 안쪽 선 기준이면 'L'/'R'
         d['realign_deg'] = self.debug.get('realign_deg')   # 크게 기운 노란 선으로 방향 바로잡는 중이면 그 선 각도
+        d['stopline_angle_deg'] = self.debug.get('stopline_angle_deg')  # 가로선을 찾은 기울기 (0 = 예전처럼 수평)
         return d
 
 
@@ -1239,14 +1244,31 @@ def detect_floor_letter(bev_white: np.ndarray, cfg: 'BevConfig', p: 'LaneParams'
     return best
 
 
+def _shear_band(band: np.ndarray, ccol: float, angle_deg: float, cfg: BevConfig) -> np.ndarray:
+    """띠를 세로로 전단: angle_deg만큼 기운 가로선이 수평이 되게 (가운데 열 ccol은 그대로)."""
+    if angle_deg == 0.0:
+        return band
+    a = math.tan(math.radians(angle_deg)) * cfg.mm_per_px_x / cfg.mm_per_px_y
+    M = np.array([[1.0, 0.0, 0.0], [a, 1.0, -a * ccol]], np.float32)
+    h, w = band.shape[:2]
+    out = cv2.warpAffine(band.astype(np.uint8), M, (w, h), flags=cv2.INTER_NEAREST,
+                         borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+    return out > 0
+
+
 def detect_stoplines(bev_white: np.ndarray, center_col: float, cfg: BevConfig,
-                     p: LaneParams) -> List[Tuple[float, bool]]:
+                     p: LaneParams, max_angle_deg: Optional[float] = None,
+                     info: Optional[dict] = None) -> List[Tuple[float, bool]]:
     """차로 안쪽을 가로지르는 흰 띠를 찾는다.
 
     반환: [(앞바퀴 -> 띠의 가까운 가장자리 거리 mm, 바로 뒤에 횡단보도 막대가 있는지), ...]
     가까운 순. 미션 시작선과 정지선은 둘 다 흰 가로선이라, 횡단보도 막대가 뒤따르는지로
     정지선을 가린다. 카메라가 못 보는 가까운 구간(BEV 맨 아래 행보다 가까운 곳)은
     미션 쪽에서 오도메트리로 이어 받아야 한다.
+
+    max_angle_deg (None이면 p.stopline_max_angle_deg): 0°에서 가로선 행이 하나도 없으면 띠를 ±이 각도까지
+    기울여 가장 잘 맞는 각도로 다시 찾는다 (가로선은 서로 나란하므로 한 프레임에 각도 하나).
+    거리는 차로 가운데 열 기준. info에 'angle_deg'(쓴 각도)를 넣는다.
     """
     h, w = bev_white.shape[:2]
     half = 0.35 * p.lane_width_mm / cfg.mm_per_px_x
@@ -1256,6 +1278,25 @@ def detect_stoplines(bev_white: np.ndarray, center_col: float, cfg: BevConfig,
         return []
     band = bev_white[:, c0:c1] > 0
     fill = band.mean(axis=1)
+    max_a = p.stopline_max_angle_deg if max_angle_deg is None else max_angle_deg
+    used = 0.0
+    if max_a > 0.0 and not (fill >= p.stopline_fill).any() and band.any():
+        step = max(0.5, float(p.stopline_angle_step_deg))
+        # 각도 추정은 max_a + 10°까지 해 보고, 가장 잘 맞는 각도가 max_a 안일 때만 쓴다
+        # (0°도 원래 ±10° 남짓은 잡으므로 max_a까지만 기울이면 max_a + 10°짜리 선도 잡혀 버림)
+        n = int(math.floor((max_a + 10.0) / step + 1e-6))
+        best = (float(fill.max()), 0.0, band, fill)
+        for k in range(1, n + 1):
+            for sgn in (1.0, -1.0):
+                a = sgn * k * step
+                b = _shear_band(band, center_col - c0, a, cfg)
+                f = b.mean(axis=1)
+                if float(f.max()) > best[0] + 0.02:          # 조금이라도 나아야 (같으면 작은 각도)
+                    best = (float(f.max()), a, b, f)
+        if best[0] >= p.stopline_fill and abs(best[1]) <= max_a + 0.5 * step:
+            _, used, band, fill = best
+    if info is not None:
+        info['angle_deg'] = used
     # 행마다 흰 구간(막대) 개수
     edges = np.diff(np.pad(band.astype(np.int8), ((0, 0), (1, 1))), axis=1)
     segments = (edges == 1).sum(axis=1)
@@ -1771,8 +1812,10 @@ class LaneFollower:
             center_col = cfg.vehicle_col
             if cl is not None:
                 center_col = cfg.vehicle_col + float(np.polyval(cl.coeffs, cl.y_near)) / cfg.mm_per_px_x
-            lines = detect_stoplines(bev_white, center_col, cfg, p)
+            sl_info = {}
+            lines = detect_stoplines(bev_white, center_col, cfg, p, info=sl_info)
             out.stoplines_mm = [d for d, _ in lines]
+            out.debug['stopline_angle_deg'] = sl_info.get('angle_deg', 0.0) if lines else None
             out.crosswalk_lines_mm = [d for d, bars in lines if bars]
             if p.floor_letter:
                 fl = detect_floor_letter(bev_white, cfg, p)
@@ -1780,7 +1823,7 @@ class LaneFollower:
                     out.floor_letter, out.floor_letter_mm, out.floor_letter_off_mm = fl
             # 주차 칸 끝 선: 흰+노란 마스크, 차 정면 기준 (칸 안에서는 차선 중심 추정이 엉뚱할 수 있음)
             both = bev_white if raw_lane is None else cv2.bitwise_or(bev_white, raw_lane)
-            out.end_lines_mm = [d for d, _ in detect_stoplines(both, cfg.vehicle_col, cfg, p)]
+            out.end_lines_mm = [d for d, _ in detect_stoplines(both, cfg.vehicle_col, cfg, p, max_angle_deg=0.0)]
         return out
 
     # --- 선 동일성 (프레임 간) --------------------------------------------------
