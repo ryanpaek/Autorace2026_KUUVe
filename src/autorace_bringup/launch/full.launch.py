@@ -30,13 +30,14 @@ def _inc(pkg, *path, args=None, condition=None):
 
 def generate_launch_description():
     sensors = IfCondition(LaunchConfiguration('sensors'))
-    passed = ('start_state', 'parking', 'm7_avoid', 'use_fork_node', 'use_detector', 'use_class_commands',
+    passed = ('start_state', 'parking', 'm7_avoid', 'm7_impl', 'use_fork_node', 'use_detector', 'use_class_commands',
               'manual', 'chime', 'debug_control')
     return LaunchDescription([
         DeclareLaunchArgument('sensors', default_value='true'),
         DeclareLaunchArgument('start_state', default_value='WAIT_START'),
         DeclareLaunchArgument('parking', default_value='true'),
         DeclareLaunchArgument('m7_avoid', default_value='true'),
+        DeclareLaunchArgument('m7_impl', default_value='replay'),   # replay = 녹화 재생 (11/17) / legacy = 예전 회피 노드
         DeclareLaunchArgument('use_fork_node', default_value='true'),
         DeclareLaunchArgument('use_detector', default_value='true'),
         DeclareLaunchArgument('use_class_commands', default_value='true'),
