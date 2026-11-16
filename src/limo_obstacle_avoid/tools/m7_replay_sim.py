@@ -208,18 +208,39 @@ def main():
     ap.add_argument('--left')
     ap.add_argument('--right')
     ap.add_argument('--seeds', type=int, default=3)
+    ap.add_argument('--trigger', type=float, default=None, help='트리거 거리 mm (기본: 녹화 파일이면 546, 모형이면 700)')
+    ap.add_argument('--check', action='store_true',
+                    help='녹화 경로만 점검: 가운데 차로 장애물 앞 trigger에서 시작했을 때 차체와 장애물 최소 간격')
     a = ap.parse_args()
+    global TRIGGER_MM
     if a.left or a.right:
         left, src_l = load_change(a.left, a.right, +1, LW)
         right, src_r = load_change(a.right, a.left, -1, LW)
         print(f'녹화: 왼쪽 {src_l} / 오른쪽 {src_r}')
     else:
         random.seed(99)
-        global TRIGGER_MM
         left = record_left()
         TRIGGER_MM = 700.0   # 모형 녹화(최대 조향 S자, 조향 지연·회전 90%)는 546 mm에서 시작하면 장애물 모서리에 닿음 -> 700
         right = mirror(left)
         print(f'녹화(모형): 왼쪽 S자 길이 {left[0].length:.2f} m, 끝 y {left[0].y[-1]:+.3f} m')
+    if a.trigger is not None:
+        TRIGGER_MM = a.trigger
+    if a.check:
+        from limo_obstacle_avoid.m7_replay_core import fit_lateral
+        obs = rect(1.0 + OBS_L / 2, 0.0, OBS_L, OBS_W)
+        x0 = 1.0 - 0.10 - TRIGGER_MM / 1000.0
+        for name, segs in (('왼쪽', left), ('오른쪽', right)):
+            segs, k = fit_lateral(segs, LW)
+            best = 9.0
+            for g in segs:
+                for x, y, h in zip(g.x, g.y, g.h):
+                    c = (x0 + x + (FRONT - REAR) / 2 * math.cos(h), y + (FRONT - REAR) / 2 * math.sin(h))
+                    best = min(best, poly_dist(rect(c[0], c[1], FRONT + REAR, 2 * HALF, h), obs))
+            need = ReplayParams().hit_margin
+            print(f'{name}: 장애물(LIMO {OBS_L}x{OBS_W} m) 앞 {TRIGGER_MM:.0f} mm에서 시작 -> 차체 최소 간격 {100 * best:.1f} cm '
+                  + ('OK' if best > need + 0.01 else f'<- 너무 가까움: 차로 고를 때 막힌 걸로 봄 (여유 {100 * need:.0f} cm). '
+                     f'trigger_mm를 늘리거나 hit_margin을 줄이거나 더 일찍 꺾게 다시 녹화'))
+        return
     if a.v is not None:
         r = run(LAYOUTS[a.v], left, right, seed=0, verbose=True)
         print(r)

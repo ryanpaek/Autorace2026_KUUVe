@@ -188,3 +188,56 @@ def test_node_runs_and_publishes_float_twist(monkeypatch):
     assert cmds and isinstance(cmds[-1].linear.x, float)
     assert n.pubs['/avoid/active'][-1].data is True
     assert any(isinstance(m.data, str) and '"state": "RUN"' in m.data for m in n.pubs['/avoid/state'])
+
+
+def _m(**kw):
+    m = M7Replay(ReplayParams(**kw), default_change(1), default_change(-1))
+    m.start()
+    m.pts = []
+    return m
+
+
+def _lane(off_mm=0.0, h=0.0, lid=None, left=None, right=None, status='BOTH'):
+    return {'status': status, 'offset_mm': off_mm, 'heading_rad': h, 'lane_id': lid,
+            'line_left': left, 'line_right': right}
+
+
+Y = {'color': 'yellow', 'dashed': False}
+W = {'color': 'white', 'dashed': True}
+WS = {'color': 'white', 'dashed': False}   # 트랙 밖 밝은 바닥을 흰 실선으로 잡은 것
+
+
+def test_camera_fixes_lateral_offset():
+    m = _m()
+    for _ in range(30):
+        m.on_lane(_lane(off_mm=-40.0, left=W, right=W, lid=0))     # 차로 중심이 오른쪽 4 cm = 차가 왼쪽 4 cm
+    assert m.pose()[1] == pytest.approx(0.04, abs=0.005)
+
+
+def test_camera_rejects_wrong_line_types():
+    m = _m(start_lane=1)
+    for _ in range(30):
+        m.on_lane(_lane(off_mm=100.0, left=WS, right=Y))          # 1차선인데 (흰 실선, 노란선) = 노란선 밖을 차로로 봄
+    assert abs(m.pose()[1] - 0.52) < 0.06 or m.pose()[1] > 0.52   # 차로 안쪽으로 끌려가지 않음
+    assert m.cam_type_rej + m.outside_n >= 0
+
+
+def test_outside_yellow_moves_estimate_out():
+    m = _m(start_lane=1)
+    for _ in range(3):
+        m.on_lane(_lane(off_mm=0.0, left=WS, right=Y))
+    assert m.pose()[1] > 0.52 + 0.25            # 노란선 바깥으로 봄 -> 차로 중심으로 돌아가는 조향이 나옴
+
+
+def test_lane_id_corrects_lane_after_votes():
+    m = _m()
+    for _ in range(6):
+        m.on_lane(_lane(off_mm=0.0, lid=-1, left=W, right=Y))
+    assert m.lane == -1 and m.pose()[1] == pytest.approx(-0.52, abs=0.03)
+
+
+def test_relock_when_far_off_consistently():
+    m = _m()
+    for _ in range(12):
+        m.on_lane(_lane(off_mm=-200.0, left=W, right=W, lid=0))    # 20 cm 차이 (문 15 cm 밖)
+    assert m.pose()[1] > 0.08

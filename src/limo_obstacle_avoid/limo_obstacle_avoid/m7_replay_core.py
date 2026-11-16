@@ -100,6 +100,7 @@ class ReplayParams:
     cam_row: float = 0.55
     cam_id_need: int = 5                # 차선 노드 lane_id가 최근 7번 중 이만큼 같으면 차로 번호를 그걸로 (CRUISE 때만)
     cam_id_window: int = 7
+    cam_relock_n: int = 8               # 문(cam_gate) 밖 차이가 같은 쪽으로 이만큼 연속이면 반 반영
 
 
 def _straight(y: float, x0: float, x1: float, direction: int = 1) -> Path:
@@ -132,19 +133,30 @@ def mirror(segs: List[Path]) -> List[Path]:
 def load_change(path_file: Optional[str], other_file: Optional[str], direction: int,
                 lane_width: float) -> Tuple[List[Path], str]:
     """녹화 경로 읽기. 없으면 반대쪽 녹화의 거울상, 그것도 없으면 기본 S자. (구간들, 출처 설명)"""
+    notes = []
     for f, mir in ((path_file, False), (other_file, True)):
         if not f:
             continue
+        mode = 'fused'
         try:
             segs, _ = load_segments(f, 'fused')
         except (OSError, ValueError):
             try:
                 segs, _ = load_segments(f, 'odom')
+                mode = 'odom (예전 기록기: IMU 열 없음 -> 커브 방향 3~12% 틀릴 수 있음, 다시 녹화 권장)'
             except (OSError, ValueError):
                 continue
-        if segs and sum(g.length for g in segs) > 0.2:
-            return (mirror(segs) if mir else segs), (f'{f} 거울상' if mir else f)
-    return default_change(direction, lane_width), '기본 S자 (녹화 파일 없음)'
+        if not segs or sum(g.length for g in segs) <= 0.2:
+            continue
+        if mir:
+            segs = mirror(segs)
+        ye = segs[-1].y[-1] - segs[0].y[0]
+        if ye * direction < 0.5 * lane_width:
+            notes.append(f'{f}{" 거울상" if mir else ""}은 끝 옆 위치 {ye:+.2f} m라 '
+                         f'{"왼쪽" if direction > 0 else "오른쪽"} 동작이 아님 -> 안 씀')
+            continue
+        return segs, f'{f}{" 거울상" if mir else ""} [{mode}]' + (' / ' + '; '.join(notes) if notes else '')
+    return default_change(direction, lane_width), '기본 S자 (쓸 녹화 파일 없음)' + (' / ' + '; '.join(notes) if notes else '')
 
 
 def fit_lateral(segs: List[Path], lane_width: float) -> Tuple[List[Path], float]:
@@ -250,6 +262,11 @@ class M7Replay:
         self.blocked_since = None
         self.stop_why = None
         self.cam_n = 0
+        self.cam_type_rej = 0
+        self.cam_last_dy = None
+        self.outside_n = 0
+        self.relock = 0
+        self.relock_sign = 0
         self.last_v = 0.0
         self.why = ''
         self.n_exec = 0
@@ -323,40 +340,89 @@ class M7Replay:
             out[k] = near
         return out
 
+    def _types_ok(self, lane: dict, k: int) -> bool:
+        """카메라가 본 양쪽 선 종류가 차로 k와 맞나 (모르면 맞다고 봄).
+        1차선(+1): 왼쪽 노란 실선 / 오른쪽 흰 점선, 2차선: 양쪽 흰 점선, 3차선(-1): 왼쪽 흰 점선 / 오른쪽 노란 실선.
+        트랙 밖 밝은 바닥을 흰 선으로 잡아 (바닥, 노란선)을 한 차로로 보는 경우(11/14)를 거름."""
+        n = self.p.num_side_lanes
+        for key, outer in (('line_left', k >= n), ('line_right', k <= -n)):
+            ln = lane.get(key)
+            if not isinstance(ln, dict) or ln.get('color') not in ('yellow', 'white'):
+                continue
+            if outer and ln['color'] != 'yellow':
+                return False
+            if not outer and ln['color'] == 'yellow':
+                return False
+        return True
+
+    def _outside(self, lane: dict, k: int) -> bool:
+        """바깥 차로인데 '안쪽'에 노란 실선이 보이면 차가 노란선 밖(트랙 밖)에 있음."""
+        n = self.p.num_side_lanes
+        key = 'line_right' if k == n else ('line_left' if k == -n else None)
+        ln = lane.get(key) if key else None
+        return isinstance(ln, dict) and ln.get('color') == 'yellow' and not ln.get('dashed')
+
     def on_lane(self, lane: dict):
-        """차선 노드 /lane/status: 양쪽 선이 보이면 옆 위치·방향 보정, 차로 번호 확인."""
+        """차선 노드 /lane/status: 양쪽 선이 보이면 옆 위치·방향 보정, 차로 번호 확인.
+        재생(EXEC) 중엔 안 씀 (비스듬한 차선은 틀리기 쉬움, 재생은 odom+IMU로 충분)."""
         p = self.p
         if not p.cam_fix or not lane or self.state in ('IDLE', 'DONE', 'EXEC'):
             return
-        lid = lane.get('lane_id')
-        self.cam_ids = (self.cam_ids + [lid if lid in (-1, 0, 1) else None])[-p.cam_id_window:]
-        off, h = lane.get('offset_mm'), lane.get('heading_rad')
+        x, y, psi = self.pose()
+        k = self.nearest_lane(y)
+        h = lane.get('heading_rad')
+        # 노란선 밖: 바깥 차로라 믿는데 안쪽 선이 노란 실선 (3번 연속) -> 옆 위치를 노란선 바깥으로
+        if h is not None and abs(math.degrees(float(h))) <= p.cam_max_deg and self._outside(lane, k):
+            self.outside_n += 1
+            if self.outside_n >= 3:
+                sgn = 1.0 if k > 0 else -1.0
+                y_out = sgn * (self.center(abs(k)) + p.lane_width / 2 + 0.05)
+                if (y_out - y) * sgn > 0:
+                    self._shift(ddy=y_out - y)
+                    self.events.append(f'[x={x:.2f}] 노란선 밖으로 봄 -> 옆 위치 {100 * (y_out - y):+.0f} cm (차로 중심으로 돌아감)')
+                self.outside_n = 0
+            return
+        self.outside_n = 0
+        off = lane.get('offset_mm')
         if lane.get('status') != 'BOTH' or lane.get('low_conf') or off is None or h is None:
             return
         h = float(h)
         if abs(math.degrees(h)) > p.cam_max_deg:
             return
-        x, y, psi = self.pose()
-        k = self.nearest_lane(y)
-        # 카메라 차로 번호가 여러 번 같고 지금 추정과 다르면 그 차로로 (CRUISE에서만)
+        # 차로 번호: 양쪽 선이 반듯하게 보일 때만 모음, 여러 번 같고 지금 추정과 다르면 그 차로로 (CRUISE에서만)
+        lid = lane.get('lane_id')
+        self.cam_ids = (self.cam_ids + [lid if lid in (-1, 0, 1) and abs(math.degrees(h)) <= 8.0 else None])[-p.cam_id_window:]
         if self.state == 'CRUISE':
             for cand in (-1, 0, 1):
                 if cand != k and self.cam_ids.count(cand) >= p.cam_id_need:
                     self._shift(ddy=self.center(cand) - self.center(k))
-                    self.events.append(f'카메라 차로 번호 {cand} -> 차로 {k} => {cand}로 고침')
+                    self.events.append(f'[x={x:.2f}] 카메라 차로 번호 {cand} (추정 {k}) -> {cand}차로로 고침')
                     self.lane = self.target = cand
                     self.cam_ids.clear()
                     x, y, psi = self.pose()
                     k = cand
                     break
+        if not self._types_ok(lane, k):
+            self.cam_type_rej += 1
+            return
         offm = float(off) / 1000.0
         y_meas = self.center(k) - offm * math.cos(h) + p.cam_row * math.sin(h)
         dy = y_meas - y
         dpsi = wrap(-h - psi)
         if abs(dy) > p.cam_gate:
+            # 추정이 많이 틀어져 문 밖: 같은 쪽으로 계속(cam_relock_n번) 크게 나오면 반만 받아들임 (오래 놓쳐 벌어진 것 복구)
+            sign = 1 if dy > 0 else -1
+            self.relock = self.relock + 1 if self.relock_sign == sign and abs(dy) < 0.5 * p.lane_width else 1
+            self.relock_sign = sign
+            if self.relock >= p.cam_relock_n:
+                self._shift(ddy=0.5 * dy)
+                self.events.append(f'[x={x:.2f}] 카메라와 옆 위치 {100 * dy:+.0f} cm 차이가 계속 -> 반 반영')
+                self.relock = 0
             return
+        self.relock = 0
         self._shift(ddy=p.cam_gain_y * dy, ddpsi=(p.cam_gain_psi * dpsi if abs(math.degrees(dpsi)) <= 5.0 else 0.0))
         self.cam_n += 1
+        self.cam_last_dy = dy
 
     # ---------- 켜기/끄기 ----------
     def start(self):
@@ -695,5 +761,7 @@ class M7Replay:
                 'now_lane': self.lane, 'target': self.target, 'exit_pref': self.exit_pref,
                 'gaps_mm': {str(k): (None if self.gap(k) is None else round(1000 * self.gap(k))) for k in self.obs},
                 'why': self.why, 'stop': self.stop_why, 'n_exec': self.n_exec, 'cam_fix_n': self.cam_n,
+                'cam_type_rej': self.cam_type_rej,
+                'cam_dy_cm': None if self.cam_last_dy is None else round(100 * self.cam_last_dy, 1),
                 'align': None if not self.align else f'{self.align["leg"]}{self.align["cycle"]}',
                 'lane_why': {'reason': self.why}}
