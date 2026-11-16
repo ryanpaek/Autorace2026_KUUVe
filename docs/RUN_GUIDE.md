@@ -42,7 +42,7 @@ ros2 topic echo /mission/state --once   # WAIT_START, dist_mm 0 근처
 ## 2. 녹화 → 출발 → 정지
 ```bash
 # 녹화 (출발 전, 다른 터미널). -a 금지: depth 압축 구독 때문에 카메라 드라이버가 죽은 적 있음 (11/09)
-ros2 bag record -o 1110_10_full /camera/color/image_raw/compressed /scan /odom /imu /cmd_vel /lane/cmd_vel /lane/status /mission/state /perception/detections /perception/commands /obstacle/state /avoid/state /fork/state /parking/state
+ros2 bag record -o 1110_10_full /camera/color/image_raw/compressed /scan /odom /imu /cmd_vel /lane/cmd_vel /lane/status /mission/state /perception/detections /perception/commands /obstacle/state /avoid/state /fork/state /parking/state /system/usage
 # 출발 (한 번만)
 ros2 topic pub --once /mission/start std_msgs/msg/Empty
 # 비상 정지 / 해제

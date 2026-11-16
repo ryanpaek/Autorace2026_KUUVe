@@ -41,6 +41,7 @@ JSON_TOPICS = {
     'mission': '/mission/state', 'preview': '/route/preview', 'lane': '/lane/status',
     'commands': '/perception/commands', 'detections': '/perception/detections',
     'parking': '/parking/state', 'obstacle': '/obstacle/state', 'fork': '/fork/state',
+    'sys': '/system/usage',       # 11/16: 연산량 (sys_monitor)
 }
 LANE_HALF = 250.0
 
@@ -412,6 +413,9 @@ img{width:100%;border-radius:4px;margin-top:4px}.stale{color:var(--bad)}
 <h3>차</h3><div class="kv" id="car"></div>
 <h3>인식</h3><div class="kv" id="perc"></div>
 <h3>미션 노드</h3><div class="kv" id="nodes"></div>
+<h3>연산량 <span id="sysage" style="font-weight:400;font-size:12px;color:var(--mute)"></span></h3><div id="sys" style="font-size:12px"><span style="color:var(--mute)">(sys_monitor 없음)</span></div>
+<canvas id="syschart" width="300" height="60" style="width:100%;height:60px;display:block;margin-top:4px"></canvas>
+<div style="font-size:11px;color:var(--mute)">최근 60초: <span style="color:#4da3ff">━ CPU 전체</span> <span style="color:#5fd38d">━ GPU</span> <span style="color:#ffb347">━ 차선 Hz/30</span></div>
 <h3>차선 영상 (BEV)</h3><img id="lane" style="display:none"><div id="noimg" style="color:var(--mute)">(차선 디버그 영상 없음)</div>
 <h3>상태 기록</h3><div id="ev"></div>
 <div style="color:var(--mute);font-size:11px;margin-top:8px">카메라 위 그림 — 점: 라이다(바닥 닿는 곳, 빨강 가까움) · 초록 실선: 명령 궤적 · 노랑: 카메라 차로 가운데 · 하늘 점선: 도면 예상 차로 가운데 · 분홍: 흰 가로선 · 상자: YOLO(실선 = 확정)</div></div>
@@ -549,8 +553,23 @@ function renderWhy(w,m){if(!w){$('why').innerHTML='<div class="big">'+(m.state||
   (w.because.length?`<h3>왜</h3><ul>${w.because.map(x=>`<li>${esc(x)}</li>`).join('')}</ul>`:'')+
   (w.next.length?`<h3>다음 단계로 넘어가는 조건 (하나라도)</h3>`+w.next.map(n=>`<div class="cond"><span class="${n.met?'met':''}">${n.met?'✔':'○'}</span><span>${esc(n.text)}</span><span style="color:var(--mute)">${esc(n.value)}</span>`+
    (n.progress!=null?`<div class="bar"><i style="width:${n.progress*100}%"></i></div>`:'')+'</div>').join(''):'')}
+const SYSH=[];
+function renderSys(u,age){if(!u){return}
+ $('sysage').innerHTML=age!=null&&age>2?`<span class=stale>${age}초 전</span>`:'';
+ const r=u.rates||{},t=u.temp||{},bar=(v,max,c)=>`<span style="display:inline-block;height:8px;width:${Math.min(100,100*v/max).toFixed(0)}%;max-width:100%;background:${c};border-radius:2px;vertical-align:middle"></span>`;
+ const tc=t.cpu??t['cpu-therm'],tg=t.gpu??t['gpu-therm'];
+ let h=`<div><b>CPU</b> ${u.cpu_total}% · <b>GPU</b> ${u.gpu_pct??'-'}%${u.gpu_mhz?' @'+u.gpu_mhz+'MHz':''} · <b>메모리</b> ${(u.mem_used_mb/1000).toFixed(1)}/${(u.mem_total_mb/1000).toFixed(1)} GB</div>`;
+ h+=`<div>온도 CPU ${tc??'-'}° GPU ${tg??'-'}° · 전력 ${u.power_mw?(u.power_mw/1000).toFixed(1)+' W':'-'} · 차선 ${r.lane_hz??'-'} Hz · YOLO ${r.yolo_hz??'-'} Hz${r.yolo_ms!=null?' ('+r.yolo_ms+' ms/장)':''}</div>`;
+ h+='<div style="display:flex;gap:2px;margin:3px 0">'+(u.cpu_cores||[]).map((c,i)=>`<div title="코어 ${i}" style="flex:1;height:14px;background:var(--line,#333);position:relative"><div style="position:absolute;bottom:0;left:0;right:0;height:${c==null?0:c}%;background:#4da3ff"></div></div>`).join('')+'</div>';
+ h+='<table style="width:100%;border-collapse:collapse">'+Object.entries(u.nodes||{}).map(([k,v])=>`<tr><td style="white-space:nowrap;padding-right:6px">${esc(k)}</td><td style="width:55%">${bar(v.cpu,100,v.cpu>80?'#ff6b6b':'#4da3ff')}</td><td style="text-align:right;white-space:nowrap">${v.cpu}% · ${v.mem_mb}MB</td></tr>`).join('')+'</table>';
+ h+='<div style="color:var(--mute);font-size:11px">노드 %는 코어 하나 = 100% (코어 수만큼까지 가능)</div>';
+ $('sys').innerHTML=h;
+ if(!SYSH.length||SYSH[SYSH.length-1].s!==u.stamp){SYSH.push({s:u.stamp,c:u.cpu_total,g:u.gpu_pct,l:r.lane_hz});while(SYSH.length>120)SYSH.shift()}
+ const cv=$('syschart'),g=cv.getContext('2d'),W=cv.width,H=cv.height;g.clearRect(0,0,W,H);
+ const line=(key,col,sc)=>{g.strokeStyle=col;g.lineWidth=1.5;g.beginPath();SYSH.forEach((p,i)=>{const v=p[key];if(v==null)return;const x=W*i/119,y=H-H*Math.min(1,v/sc);i?g.lineTo(x,y):g.moveTo(x,y)});g.stroke()};
+ line('c','#4da3ff',100);line('g','#5fd38d',100);line('l','#ffb347',30)}
 async function poll(){try{const r=await fetch('/state');S=await r.json();const d=S.data,m=d.mission||{},rt=m.route||{},ln=d.lane||{},a=S.age;
- renderWhy(S.why,m);soundOnState(m);renderCtl();
+ renderWhy(S.why,m);soundOnState(m);renderCtl();renderSys(d.sys,a.sys);
  const old=k=>a[k]==null?'<span class=stale>없음</span>':(a[k]>1.5?`<span class=stale>${a[k]}초 전</span>`:'');
  kv('car',{'도면 위치 s':rt.s_mm!=null?rt.s_mm+' mm '+old('mission'):'-','다음 선':rt.next?`${rt.next} (${rt.next_in_mm} mm)`:'-','마지막 맞춤':j(rt.last_fix),
   '자세':S.pose?(S.pose.ok?'차선으로 확인':'<span class=fb>오도메트리로 추정</span>'):'-','차선 맞춤':S.pose?esc(S.pose.lane_fix||'-'):'-',

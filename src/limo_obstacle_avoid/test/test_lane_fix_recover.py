@@ -489,3 +489,19 @@ def test_rollback_reverses_with_opposite_10_percent_steering():
     assert v < 0.0
     assert k_rev == pytest.approx(-0.10 * 1.50, abs=1e-6)               # 반대 방향(-), 10% 크기
 
+
+
+def test_lane_id_inlane_fixes_offset_in_same_lane():
+    """11/16 (1116_01 M7): 추정 -0.30 m인데 카메라 선 종류는 3차선(-1) + 차로 가운데(offset 0) -> 반씩 -0.52 쪽으로."""
+    pl = running(-0.30)
+    pl.target = -1
+    lane = {'status': 'BOTH', 'offset_mm': 0.0, 'heading_rad': 0.0, 'low_conf': False, 'lane_id': -1}
+    for _ in range(10):
+        pl._lane_id_fix(lane)
+    assert abs(pl.pose.y - (-0.52)) < 0.08
+    assert pl.status()['lane_id_fix_n'] >= 1
+    other = running(-0.30)
+    other.target = 0                                   # 다른 차로로 가는 중이면 안 건드림
+    for _ in range(10):
+        other._lane_id_fix(lane)
+    assert abs(other.pose.y + 0.30) < 1e-6

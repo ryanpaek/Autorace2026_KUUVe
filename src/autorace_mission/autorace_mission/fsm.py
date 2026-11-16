@@ -132,6 +132,11 @@ DEFAULT_PARAMS = {
     'm1_force_ld_mm': 350.0,
     'm1_force_end_deg': 85.0,
     'm1_force_tol_mm': 70.0,
+    'lane_first': True,              # 11/16: 강제 경로(합류 S자·라바콘 뒤 원호)는 선을 놓쳤을 때만, 선이 보이면 차선 주행
+    'lane_first_lost_frames': 5,     #   이만큼 연속으로 선을 놓쳐야 강제 경로로
+    'fork_normal': True,             # 11/16: 갈래 안(섬 앞 끝 + fork_normal_after_mm)부터 양쪽 선 보통 차선 모드
+    'fork_normal_after_mm': 300.0,
+    'fork_normal_after_dist_mm': 700.0,   #   도면 위치가 없으면 갈림길 시작부터 이 거리 뒤
     'm2_merge': True,
     'm2_merge_before_end_mm': 500.0,   # 섬 왼쪽 끝(m2_island_end)보다 이만큼 앞에서 시작 (자기 차로 안에서 먼저 안쪽으로)
     'm2_merge_from_tip_mm': 1245.0,    # 도면 위치가 없을 때: M2 시작(섬 앞 끝 근처)부터 이만큼 가서 시작 (섬 길이 1745 - 500)
@@ -922,6 +927,14 @@ class MissionFSM:
                                 if isinstance(tip, (int, float)) else 0.0)
         mode = 'left_only' if self.fork_choice == 'A' else 'right_only'
         _, db = self._since(inp, sub=True)
+        if self.p.get('fork_normal', True):
+            # 11/16: 섬 앞 끝을 지나 갈래 안에 들어오면 양쪽 선(바깥선 + 섬 선)을 다 보는 보통 차선 모드.
+            #   1116_01 리플레이: 한쪽 선 모드는 갈래 48%·합류 굽은 곳 76% 선 없음 -> normal은 13%·14%
+            past = self._past(inp, 'm7_island_tip', self.p.get('fork_normal_after_mm', 300.0))
+            if past is None:
+                past = db >= self.p.get('fork_normal_after_dist_mm', 700.0)
+            if past:
+                mode = 'normal'
         merge_cmd = self._m2_merge(inp, db)
         end = None
         if self.p.get('m2_exit', True):
@@ -937,6 +950,18 @@ class MissionFSM:
         if merge_cmd is not None:
             return merge_cmd
         return Command('lane', self._lane(self.p['approach_speed'], mode, **self._fork_cfg(inp, mode)))
+
+    def _lane_first(self, inp) -> bool:
+        """11/16: 선이 보이면 강제 경로(IMU heading) 대신 차선 주행 (lane_first).
+
+        1116_01: 라바콘 뒤 코너·합류 S자에서 차선 노드가 선을 보고 있었는데도(L/R/BOTH) 강제 원호·S자를 따라가다
+        크게 돌아 출발선 체커 쪽을 봄. 선을 lane_first_lost_frames 연속으로 놓쳤을 때만 강제 경로를 쓴다."""
+        if not self.p.get('lane_first', True):
+            return False
+        lane = inp.lane or {}
+        good = lane.get('status') in ('BOTH', 'L', 'R') and not lane.get('low_conf')
+        self._lf_bad = 0 if good else getattr(self, '_lf_bad', 0) + 1
+        return self._lf_bad < self.p.get('lane_first_lost_frames', 5)
 
     def _m2_merge(self, inp, db: Optional[float] = None) -> Optional[Command]:
         """A/B 뒤 합류: 도면 규격으로 강제 S자 (m2_merge 설명). 하는 중이면 명령, 아니면 None."""
@@ -994,6 +1019,10 @@ class MissionFSM:
         head = max(-lim, min(lim, head))
         yaw_ref = m['axis'] + head
         yaw_ref = math.atan2(math.sin(yaw_ref), math.cos(yaw_ref))
+        if self._lane_first(inp):
+            # 선이 보이면 S자 위치 계산은 계속(선을 놓치면 이어서 씀)하고 조향은 차선으로
+            return Command('lane', self._lane(p['approach_speed']),
+                           note=f'M2 merge {u:.0f}/{L:.0f}mm by lane (y {m["y"]:+.0f}mm)')
         return Command('lane', self._lane(p['approach_speed'], 'heading', yaw_ref=round(yaw_ref, 4)),
                        note=f'M2 merge {u:.0f}/{L:.0f}mm y {m["y"]:+.0f}mm')
 
@@ -1171,7 +1200,7 @@ class MissionFSM:
         """M2·합류 한쪽 선 모드에 같이 넘길 차선 설정: 좁은 폭(섬 쪽 선에서 멀리), 선 놓치면 찾기, 붙잡을 직선 방향"""
         p = self.p
         kw = {}
-        if mode in ('left_only', 'right_only') and not corner and p.get('fork_lane_width_mm', 0) > 0:
+        if mode in ('left_only', 'right_only', 'normal') and not corner and p.get('fork_lane_width_mm', 0) > 0:
             kw['lane_width_mm'] = p['fork_lane_width_mm']
         if p.get('fork_lost_search', False):
             kw['lost_search'] = True
@@ -1232,6 +1261,8 @@ class MissionFSM:
         yaw_ref = m['axis'] + math.atan2(ty - m['y'], tx - m['x'])
         yaw_ref = math.atan2(math.sin(yaw_ref), math.cos(yaw_ref))
         v = min(speed, p.get('m1_corner_speed', speed)) if m['s'] >= m['xs'] - 300.0 else speed
+        if self._lane_first(inp):
+            return self._lane(v)                      # 11/16: 선이 보이면 차선 주행 (원호 위치 계산은 계속)
         return self._lane(v, 'heading', yaw_ref=round(yaw_ref, 4))
 
     def _m1_lane(self, inp, speed: float) -> dict:

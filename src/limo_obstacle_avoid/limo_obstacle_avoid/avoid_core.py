@@ -268,6 +268,12 @@ class AvoidParams:
     lane_id_fix: bool = True
     lane_id_window: int = 7
     lane_id_need: int = 5
+    # 11/16 (1116_01): 선 종류로 본 차로가 지금 추정 차로와 '같은데' 그 안에서 옆 위치가 이만큼 넘게 틀리면 고침.
+    #   M7 내내 추정 -0.30 m(3차선 가운데 -0.52)라 '아직 덜 옮김'으로 보고 오른쪽으로 계속 꺾음 -> 노란선 지킴과 번갈아
+    #   50초. 차로 옮기는 중엔 lane_fix가 안 고치고(lane_fix_commit), 차로 번호 확인은 번호가 같아서 안 고쳐 22 cm가 그대로.
+    lane_id_inlane: bool = True
+    lane_id_inlane_tol: float = 0.08
+    lane_id_inlane_gain: float = 0.5
     # 차로 안에서 똑바로 갈 때 조향 = (1-a) x 회피 pure pursuit + a x 차선 노드 곡률 (양쪽 선 보임 + 같은 차로일 때만)
     lane_keep_blend: float = 1.0      # 11/10 오후 0.5 -> 1.0: 차로 안 직진은 팀 차선 주행과 완전히 같은 조향 (v x kappa)
     lane_keep_blend_single: float = 0.7   # 11/12 밤: 한쪽 선(L/R)만 보일 때 차선 노드 조향 비율 (예전 0 = 안 섞음)
@@ -979,10 +985,24 @@ class AvoidPlanner:
         if not p.lane_id_fix or best is None or self.rb is not None:
             return
         now = self.nearest_lane(self.pose.y)
-        if best == now or self.target != now:          # 같은 차로 / 차로 바꾸는 중이면 안 건드림
-            return
         h = lane.get('heading_rad')
         off = lane.get('offset_mm')
+        if best == now:
+            # 같은 차로: 그 차로 안의 옆 위치만 고침 (목표 차로가 바로 그 차로일 때 = 그 차로로 옮기는 중/도착)
+            if (not p.lane_id_inlane or self.target != best or h is None or off is None
+                    or abs(math.degrees(float(h))) > p.lane_fix_max_deg):
+                return
+            y_in = -float(off) / 1000.0 * math.cos(float(h)) + p.lane_row * math.sin(float(h))
+            dy = self.center(best) + y_in - self.pose.y
+            if abs(dy) <= p.lane_id_inlane_tol:
+                return
+            dy *= p.lane_id_inlane_gain
+            self._apply_transform(0.0, dy)
+            self.lane_id_fix_n += 1
+            self.events.append((self.pose.x, f'카메라 선 종류로 {lane_name(best)} 확인: 차로 안 옆 위치 {dy * 100:+.0f}cm'))
+            return
+        if self.target != now:                         # 차로 바꾸는 중이면 안 건드림
+            return
         if h is None or off is None or abs(math.degrees(float(h))) > p.lane_fix_max_deg:
             return
         off = float(off) / 1000.0

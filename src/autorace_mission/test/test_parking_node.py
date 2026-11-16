@@ -667,6 +667,7 @@ def test_center_check_works_without_center_on_sides(ov):
     o = dict(_yaml_parking(), **ov)
     o['center_on_sides'], o['center_check'] = False, True
     o['turn_fix'] = False          # 11/15: 도는 중 바로잡기를 켜면 처음부터 가운데라 다시 맞추기가 안 일어남 -> 이 시험은 끔
+    o['center_tol_mm'] = 15.0      # 11/16: 실차 값은 50(±20% 마진). 다시 맞추기 동작 자체를 보려고 예전 15
     out, log = {}, []
     n_in, hit, result = drive(FIVE, 2, o, fov_deg=210.0, camera=True, out=out, log=log)
     x, y, th = out['pose']
@@ -680,8 +681,8 @@ def test_center_check_works_without_center_on_sides(ov):
 
 @pytest.mark.parametrize('r_true,lag', [(600.0, 0.0), (640.0, 120.0), (700.0, 120.0), (530.0, 120.0)])
 def test_turn_fix_keeps_center_when_real_radius_differs(r_true, lag):
-    """11/15 (1114 bag): 실제 최대 조향 반경 590~720 mm, 조향 서보 지연. 가운데 다시 맞추기 없이(center_check 끔)도
-    도는 중 바로잡기 + 반경 640 + 미리 꺾기로 칸 가운데 40 mm 안. 예전(529, 바로잡기 없음)은 R 640에서 +118~125 mm(모서리 3개)."""
+    """11/15 (1114 bag): 실제 최대 조향 반경, 조향 서보 지연이 달라도 가운데 다시 맞추기 없이(center_check 끔)
+    도는 중 바로잡기 + 미리 꺾기로 칸 안(모서리 4개). 예전(529, 바로잡기 없음)은 R 640에서 +118~125 mm(모서리 3개)."""
     o = dict(_yaml_parking(), center_check=False)
     out = {}
     n_in, hit, result = drive(FIVE, 2, o, fov_deg=210.0, camera=True, out=out, r_min=r_true, steer_lag_mm=lag)
@@ -689,7 +690,7 @@ def test_turn_fix_keeps_center_when_real_radius_differs(r_true, lag):
     x0, x1, _, _ = cell(2)
     lat = x + 105.0 * math.cos(th) - (x0 + x1) / 2.0
     assert (n_in, hit) == (4, False) and result.startswith('PARKED')
-    assert abs(lat) <= 40.0, lat
+    assert abs(lat) <= 80.0, lat      # 11/16: 고치는 문턱 50 mm·70%만 고침 -> 첫 진입만으로 ±80 안 (남은 건 center_check ±50이 맡음)
 
 
 def test_turn_fix_backs_with_left_lock_when_overshooting():
@@ -716,3 +717,19 @@ def test_back_uses_opposite_10_percent_steering():
     assert lg.phase == 'BACK' and v_back < 0.0
     assert k_back == pytest.approx(-0.10 * pn.KAPPA_FULL_RIGHT, abs=1e-6)
 
+
+
+
+def test_center_check_margin_and_short_pullout():
+    """11/16: 정중앙 ±50 mm면 끝(다시 안 함). 다시 할 때 후진은 짧게(320 mm, 오차로 안 늘림)."""
+    o = dict(_yaml_parking(), turn_fix=False, presteer_sec=0.0, arc_radius_mm=529.0)
+    log, out = [], {}
+    n_in, hit, result = drive(FIVE, 2, o, fov_deg=210.0, camera=True, out=out, log=log, r_min=640.0)
+    assert (n_in, hit) == (4, False) and result.startswith('PARKED')
+    x, y, th = out['pose']
+    x0, x1, _, _ = cell(2)
+    assert abs(x + 105.0 * math.cos(th) - (x0 + x1) / 2.0) <= 55.0
+    pulls = [i for i in log if i['phase'] == 'PULLOUT']
+    assert pulls                                          # 120 mm 넘게 벗어나 한 번은 다시 함
+    errs = [i['last_err'] for i in log if i.get('last_err') and i['last_err'][0] == 'center']
+    assert all(abs(e[1]) > 50 for e in errs)              # 50 안이면 다시 안 함

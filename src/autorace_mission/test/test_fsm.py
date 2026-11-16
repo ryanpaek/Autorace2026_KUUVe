@@ -985,3 +985,20 @@ def test_floor_letter_ignored_when_it_disagrees_with_m7_lane():
     for i in range(6):
         cmd = fsm2.step(Inputs(t=0.1 * i, dist_mm=10.0 * i, yaw=0.0, lane={'floor_letter': 'B'}, obstacle={}))
     assert fsm2.fork_choice == 'B'
+
+
+def test_lane_first_overrides_forced_corner_until_lane_lost():
+    """11/16 (1116_01): 라바콘 뒤 강제 원호 중에도 선이 보이면 차선 주행, 5프레임 연속 놓치면 원호(heading)."""
+    fsm = MissionFSM({'start_state': 'M1_TRAFFIC'})
+    fsm.m1fc = {'axis': 0.0, 'last': 0.0, 'x': 0.0, 'y': 0.0, 'xs': 300.0, 's': 0.0, 'done': False}
+    fsm.sub = ''
+    seen = {'status': 'L', 'offset_mm': 0.0}
+    lane = fsm._m1_lane(Inputs(t=0.0, dist_mm=10.0, yaw=0.0, lane=seen), 0.2)
+    assert lane.get('mode') != 'heading'
+    modes = [fsm._m1_lane(Inputs(t=0.1 * i, dist_mm=20.0 + 10 * i, yaw=0.0, lane={'status': 'NONE'}), 0.2).get('mode')
+             for i in range(6)]
+    assert modes[:4] == [None] * 4 or all(m != 'heading' for m in modes[:4])
+    assert modes[-1] == 'heading'
+    off = MissionFSM({'start_state': 'M1_TRAFFIC', 'lane_first': False})
+    off.m1fc = dict(fsm.m1fc, done=False, s=0.0, last=0.0)
+    assert off._m1_lane(Inputs(t=0.0, dist_mm=10.0, yaw=0.0, lane=seen), 0.2).get('mode') == 'heading'

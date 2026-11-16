@@ -73,6 +73,7 @@ def generate_launch_description():
         DeclareLaunchArgument('use_fork_node', default_value='false'),
         # 웹 디버그 화면 (노트북 브라우저 http://<리모IP>:8080). 구독만 함
         DeclareLaunchArgument('debug_view', default_value='true'),
+        DeclareLaunchArgument('sys_monitor', default_value='true'),
         # 디버그 화면 미션 조작 버튼 (미션 고르기·건너뛰기·출발). 대회 때 false (비상 정지는 계속 됨)
         DeclareLaunchArgument('debug_control', default_value='true'),
         # 주차 완료 '띠링'을 차 스피커로 (chime_node). 끄려면 chime:=false
@@ -100,6 +101,9 @@ def generate_launch_description():
                                   'control_enabled': ParameterValue(LaunchConfiguration('debug_control'),
                                                                     value_type=bool)}], output='screen',
              condition=IfCondition(LaunchConfiguration('debug_view'))),
+        # 11/16: 연산량 측정 (/system/usage, 디버깅 화면 '연산량' 패널). 끄기: sys_monitor:=false
+        Node(package='autorace_mission', executable='sys_monitor', name='sys_monitor', output='screen',
+             condition=IfCondition(LaunchConfiguration('sys_monitor'))),
         Node(package='autorace_mission', executable='chime_node', name='chime_node',
              output='screen', condition=IfCondition(LaunchConfiguration('chime'))),
         Node(package='autorace_mission', executable='parking_node', name='parking_node',
