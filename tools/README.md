@@ -16,6 +16,10 @@ CSV는 **명령을 친 폴더**에 저장되므로 데이터 폴더(예: `~/auto
 > 예전 CSV(`xs` 열 없음)는 자동으로 `--pose odom`으로 재생된다.
 > **후진 지원**: 기록에 후진이 있으면 전진↔후진이 바뀌는 곳(3 cm 넘게 반대로 간 곳)마다 구간을 나눠
 > 그 순서대로 재생한다. 구간 끝에서 멈추고 `--pause`초 쉰 뒤 다음 방향으로 출발.
+> 후진 판단은 odom 위치 변화 방향 / odom 속도값 부호 / `/cmd_vel` 명령 부호 중 하나라도 후진이면 후진
+> (LIMO 드라이버가 후진을 전진처럼 쌓는 경우 대비, mission_node와 같은 규칙). 재생할 때 경로는 CSV의 원본 열
+> (odom·명령·자이로)로 다시 계산하므로 예전 규칙으로 기록한 CSV도 후진이 살아난다.
+> 후진이 있는 경로는 `--pose` 기본값(fused)으로 재생할 것 (`odom`은 드라이버가 후진 방향을 틀리면 못 따라감).
 
 > 정지 시간·거리 측정 스크립트(`stop_test_ack.py`)는 [`calib/20261102_stop_test_ack.py`](../calib/20261102_stop_test_ack.py)에 있다.
 > 사용법은 [calib/USAGE.md](../calib/USAGE.md), 결과는 [calib/README.md](../calib/README.md) 4번.

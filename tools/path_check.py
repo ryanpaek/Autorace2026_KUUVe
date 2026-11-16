@@ -47,6 +47,10 @@ def main():
         t, yaw, gz = f(r, 't'), f(r, 'yaw'), f(r, 'gz')
         if None in (t, yaw):
             continue
+        if (f(r, 'cmd_vx') or 0) < -0.02 or (f(r, 'vx') or 0) < -0.02:     # 후진 중엔 비교 안 함
+            prev = None
+            turn_o = turn_i = 0.0
+            continue
         if prev and gz is not None:
             dt = t - prev[0]
             if 0 < dt < 0.5:
@@ -88,6 +92,8 @@ def main():
         if not segs:
             print(f'[{pose}] 경로 점 없음')
             continue
+        if info.get('note'):
+            print(f"[{pose}] 알림: {info['note']}")
         kmax = max(abs(k) for g in segs for k in g.k)
         ally = [y for g in segs for y in g.y]
         last = segs[-1]

@@ -65,7 +65,7 @@ class Recorder(Node):
         t = self.stamp(m)
         p = m.pose.pose.position
         yaw = yaw_of(m.pose.pose.orientation)
-        self.fu.on_odom(t, p.x, p.y, yaw, m.twist.twist.linear.x)
+        self.fu.on_odom(t, p.x, p.y, yaw, m.twist.twist.linear.x, self.cmd[0])
         if self.origin is None:
             self.origin = (p.x, p.y, yaw)
             self.t0 = t
@@ -127,6 +127,11 @@ def main():
             bad = node.fu.sign_problem()
             if bad:
                 print(f'[경고] {bad}')
+            note = node.fu.reverse_note()
+            if note:
+                print(f'[알림] {note}')
+            if node.fu.rev_steps:
+                print(f'후진 기록: {node.fu.rev_steps}걸음 (판단 근거 위치 {node.fu.rev_by["pos"]} / 속도값 {node.fu.rev_by["twist"]} / 명령 {node.fu.rev_by["cmd"]})')
             if node.fu.v_bad == 0 and node.fu.sign_bad_turn == 0:
                 print(f'부호 점검 통과 (회전 비교 {node.fu.sign_ok_turn}번)')
             print(f'점검: python3 path_check.py {path}')

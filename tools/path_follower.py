@@ -53,13 +53,14 @@ class Follower(Node):
         self.idx = 0
         self.finished = False
         self.origin = None
-        self.fu = PoseFusion()
+        self.fu = PoseFusion(use_odom_yaw=(self.pose_mode == 'odom'))
         self.last_odom = None
         self.last_print = 0.0
         self.checked = False
         self.ok_to_move = False
         self.t_begin = self.now()
         self.n_cmd = 0
+        self.last_v = 0.0
         self.n_sat = 0
         self.max_e = 0.0
         self.s = 0.0
@@ -88,6 +89,8 @@ class Follower(Node):
         print(f'경로: 구간 {len(self.segs)}개 (' + ' → '.join(f'{"전진" if g.dir > 0 else "후진"} {g.length:.2f}m' for g in self.segs)
               + f'), 끝 위치 x={last.x[-1]:.3f} y={last.y[-1]:+.3f} 방향 {math.degrees(last.h[-1] - self.segs[0].h[0]):+.1f}°, '
               f'최대 곡률 {kmax:.2f} (차 한계 {MAX_CURV:.2f}), 위치 기준 {self.pose_mode}')
+        if info.get('note'):
+            print(f"[알림] {info['note']}")
         if kmax > 0.9 * MAX_CURV:
             print('[경고] 기록 경로가 차가 돌 수 있는 한계에 가까움 → 조향이 끝까지 붙음. 더 완만하게 다시 기록 권장')
 
@@ -99,6 +102,7 @@ class Follower(Node):
         return t if t > 0 else self.now()
 
     def send(self, v, curv):
+        self.last_v = v
         m = self.msg_cls()
         if self.a.type == 'twist':
             m.linear.x = v
@@ -156,13 +160,6 @@ class Follower(Node):
     def pose_now(self, m):
         p = m.pose.pose.position
         yaw = yaw_of(m.pose.pose.orientation)
-        if self.pose_mode == 'odom':
-            if self.origin is None:
-                self.origin = (p.x, p.y, yaw)
-            x0, y0, yaw0 = self.origin
-            dx, dy = p.x - x0, p.y - y0
-            return (math.cos(yaw0) * dx + math.sin(yaw0) * dy,
-                    -math.sin(yaw0) * dx + math.cos(yaw0) * dy, wrap(yaw - yaw0))
         return self.fu.x, self.fu.y, self.fu.yaw
 
     def on_odom(self, m):
@@ -171,16 +168,14 @@ class Follower(Node):
         t = self.now()
         self.last_odom = t
         p = m.pose.pose.position
-        self.fu.on_odom(self.stamp(m), p.x, p.y, yaw_of(m.pose.pose.orientation), m.twist.twist.linear.x)
-        if not self.ok_to_move or (self.pose_mode != 'odom' and not self.fu.ready):
+        self.fu.on_odom(self.stamp(m), p.x, p.y, yaw_of(m.pose.pose.orientation), m.twist.twist.linear.x, self.last_v)
+        if not self.ok_to_move or not self.fu.ready:
             self.send(0.0, 0.0)
             return
-        if self.origin is None and self.pose_mode != 'odom':
+        if self.origin is None:
             self.origin = True
             print(f'출발 (위치 기준 {self.pose_mode})')
         x, y, yaw = self.pose_now(m)
-        if self.origin is not None and self.n_cmd == 0 and self.pose_mode == 'odom':
-            print('출발 (위치 기준 odom)')
         bad = self.fu.sign_problem()
         if bad and self.pose_mode != 'odom':
             self.finish(f'[정지] {bad}')
