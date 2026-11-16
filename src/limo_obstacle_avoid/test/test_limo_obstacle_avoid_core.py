@@ -197,8 +197,9 @@ def test_choose_prefers_one_lane_move_to_center():
 
 
 def test_returns_to_center_after_passing():
-    """3차로에 있고 가운데 앞이 비면 가운데로 돌아옴"""
+    """3차로에 있고 가운데 앞이 비면 가운데로 돌아옴 (center_return 켰을 때. 11/15부터 기본 끔)"""
     pl = _pl_center()
+    pl.p.center_return = True
     pl.pose.y = -0.52
     pl.target = -1
     pl.last_switch = -10.0
@@ -296,6 +297,7 @@ def test_return_to_left_lane_right_away_if_it_is_clear():
 def test_side_wait_goes_straight_then_changes():
     """옮기기 시작했는데 가려는 차로 바로 옆(앞범퍼 근처)에 장애물이 걸리면 원래 차로로 0.3 m 직진 뒤 다시 옮김"""
     pl = _pl_center()
+    pl.p.shift_arc = False                                      # 예전 pure pursuit 길 (11/15 shift_arc 길은 이 배치를 안 부딪힌다고 봄)
     pl.pose.y = 0.0
     pl.target = 1
     pl.last_switch = 9.9
@@ -401,7 +403,7 @@ def test_center_force_not_before_4000_or_when_exit_known():
 def test_center_force_waits_04_when_obstacle_beside():
     pl = _pl_force(1, 2.05)
     x0 = pl.pose.x
-    pl.obs = [_confirmed(Obstacle(x0 - 0.1, x0 + 0.23, -0.11, 0.11))]   # 2차로 바로 옆
+    pl.obs = [_confirmed(Obstacle(x0 - 0.1, x0 + 0.60, -0.11, 0.11))]   # 2차로 바로 옆 (11/15: 앞범퍼 앞으로 40 cm 더 -> 꺾어 들어가면 부딪힘)
     pl.p.use_island = False
     pl.step(10.0)
     assert pl.target == 1
@@ -430,6 +432,7 @@ def _one_blocked_mid_beside(front_gap):
 def test_two_lane_jump_deferred_when_middle_frees_up_soon():
     """실차: 2차로를 타야 할 때 1 -> 3차로로 두 칸을 바로 감. 앞이 0.6 m 넘게 남았으면 보류(조금 더 가서 2차로)"""
     pl, obs = _one_blocked_mid_beside(1.0)
+    pl.p.shift_arc = False                              # 예전 pure pursuit 길로 굴려 봄 (shift_arc는 더 꺾어 2차로 옆 장애물에 닿는다고 봄)
     pl.p.two_lane_wait = False
     assert pl.choose(1, obs) == -1                      # 예전: 3차로(두 칸)
     pl.p.two_lane_wait = True
@@ -449,6 +452,8 @@ def test_search_both_sides_when_stuck_long():
     pl.obs = [g]
     pl.last_clusters = [(1.45, 1.78, -0.30, -0.08)]
     pl.p.squeeze = False                                # 지도 기준 끝까지 꺾기는 빼고 찾기만 봄
+    pl.p.stop_dist = 0.30                               # 이 배치(앞 0.25 m)는 예전 정지 거리 기준
+    pl.p.squeeze_target_only = False                    # 예전 동작 (11/14 밤부터 기본은 정한 차로 쪽으로만, 아래 시험)
     v, w = pl.step(10.0)
     assert v == 0.0                                     # 처음엔 정지 (똑바로는 막힘)
     v, w = pl.step(11.2)
@@ -471,3 +476,174 @@ def test_search_does_not_turn_past_30deg():
     pl.last_clusters = [(bx - 0.05, bx + 0.25, by - 0.15, by + 0.15)]
     out = pl._creep_step(5.0)
     assert out is None or out[1] <= 0                   # 이미 왼쪽 35° -> 왼쪽으로 더는 안 꺾음
+
+
+def test_outer_entry_lookahead_only_last_half_into_outer_lane():
+    """11/15 실차: M7 바깥 차로로 옮길 때 노란 실선을 밟음 -> 바깥 차로 마지막 반 칸에서만 전방 주시를 늘려 완만하게"""
+    pl = _pl_center()
+    pl.target = 1
+    pl.pose.y = 0.10                                      # 아직 반 칸 전
+    assert pl._ld() == pl.p.lookahead
+    pl.pose.y = 0.35                                      # 마지막 반 칸
+    assert pl._ld() == pl.p.outer_entry_lookahead
+    pl.target = 0
+    pl.pose.y = 0.10                                      # 가운데 차로로 갈 때는 해당 없음
+    assert pl._ld() == pl.p.lookahead
+    pl.target = -1
+    pl.pose.y = -0.40
+    pl.sharp = True                                       # 후진 뒤 크게 꺾기가 먼저
+    assert pl._ld() == pl.p.recover_lookahead
+
+
+def test_no_reversal_before_arriving_in_new_lane():
+    """11/15 실차: M7에서 한 방향으로 정했다가 도착 전에 반대로 감. 1.5초가 지나도 새 차로에 도착하기 전엔 떠난 차로로 안 돌아감
+    (지금 차로 앞이 0.5 m 안으로 정말 막혔으면 예외)"""
+    for until_arrive, want in ((True, -1), (False, 0)):
+        pl = _pl_center()
+        pl.p.flip_until_arrive = until_arrive
+        pl.p.side_wait = False
+        pl.pose.x, pl.pose.y = 1.0, -0.25                       # 2차로(0) -> 3차로(-1)로 옮기는 중 (아직 도착 전)
+        pl.target, pl.flip_from = -1, 0
+        pl.last_switch = 5.0                                    # 3초 전에 정함 (1.5초 지남)
+        xf = pl.pose.x + pl.p.robot_front
+        pl.obs = [_confirmed(Obstacle(xf + 1.2, xf + 1.53, -0.62, -0.42))]   # 3차로 앞 1.2 m (기준 1.5 m 안)
+        pl.step(8.0)
+        assert pl.target == want, (until_arrive, pl.target)
+
+
+def test_start_target_from_corner_preview():
+    """11/14: 코너 미리보기로 정한 차로(start_target)로 켜자마자 옮기고, 앞이 더 빈 쪽으로 '다시 고르기'는 안 함."""
+    p = AvoidParams()
+    p.start_target, p.start_y, p.start_heading_deg = 1, -0.086, 30.0
+    pl = AvoidPlanner(p)
+    pl.start(0.0, 0.0, 0.0, t=0.0)
+    assert pl.target == 1 and pl.flip_from == 0 and pl.rechosen
+    assert abs(pl.pose.y + 0.086) < 1e-9 and abs(math.degrees(pl.pose.psi) - 30.0) < 1e-6
+    assert any('미리 정한 차로' in e[1] for e in pl.events)
+    v, w = pl.step(0.05)
+    assert v > 0                                                   # 바로 출발 (지도 쌓일 때까지 안 기다림)
+
+
+def test_start_target_default_and_bad_values_ignored():
+    pl = AvoidPlanner(AvoidParams())
+    pl.start(0.0, 0.0, 0.0)
+    assert pl.target == 0 and pl.pose.y == 0.0
+    p = AvoidParams()
+    p.start_target, p.start_y, p.start_heading_deg = 5, 0.9, 70.0  # 말이 안 되는 값
+    pl = AvoidPlanner(p)
+    pl.start(0.0, 0.0, 0.0)
+    assert pl.target == 0 and pl.pose.y == 0.0 and pl.pose.psi == 0.0
+
+
+def _cam(off_mm, h_deg, left_yellow=True):
+    y = {'color': 'yellow', 'dashed': False}
+    w = {'color': 'white', 'dashed': True}
+    return {'status': 'BOTH', 'offset_mm': off_mm, 'heading_rad': math.radians(h_deg),
+            'line_left': y if left_yellow else w, 'line_right': w, 'kappa': 0.0}
+
+
+def test_cam_yellow_guard_uses_car_body_not_camera_row():
+    """11/14 밤 실차 '차로 바꾸는 중 좌우 지그재그': 1차선으로 비스듬히(25°) 들어가는 중, 차체는 차로 중심 오른쪽 10 cm
+    -> 카메라 행(앞 0.55 m)은 노란선 쪽이지만 차체는 안 닿음 -> 끝까지 꺾지 않음. 차체가 노란선에 닿으면 꺾음."""
+    pl = AvoidPlanner(AvoidParams())
+    pl.start(0.0, 0.0, 0.0)
+    # 차 위치 y_l = -off cos h + 0.55 sin h. 차 방향 = -h  -> 왼쪽으로 25° 향함: h = -25°
+    h = -25.0
+    off_for = lambda y_l, hd=h: -(y_l - 0.55 * math.sin(math.radians(hd))) / math.cos(math.radians(hd)) * 1000.0
+    assert pl._cam_yellow_body(_cam(off_for(-0.20), h), None) == 0
+    assert pl._cam_yellow_body(_cam(off_for(0.10), h), None) == 1          # 차체 앞 모서리가 노란선 근처 + 그쪽으로 향함
+    assert pl._cam_yellow_body(_cam(off_for(0.10, 10.0), 10.0), None) == 0   # 이미 안쪽으로 향함
+    assert pl._cam_yellow_body(_cam(off_for(0.10), h, left_yellow=False), None) == 0   # 왼쪽이 흰 점선
+
+
+def test_lane_fix_not_applied_while_changing_lane():
+    p = AvoidParams()
+    pl = AvoidPlanner(p)
+    pl.start(0.0, 0.0, 0.0)
+    pl.target = 1                                     # 1차선으로 옮기는 중 (y = 0)
+    assert not pl.lane_fix({'status': 'BOTH', 'offset_mm': 50.0, 'heading_rad': 0.0}, 0.0)
+    p.lane_fix_commit = False
+    assert pl.lane_fix({'status': 'BOTH', 'offset_mm': 50.0, 'heading_rad': 0.0}, 0.1)
+
+
+def test_lane_blend_only_when_straightened():
+    p = AvoidParams()
+    pl = AvoidPlanner(p)
+    pl.start(0.0, 0.0, 0.0)
+    pl.lane_fix({'status': 'BOTH', 'offset_mm': 0.0, 'heading_rad': 0.0, 'kappa': 1.5}, 0.0)
+    pl.control(0.2, 0.05, True)
+    assert pl.blend_used                              # 차로 안, 펴져 있음 -> 차선 노드 조향 섞음
+    pl.pose.psi = math.radians(20.0)
+    pl.control(0.2, 0.05, True)
+    assert not pl.blend_used                          # 비스듬함 -> 회피 조향만
+
+
+def test_stuck_search_only_toward_chosen_lane():
+    """11/14 밤 실차 '차로를 정했으면 그 차로로': 3차선(오른쪽)으로 정했는데 막혀 서면, 예전엔 라이다 빈 길 찾기가
+    반대(왼쪽)로 꺾어 전진 -> 좌우 왔다갔다. 이제 정한 쪽만 찾고, 거기도 막혔으면 서서 (후진으로) 다시 봄."""
+    pl = _pl_center()
+    pl.pose.x, pl.pose.y = 1.0, 0.0
+    pl.target = 0
+    pl.last_switch = 9.9
+    pl.obs = [_confirmed(Obstacle(1.45, 1.78, -0.30, -0.08))]
+    pl.last_clusters = [(1.45, 1.78, -0.30, -0.08)]
+    pl.p.squeeze = False
+    pl.p.stop_dist = 0.30
+    pl.step(10.0)
+    v, w = pl.step(11.2)
+    assert pl.target == -1                              # 3차선으로 정함
+    assert not (v > 0 and w > 0)                        # 왼쪽(반대)으로 꺾어 가지 않음
+
+
+def test_island_sign_not_an_obstacle():
+    """11/15 실차: 섬 앞 끝 갈림길 표지판이 2차선 장애물로 보여 장애물 없는데 1차선으로 감 -> 표지판 자리는 뺌, 2차선에 그대로."""
+    p = AvoidParams()
+    p.section_length = 2.0
+    pl = AvoidPlanner(p)
+    pl.start(0.0, 0.0, 0.0)
+    pl.pose.x = 0.2
+    sign = _confirmed(Obstacle(1.95, 2.05, -0.05, 0.05))
+    real = _confirmed(Obstacle(1.0, 1.32, -0.11, 0.11))
+    pl.obs = [sign]
+    assert all(o is not sign for o in pl.obstacles())
+    pl.obs = [real]
+    assert any(o is real for o in pl.obstacles())             # 섬에서 먼 진짜 장애물은 그대로
+    pl.obs = [sign]
+    pl.step(1.0)
+    assert pl.target == 0                                      # 섬 앞에서 표지 기다리며 2차선 유지
+
+
+def test_shift_arc_straightens_into_outer_lane_without_overshoot():
+    """11/15 실차: 1차선으로 들어가며 바깥 노란선을 물고 들어갔다 돌아옴 -> 펼 수 있는 최대 각으로 꺾고 딱 중심(3 cm 안쪽)에서 폄.
+    가상 차(최소 회전반경 0.53 m)로 2차선 -> 1차선: 바깥으로 차로 중심 + 4 cm를 넘지 않음."""
+    import math as _m
+    for sa in (True, False):
+        p = AvoidParams()
+        p.shift_arc = sa
+        p.use_island = False
+        pl = AvoidPlanner(p)
+        pl.start(0.0, 0.0, 0.0)
+        pl.target, pl.last_switch = 1, 0.0
+        x = y = h = 0.0
+        ymax = 0.0
+        for i in range(120):
+            pl.pose.x, pl.pose.y, pl.pose.psi = x, y, h
+            k = pl.control(1.0, None, abs(y - 0.52) < p.reach_tol)
+            k = max(-1 / 0.53, min(1 / 0.53, k))
+            h += k * 0.01
+            x += 0.01 * _m.cos(h)
+            y += 0.01 * _m.sin(h)
+            ymax = max(ymax, y)
+        if sa:
+            assert ymax <= 0.52 + 0.04, ymax
+            assert abs(y - 0.52) < 0.05
+
+
+def test_stays_in_side_lane_when_free_by_default():
+    """11/15 실차: 1차선 앞이 비었는데 2차선으로 갔다 다시 1차선 -> 기본은 그대로 1차선 (섬 앞 표지 모으기 구간 밖)"""
+    pl = _pl_center()
+    pl.pose.y = 0.52
+    pl.target = 1
+    pl.last_switch = -10.0
+    pl.step(5.0)
+    assert pl.target == 1

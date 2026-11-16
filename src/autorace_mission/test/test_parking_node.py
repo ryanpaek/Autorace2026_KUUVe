@@ -700,3 +700,19 @@ def test_turn_fix_backs_with_left_lock_when_overshooting():
     fixes = [i['last_err'] for i in log if i.get('last_err') and i['last_err'][0] == 'turn_fix_back']
     assert fixes and fixes[0][1] > 35
     assert any(i['phase'] == 'BACK' for i in log)
+
+
+def test_back_uses_opposite_10_percent_steering():
+    """11/14: 주차 중 앞이 막히거나 옆 감시로 BACK 후진할 때, 직전 전진 조향(오른쪽 -)의 반대 방향(+) 10% 조향."""
+    p = dict(pn.DEFAULTS, switch_pause_sec=0.0, back_mm=150.0, back_reverse_scale=0.10)
+    lg = pn.ParkingV2(p)
+    lg._enter('TURN', _step_inp(0.0, 0.0))
+    lg.yaw_turn0 = 0.0
+    v_fwd, k_fwd, _ = lg.step(_step_inp(0.05, 10.0, blocked=False))
+    assert v_fwd > 0.0 and k_fwd == pn.KAPPA_FULL_RIGHT
+    lg.step(_step_inp(0.10, 20.0, blocked=True))                   # TURN -> BACK 전환 틱
+    assert lg.phase == 'BACK'
+    v_back, k_back, _ = lg.step(_step_inp(0.15, 20.0, blocked=True))
+    assert lg.phase == 'BACK' and v_back < 0.0
+    assert k_back == pytest.approx(-0.10 * pn.KAPPA_FULL_RIGHT, abs=1e-6)
+

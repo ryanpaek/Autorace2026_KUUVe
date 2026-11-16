@@ -34,6 +34,7 @@ def test_lane_fix_pulls_y_to_camera():
 def test_lane_fix_uses_nearest_lane_center():
     """오른쪽 차로(-0.52)에 있고 카메라상 차로 중앙 → y가 -0.52 쪽으로."""
     pl = running(-0.47)
+    pl.target = -1                                # 오른쪽 차로에 있음 (11/14 밤: 옮기는 중이면 안 고침)
     for _ in range(60):
         pl.lane_fix(lane(0.0))
     assert abs(pl.pose.y - (-0.52)) < 0.005
@@ -238,6 +239,7 @@ def _diag(y=0.10, deg=-40.0, band=True):
     pl = running(y, math.radians(deg))
     pl.target = 0                                                  # 1차선에서 2차선으로 들어오는 중
     pl.p.emerg_lane_band = band
+    pl.p.stop_dist = 0.30                                          # 이 시험들의 점 위치는 예전 비상 박스(0.30 m) 기준
     return pl
 
 
@@ -310,6 +312,7 @@ def test_lane_fix_half_while_changing_and_up_to_20deg():
     a = running(y0=0.0)
     a.lane_fix(lane(-60.0), 0.0)                  # 같은 차로, 똑바로 -> 전부
     b = running(y0=0.0)
+    b.p.lane_fix_commit = False                   # 예전 동작 (11/14 밤부터 기본: 옮기는 중엔 안 고침)
     b.target = 1                                  # 1차선으로 옮기는 중
     b.lane_fix(lane(-60.0), 0.0)
     assert b.pose.y == pytest.approx(0.5 * a.pose.y, rel=0.05) and b.pose.y > 0
@@ -384,7 +387,10 @@ def test_no_flip_back_to_lane_just_left():
     pl.step(10.0)
     assert pl.target == 0                                       # 예전: 바로 -1로 되돌아감
     pl.step(11.5)
-    assert pl.target == -1                                      # 1.5초 지나면 허용
+    assert pl.target == 0                                       # 11/15: 1.5초 지나도 새 차로(0)에 도착 전이면 안 돌아감
+    pl.pose.y = -0.05                                           # 0 차로에 도착
+    pl.step(12.0)
+    assert pl.target == -1                                      # 도착했고 1.5초 지났으면 허용
 
 
 def test_target_lane_beside_obstacle_does_not_flip_back():
@@ -420,17 +426,20 @@ def typed(off_mm, left, right, h_deg=0.0, status='BOTH'):
 def test_lane_fix_rejects_wrong_line_colors():
     """1차선(+0.52)이라 믿는데 카메라가 (왼쪽 흰 실선=트랙 밖 바닥, 오른쪽 노란선)을 한 차로로 봄 -> 보정 안 함."""
     pl = running(0.40)
+    pl.target = 1                 # 1차선에 있다고 믿는 중 (lane_fix_commit: 목표 차로 = 가까운 차로일 때만 보정)
     for _ in range(20):
         assert not pl.lane_fix(typed(0.0, WS, Y, status='BOTH'))
     assert abs(pl.pose.y - 0.40) < 1e-6 or pl.pose.y > 0.40      # 가짜 차로로 끌려가지 않음 (노란선 밖 보정은 바깥으로만)
     assert pl.status()['lane_fix_type_rej'] >= 1
     ok = running(0.45)
+    ok.target = 1
     for _ in range(20):
         assert ok.lane_fix(typed(0.0, Y, WD))                      # 맞는 조합은 그대로 보정
     assert abs(ok.pose.y - 0.52) < 0.01
     mid = running(0.05)
     assert mid.lane_fix(typed(0.0, WD, WD)) and not mid.lane_fix(typed(0.0, Y, WD))
     right = running(-0.50)
+    right.target = -1
     assert right.lane_fix(typed(0.0, WD, Y)) and not right.lane_fix(typed(0.0, Y, WD))
 
 
@@ -452,3 +461,31 @@ def test_outside_yellow_moves_pose_beyond_line():
     for _ in range(3):
         mirror.lane_fix(typed(0.0, Y, WS))
     assert abs(mirror.pose.y + 0.83) < 1e-6
+
+
+def test_camera_yellow_solid_guard_forces_inward_steering():
+    """11/14: 오도메트리 y가 안쪽이어도 카메라(/lane/status)에서 노란 실선에 접근하면 즉시 안쪽으로 최대 조향."""
+    pl = running(y0=0.20, psi0=0.0)
+    pl.target = 1
+    pl.lane_last = {'status': 'L', 'yellow_guard': 'L',
+                    'line_left': {'color': 'yellow', 'dashed': False}, 'offset_mm': -120.0}
+    pl.lane_t = 0.0
+    w = pl.control(0.2, 0.05, False)
+    assert pl.edge_guarded and w == pytest.approx(-0.2 / pl.p.min_turn_radius, abs=1e-3)
+
+
+def test_rollback_reverses_with_opposite_10_percent_steering():
+    """11/14: 기억후진 시 잘못 들었던 길로 갈 때 꺾었던 조향(k_fwd)의 반대 방향으로 10% 크기로 조향하며 후진."""
+    p = AvoidParams(recover=True, recover_mode='trail', rollback_reverse_scale=0.10)
+    pl = AvoidPlanner(p)
+    pl.start(0.0, 0.0, 0.0, 0.0)
+    pl.last_fwd_k = 1.50                                                # 왼쪽(+1.50)으로 꺾어 들어가다 막힘
+    pl.trail = [(0.0, 0.0), (0.3, 0.05), (0.6, 0.15)]
+    pl.trail_k = [1.50, 1.50, 1.50]
+    pl.pose.x, pl.pose.y, pl.pose.psi = 0.65, 0.18, 0.2
+    pl.rb = {'t0': 1.0, 'x0': 0.65, 'y0': 0.18, 'dist': 0.0, 'blocked': 1, 'k_fwd': 1.50}
+    v, w = pl._rollback_step(1.1)
+    k_rev = w / v
+    assert v < 0.0
+    assert k_rev == pytest.approx(-0.10 * 1.50, abs=1e-6)               # 반대 방향(-), 10% 크기
+

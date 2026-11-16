@@ -239,6 +239,16 @@ class LaneParams:
     # 헤딩 유지 (IMU)
     yaw_kp: float = 1.5               # 헤딩 오차 1 rad당 요레이트 명령 (rad/s)
     # 정지선
+    # 11/15 바닥 갈림길 글자 A/B (흰 페인트): 차로 안 글자 크기 흰 덩어리의 구멍 수로 구분 (A = 구멍 1, B = 구멍 2).
+    #   표지판(YOLO)을 놓쳐도 갈림길에 들어간 뒤 어느 쪽(A/B)인지 안다. 크기는 실측 전 넉넉히
+    floor_letter: bool = True
+    floor_letter_min_h_mm: float = 120.0    # 진행 방향 글자 높이 범위
+    floor_letter_max_h_mm: float = 700.0
+    floor_letter_min_w_mm: float = 60.0     # 옆 폭 범위
+    floor_letter_max_w_mm: float = 450.0
+    floor_letter_max_off_mm: float = 260.0  # 글자 가운데가 차 중심에서 옆으로 이 안 (내 차로)
+    floor_letter_hole_mm2: float = 600.0    # 구멍으로 셀 최소 넓이 (점선·잡음 구멍 제외)
+    floor_letter_max_fill: float = 0.85     # 덩어리 상자 중 흰 비율이 이보다 크면 글자 아님 (가로선·막대)
     stopline_fill: float = 0.6        # 차로 안쪽 폭 중 흰 화소 비율이 이 이상이면 가로선
     stopline_min_mm: float = 8.0
     stopline_max_mm: float = 80.0
@@ -285,6 +295,33 @@ class LaneParams:
     # 값 = 기억을 쓰는 최대 주행 거리(mm, 권장 1000). 위치(pose) 필요. 0이면 끔
     lost_arc_mm: float = 0.0
     lost_arc_max_turn_deg: float = 75.0   # 기억한 뒤 차가 이만큼 돌면(코너 끝) 그만 쓴다
+    # 11/14: 노란 실선은 트랙 바깥 경계선이므로 절대 이탈하면 안 됨 -> 가까워지면 안쪽으로 강하게 조향
+    yellow_solid_guard: bool = True
+    yellow_guard_margin_mm: float = 200.0  # 차 중심에서 노란 실선까지 옆 거리가 이 안이면 강하게 안쪽 조향 시작
+    yellow_guard_hard_mm: float = 140.0    # 이 안이면 변화율 제한을 무시하고 최대 곡률(kappa_max)로 즉시 조향
+    yellow_guard_gain: float = 2.0
+    # 11/15 실차: 직선에서 좌우로 왔다갔다 하다 첫 코너에서 이탈. 일반 구간은 양쪽 선이 모두 노란 실선이라 차가 6 cm만
+    #   비켜도 지킴이 걸리고 14 cm면 순간 최대 조향 -> 반대쪽에서 또 걸림 (차선 시뮬레이션: 지연 4프레임·잡음 12 mm에서
+    #   최대 조향 2.1을 15초에 14번 좌우로 뒤집음, 지킴 끄면 0번). 반대쪽 선도 노란 실선이면(= 일반 1차로) 지킴 안 함:
+    #   그때는 양쪽 선 가운데 맞추기가 이미 양쪽 경계를 본다. M7 바깥 차로(노란 실선 + 흰 점선)·한쪽 선만 보일 때만 지킴
+    yellow_guard_one_side_only: bool = True
+    # 11/15 실차: 모든 코너에서 '초반에 과하게 꺾고 그 뒤 직진해 뚫고 나감', M2에서 섬 쪽을 밟음.
+    #   카메라는 차 앞 0.55 m부터만 보이는데 지킴은 그 앞 노란선까지 거리를 잰다 -> 코너 앞에서 바깥 선이 앞쪽에서 휘어 들어오면
+    #   '노란선에 붙었다'로 보고 코너 0.6 m 전부터 끝까지 꺾음 (코너 시뮬레이션: 안쪽 35 cm 밀려 선 밟음, 끄면 11 cm).
+    #   M2 한쪽 선 모드도 휘어 나가는 바깥선을 '붙었다'로 보고 섬 쪽으로 밀어냄. 3차선(M7, lane_color both) 직선 구간에서만 지킴
+    yellow_guard_three_lane_only: bool = True
+    # 11/15 실차 '커브마다 아슬아슬': 차선이 커브라고 할 때(|곡률| > corner_gain_from) 조향을 corner_kappa_gain 배.
+    #   직선·작은 보정에는 안 걸림. 1.0 = 끔
+    # 11/15 저녁 실차: 차가 차선과 크게 틀어지면(직각에 가까우면) 노란 차선이 가로 선으로 보여 정지선처럼 지워지거나 놓침.
+    #   일반 구간(lane_color yellow)에서 선을 놓쳤는데 크게 기운(realign_deg 이상) 노란 선 덩어리가 보이면 '내 방향이 틀렸다'로 보고
+    #   그 선과 나란해지는 쪽으로 돈다 (정지선은 흰색이라 노란 마스크에 없음). 0 = 끔
+    realign_deg: float = 0.0           # 꺼 둠 (11/15 시험): 45°로 켜면 코너의 휘는 선을 가로선으로 착각해 코너 시뮬레이션 선 밟음 0 -> 15/15, 크게 틀어진 직선에선 효과 없음(카메라 사각 0.55 m)
+    realign_min_mm: float = 200.0      # 이보다 짧은 덩어리는 안 씀 (노이즈)
+    realign_speed: float = 0.6         # 그동안 속도 비율
+    corner_kappa_gain: float = 1.1     # 코너 시뮬레이션: 바깥 36 -> 26 mm, 안쪽 112 -> 120 mm (안쪽 선까지 17 mm). 1.2면 안쪽 여유 10 mm
+    corner_gain_from: float = 0.6
+    yellow_guard_look_mm: float = 600.0   # 노란 실선까지 거리를 잴 때 이 앞까지만 (400으로 줄이면 M7 1차로 시뮬레이션 흔들림 37 -> 89 mm)
+    yellow_guard_min_urg: float = 0.35    # 지킴이 걸리는 순간 최소 세기 (0이면 margin에서 0부터 hard까지 서서히)
 
     @classmethod
     def from_dict(cls, d: dict) -> 'LaneParams':
@@ -341,6 +378,10 @@ class LaneOutput:
     # 3차선 차로 번호 (진행 방향 기준 +1 왼쪽/1차선, 0 가운데/2차선, -1 오른쪽/3차선). 모르면 None
     #   왼쪽 노란 실선 + 오른쪽 흰 점선 = +1, 양쪽 흰 점선 = 0, 왼쪽 흰 점선 + 오른쪽 노란 실선 = -1
     lane_id: Optional[int] = None
+    yellow_guard: Optional[str] = None  # 노란 실선 이탈 방지 강제 조향 작동 여부 ('L' | 'R' | None)
+    floor_letter: Optional[str] = None  # 11/15 바닥 갈림길 글자 'A' | 'B' (내 차로 안, 구멍 수로 구분)
+    floor_letter_mm: Optional[float] = None    # 앞바퀴 -> 글자 가까운 끝
+    floor_letter_off_mm: Optional[float] = None  # 글자 가운데 옆 위치 (오른쪽 +)
     mem_pts: int = 0                    # 기억 점 수 (차선 기억이 켜졌을 때)
     ff_kappa: Optional[float] = None    # 도면 곡률 (왼쪽 +, 1/m). 미리 넣기가 켜졌을 때
     lookahead_mm: Optional[float] = None
@@ -351,12 +392,14 @@ class LaneOutput:
             'mem_pts', 'ff_kappa', 'lookahead_mm',
             'kappa', 'speed_scale', 'status', 'source', 'offset_mm',
             'heading_rad', 'path_kappa', 'low_conf', 'stoplines_mm',
-            'crosswalk_lines_mm', 'end_lines_mm', 'line_left', 'line_right', 'lane_id')}
+            'crosswalk_lines_mm', 'end_lines_mm', 'line_left', 'line_right', 'lane_id',
+            'yellow_guard', 'floor_letter', 'floor_letter_mm', 'floor_letter_off_mm')}
         d['target_mm'] = list(self.target_mm) if self.target_mm else None
         cl = self.debug.get('centerline')
         d['model'] = ('circle' if cl.circle is not None else 'poly') if cl is not None else None
         d['circle_r_mm'] = round(cl.circle[2]) if cl is not None and cl.circle is not None else None
         d['inner'] = self.debug.get('inner')      # 코너 안쪽 선 기준이면 'L'/'R'
+        d['realign_deg'] = self.debug.get('realign_deg')   # 크게 기운 노란 선으로 방향 바로잡는 중이면 그 선 각도
         return d
 
 
@@ -1157,6 +1200,45 @@ def path_geometry(cl: Centerline, y_eval: float) -> Tuple[float, float]:
 # ---------------------------------------------------------------------------
 # 정지선
 # ---------------------------------------------------------------------------
+def detect_floor_letter(bev_white: np.ndarray, cfg: 'BevConfig', p: 'LaneParams'):
+    """바닥 흰 글자 A/B. 글자 크기·내 차로 안·화면 가장자리에 안 잘린 흰 덩어리의 구멍 수: 1 = 'A', 2 = 'B'.
+    반환 (글자, 앞바퀴 -> 가까운 끝 mm, 옆 위치 mm 오른쪽 +) 또는 None (가장 가까운 것 하나)."""
+    img = (bev_white > 0).astype(np.uint8)
+    h, w = img.shape[:2]
+    cnts, hier = cv2.findContours(img, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+    if hier is None:
+        return None
+    hier = hier[0]
+    px_area = cfg.mm_per_px_x * cfg.mm_per_px_y
+    best = None
+    for i, c in enumerate(cnts):
+        if hier[i][3] != -1:
+            continue                                   # 바깥 윤곽만
+        x, y, bw, bh = cv2.boundingRect(c)
+        if x <= 0 or y <= 0 or x + bw >= w or y + bh >= h:
+            continue                                   # 화면 가장자리에 잘림 (글자 전체가 안 보임)
+        hh, ww = bh * cfg.mm_per_px_y, bw * cfg.mm_per_px_x
+        if not (p.floor_letter_min_h_mm <= hh <= p.floor_letter_max_h_mm
+                and p.floor_letter_min_w_mm <= ww <= p.floor_letter_max_w_mm):
+            continue
+        off = cfg.col_to_x_mm(x + bw / 2.0)
+        if abs(off) > p.floor_letter_max_off_mm:
+            continue
+        fill = float(img[y:y + bh, x:x + bw].sum()) / max(1.0, bw * bh)   # 흰 화소 비율 (구멍 빼고)
+        holes = 0
+        j = hier[i][2]
+        while j != -1:
+            if cv2.contourArea(cnts[j]) * px_area >= p.floor_letter_hole_mm2:
+                holes += 1
+            j = hier[j][0]
+        if holes not in (1, 2) or fill > p.floor_letter_max_fill:
+            continue
+        near = float(cfg.row_to_y_mm(y + bh) - cfg.ref_to_front_axle_mm)
+        if best is None or near < best[1]:
+            best = ('A' if holes == 1 else 'B', near, float(off))
+    return best
+
+
 def detect_stoplines(bev_white: np.ndarray, center_col: float, cfg: BevConfig,
                      p: LaneParams) -> List[Tuple[float, bool]]:
     """차로 안쪽을 가로지르는 흰 띠를 찾는다.
@@ -1427,7 +1509,20 @@ class LaneFollower:
         if p.line_types:
             out.line_left = classify_line(left, raw_lane, bev_white, cfg, p)
             out.line_right = classify_line(right, raw_lane, bev_white, cfg, p)
-            out.lane_id = lane_id_from_types(out.line_left, out.line_right) if det.status == 'BOTH' else None
+            if det.status == 'BOTH':
+                out.lane_id = lane_id_from_types(out.line_left, out.line_right)
+            elif p.lane_color == 'both':
+                # 11/14: 3차선(M7)에서 한쪽 선만 보여도 그것이 노란 실선이면 바깥 차로(왼쪽=1차선, 오른쪽=3차선)
+                if (det.status == 'L' and out.line_left
+                        and out.line_left.get('color') == 'yellow' and not out.line_left.get('dashed', False)):
+                    out.lane_id = 1
+                elif (det.status == 'R' and out.line_right
+                      and out.line_right.get('color') == 'yellow' and not out.line_right.get('dashed', False)):
+                    out.lane_id = -1
+                else:
+                    out.lane_id = None
+            else:
+                out.lane_id = None
         self.prev_line_masks = (self._line_mask(lab_full, left), self._line_mask(lab_full, right))
 
         fit_order = self.fit_order_override or (1 if self.mode == 'zigzag' else p.fit_order)
@@ -1555,6 +1650,11 @@ class LaneFollower:
             kappa_raw, source = self._heading_kappa(yaw, self.yaw_ref, speed), 'heading'
         elif source == 'coast':
             kappa_raw = self.kappa_cmd
+        elif ((kappa_raw is None or (out.status in ('L', 'R') and source == 'lane'))
+              and self._realign(raw_lane, yaw, speed, out) is not None):
+            # 놓쳤거나, 한쪽 선만 보이는데 크게 기운 노란 선이 있으면 그 선은 '가로지르는 차선' (따라가면 뚫고 나감)
+            kappa_raw, source = self._realign_k, 'realign'
+            out.speed_scale = p.realign_speed
         elif kappa_raw is None:
             # 차선을 놓침
             self.lost_frames += 1
@@ -1604,10 +1704,53 @@ class LaneFollower:
             kappa_raw = kappa_raw + w * (k_ff - kappa_raw)
         out.source = source
 
+        if (p.corner_kappa_gain != 1.0 and source in ('lane', 'memory') and kappa_raw is not None
+                and abs(kappa_raw) > p.corner_gain_from):
+            kappa_raw = kappa_raw * p.corner_kappa_gain           # 커브: 조금 더 크게 (위 corner_kappa_gain 설명)
+
+        # 11/14: 노란 실선 이탈 방지 강제 조향 (M7 3차선 바깥 노란 실선 및 일반 구간 노란 실선 경계 보호)
+        hard_guard = False
+        if (p.yellow_solid_guard and source not in ('stop', 'heading') and self.mode == 'normal'
+                and (p.lane_color == 'both' or not p.yellow_guard_three_lane_only)):
+            l_yellow_solid = (out.line_left is not None
+                              and out.line_left.get('color') == 'yellow'
+                              and not out.line_left.get('dashed', False))
+            r_yellow_solid = (out.line_right is not None
+                              and out.line_right.get('color') == 'yellow'
+                              and not out.line_right.get('dashed', False))
+            if p.yellow_guard_one_side_only and l_yellow_solid and r_yellow_solid:
+                l_yellow_solid = r_yellow_solid = False          # 일반 1차로 (양쪽 노란 실선): 가운데 맞추기에 맡김
+            y_lim = min(look, p.yellow_guard_look_mm)
+            dist_l, dist_r = None, None
+            if l_yellow_solid and lpix_mm is not None and len(lpix_mm) > 0:
+                near_l = lpix_mm[lpix_mm[:, 1] <= y_lim]
+                pts_l = near_l if len(near_l) >= 3 else lpix_mm
+                dist_l = -float(np.percentile(pts_l[:, 0], 85))
+            if r_yellow_solid and rpix_mm is not None and len(rpix_mm) > 0:
+                near_r = rpix_mm[rpix_mm[:, 1] <= y_lim]
+                pts_r = near_r if len(near_r) >= 3 else rpix_mm
+                dist_r = float(np.percentile(pts_r[:, 0], 15))
+            span = max(p.yellow_guard_margin_mm - p.yellow_guard_hard_mm, 1.0)
+            if dist_l is not None and dist_l < p.yellow_guard_margin_mm and (dist_r is None or dist_l <= dist_r):
+                out.yellow_guard = 'L'
+                urg = max(p.yellow_guard_min_urg, min(1.0, (p.yellow_guard_margin_mm - dist_l) / span))
+                k_guard = -min(p.kappa_max, urg * p.kappa_max * p.yellow_guard_gain)
+                kappa_raw = min(kappa_raw, k_guard)
+                hard_guard = dist_l <= p.yellow_guard_hard_mm
+            elif dist_r is not None and dist_r < p.yellow_guard_margin_mm:
+                out.yellow_guard = 'R'
+                urg = max(p.yellow_guard_min_urg, min(1.0, (p.yellow_guard_margin_mm - dist_r) / span))
+                k_guard = min(p.kappa_max, urg * p.kappa_max * p.yellow_guard_gain)
+                kappa_raw = max(kappa_raw, k_guard)
+                hard_guard = dist_r <= p.yellow_guard_hard_mm
+
         # 곡률 명령 필터: EMA -> 변화율 제한 -> 클램프
-        k_f = p.kappa_alpha * kappa_raw + (1.0 - p.kappa_alpha) * self.kappa_cmd
-        k_f = self.kappa_cmd + float(np.clip(k_f - self.kappa_cmd,
-                                             -p.kappa_rate_max, p.kappa_rate_max))
+        if hard_guard:
+            k_f = kappa_raw
+        else:
+            k_f = p.kappa_alpha * kappa_raw + (1.0 - p.kappa_alpha) * self.kappa_cmd
+            k_f = self.kappa_cmd + float(np.clip(k_f - self.kappa_cmd,
+                                                 -p.kappa_rate_max, p.kappa_rate_max))
         self.kappa_cmd = float(np.clip(k_f, -p.kappa_max, p.kappa_max))
         out.kappa = self.kappa_cmd
         if source != 'stop':
@@ -1631,6 +1774,10 @@ class LaneFollower:
             lines = detect_stoplines(bev_white, center_col, cfg, p)
             out.stoplines_mm = [d for d, _ in lines]
             out.crosswalk_lines_mm = [d for d, bars in lines if bars]
+            if p.floor_letter:
+                fl = detect_floor_letter(bev_white, cfg, p)
+                if fl is not None:
+                    out.floor_letter, out.floor_letter_mm, out.floor_letter_off_mm = fl
             # 주차 칸 끝 선: 흰+노란 마스크, 차 정면 기준 (칸 안에서는 차선 중심 추정이 엉뚱할 수 있음)
             both = bev_white if raw_lane is None else cv2.bitwise_or(bev_white, raw_lane)
             out.end_lines_mm = [d for d, _ in detect_stoplines(both, cfg.vehicle_col, cfg, p)]
@@ -1756,6 +1903,42 @@ class LaneFollower:
         ds = np.arange(len(ks)) * self.route_step_mm
         q = np.linspace(d_mm - half_win_mm, d_mm + half_win_mm, 7)
         return float(np.mean(np.interp(q, ds, ks)))
+
+    def _realign(self, raw_lane, yaw, speed, out) -> Optional[float]:
+        """선을 놓쳤을 때 크게 기운 노란 선이 보이면 그 선과 나란해지는 곡률 (realign_deg 설명). 없으면 None."""
+        p, cfg = self.p, self.cfg
+        if p.realign_deg <= 0.0 or p.lane_color != 'yellow' or self.mode != 'normal' or raw_lane is None:
+            return None
+        m = (raw_lane > 0).astype(np.uint8)
+        n, lab, stats, _ = cv2.connectedComponentsWithStats(m, connectivity=8)
+        best = None
+        for i in range(1, n):
+            ys, xs = np.nonzero(lab == i)
+            if len(xs) < 20:
+                continue
+            xmm = (xs - cfg.vehicle_col) * cfg.mm_per_px_x                  # 오른쪽 +
+            ymm = cfg.row_to_y_mm(ys)                                       # 앞 +
+            if math.hypot(np.ptp(xmm), np.ptp(ymm)) < p.realign_min_mm:
+                continue
+            pts = np.stack([xmm, ymm], 1).astype(np.float32)
+            vx, vy, _, _ = cv2.fitLine(pts, cv2.DIST_L2, 0, 0.01, 0.01).ravel()
+            if vy < 0:
+                vx, vy = -vx, -vy
+            a = math.atan2(float(vx), float(vy))                            # 선 방향, 오른쪽 + (차 진행 방향 0)
+            d = float(np.min(np.hypot(xmm, ymm)))
+            if abs(a) >= math.radians(p.realign_deg) and (best is None or d < best[1]):
+                best = (a, d)
+        if best is None:
+            return None
+        a = best[0]
+        out.debug['realign_deg'] = round(math.degrees(a), 1)
+        if yaw is not None:
+            k = self._heading_kappa(yaw, yaw - a, speed)                    # 오른쪽으로 a 돌면 선과 나란함
+        else:
+            k = -math.copysign(min(p.kappa_max, abs(a) * 2.0), a)
+        self._realign_k = float(max(-p.kappa_max, min(p.kappa_max, k)))
+        self.lost_frames = 0
+        return self._realign_k
 
     def _lost_search(self, yaw, dist_mm, speed) -> Optional[float]:
         """선을 오래 놓쳤을 때 찾기 조향 (lost_search 설명). 다 찾아봤으면 None (-> 정지)."""

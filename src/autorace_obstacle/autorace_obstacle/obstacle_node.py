@@ -179,6 +179,14 @@ class ObstacleNode(Node):
         # 지금 몇 차선인지 늘 (회피 중: 회피 노드 / 그 밖: 차선 노드 선 종류). 알 때만, 바뀌거나 1초마다
         self.lane_pub = self.create_publisher(String, '/m7/lane', 10)
         self.lane_pub_last = (None, 0.0)
+        # 11/14 밤 확인용 실시간 토픽 2개 (M7 동안 10 Hz, 문자열 앞에 순번 #n):
+        #   /m7_1_now_lane    지금 몇 차선인지 + 어떻게 알았나
+        #   /m7_2_target_lane 어느 차선을 목표로 정했나 + 이유 (회피 노드 차로별 판단 / 코너 미리보기)
+        #   보기: ros2 topic echo /m7_1_now_lane  /  ros2 topic echo /m7_2_target_lane
+        self.m7_now_pub = self.create_publisher(String, '/m7_1_now_lane', 10)
+        self.m7_tgt_pub = self.create_publisher(String, '/m7_2_target_lane', 10)
+        self.m7_seq = 0
+        self.m7_pub_t = 0.0
         self.last_exit = None        # 마지막 /m7/exit_lane (M2 시작 때 다시 보냄)
         self.param_cli = self.create_client(
             SetParameters, g_name(g('m7_avoid_node').value) + '/set_parameters')
@@ -248,7 +256,12 @@ class ObstacleNode(Node):
         req.parameters = [ParamMsg(name='section_length', value=ParameterValue(
             type=ParameterType.PARAMETER_DOUBLE, double_value=float(section_m))),
             ParamMsg(name='start_heading_deg', value=ParameterValue(
-                type=ParameterType.PARAMETER_DOUBLE, double_value=float(hd or 0.0)))]
+                type=ParameterType.PARAMETER_DOUBLE, double_value=float(hd or 0.0))),
+            # 코너 미리보기로 정한 차로 (+1/-1, 0 = 없음) — 지난 판 값이 남지 않게 늘 넣음
+            ParamMsg(name='start_target', value=ParameterValue(
+                type=ParameterType.PARAMETER_INTEGER, integer_value=int(self.link.start_target or 0))),
+            ParamMsg(name='start_y', value=ParameterValue(
+                type=ParameterType.PARAMETER_DOUBLE, double_value=float(self.link.start_y_m or 0.0)))]
         self.param_cli.call_async(req).add_done_callback(
             lambda _f: self.enable_pub.publish(Bool(data=True)))
 
@@ -309,6 +322,8 @@ class ObstacleNode(Node):
         lx, hw = g('laser_x_mm').value, self.link.p.trigger_half_width_mm
         ahead = [c['near_x'] - lx for c in clusters if abs(c['y']) <= hw and c['near_x'] > lx]
         self.link.on_front(min(ahead) if ahead else None)
+        # M7 코너 미리보기: 코너를 도는 동안 라이다 점을 3차선 좌표로 쌓아 2차선 막힘·빈 옆 차로를 미리 정함 (m7_link 설명 8)
+        self.link.on_scan_points(pts)
         state = {'clusters': clusters[:12], 'lane_occupancy': occ,
                  'front_min_mm': min(near) if near else None,
                  'cones_done': False, 'cone_ahead_mm': None, 'cone_any_ahead_mm': None}
@@ -377,6 +392,11 @@ class ObstacleNode(Node):
                 ln['state'] = self.mstate
                 self.lane_pub.publish(String(data=json.dumps(ln, ensure_ascii=False)))
                 self.lane_pub_last = (key, now)
+        if (self.mstate == 'M7_OBSTACLE' or self.link.phase in ('armed', 'running')) and now - self.m7_pub_t >= 0.1:
+            self.m7_pub_t = now
+            self.m7_seq += 1
+            self.m7_now_pub.publish(String(data=f'#{self.m7_seq} {self.link.now_text()}'))
+            self.m7_tgt_pub.publish(String(data=f'#{self.m7_seq} {self.link.target_text()}'))
         rep = self.link.pop_report()
         if rep is not None:
             self.last_exit = rep

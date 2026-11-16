@@ -659,3 +659,177 @@ def test_sign_off_waits_until_settled_in_side_lane():
     assert ('disable',) not in link.update(5.0, mission(17973.0 - 600.0), {})
     link.on_avoid_state({'state': 'RUN', 'target': -1, 'now_lane': -1, 'psi_deg': -3.0, 'y': -0.50})
     assert ('disable',) in link.update(5.1, mission(17973.0 - 590.0), {})
+
+
+# --- 11/14: 코너 미리보기 (코너 도는 중 2차선 막힘 + 1·3차선 장애물을 보고 갈 차로를 미리 정함) -----------------
+from autorace_obstacle.m7_link import CornerPreview  # noqa: E402
+
+LW = 520.0
+
+
+def _limo_pts(cars, step=15.0):
+    """3차선 좌표(시작선 x=0, 2차선 y=0, 왼쪽 +, mm)의 정차 LIMO [(앞면 x, 차로 +1/0/-1)] -> 둘레 점."""
+    pts = []
+    for x0, lane in cars:
+        yc = lane * LW
+        for i in range(int(320 / step) + 1):
+            pts += [(x0 + i * step, yc - 110.0), (x0 + i * step, yc + 110.0)]
+        for j in range(int(220 / step) + 1):
+            pts += [(x0, yc - 110.0 + j * step), (x0 + 320.0, yc - 110.0 + j * step)]
+    return pts
+
+
+def _to_vehicle(pre, pts_world, turn, mirror=False):
+    """미리보기와 같은 코너 모형 자세에서 본 차 기준점 좌표 점들 (mirror: 왼쪽 코너 트랙)."""
+    x, y, psi, _ = pre.pose(-abs(turn))
+    c, s = math.cos(psi), math.sin(psi)
+    out = []
+    for X, Y in pts_world:
+        dx, dy = X - x, Y - y
+        vx, vy = c * dx + s * dy, -s * dx + c * dy
+        out.append((vx, -vy) if mirror else (vx, vy))
+    return out
+
+
+def _preview(cars, mirror=False, fork=None):
+    pre = CornerPreview(M7LinkParams())
+    world = _limo_pts(cars)
+    if mirror:
+        world = [(x, -y) for x, y in world]
+    for deg in range(20, 61, 4):
+        th = math.radians(deg)
+        pre.add_scan(_to_vehicle(pre, [(x, -y) if mirror else (x, y) for x, y in world], th, mirror),
+                     th if mirror else -th)
+    return pre.decide(fork, (60.0, 65.0, 70.0, 75.0, 80.0), 60.0)
+
+
+def test_preview_pose_matches_corner_drawing():
+    pre = CornerPreview(M7LinkParams())
+    assert pre.pose(-math.radians(10.0)) is None                       # 코너 초입은 안 씀
+    x, y, psi, side = pre.pose(-math.pi / 2)
+    assert abs(x + 288.0) < 1e-6 and abs(y) < 1e-6 and abs(psi) < 1e-9 and side < 0   # 코너 끝 = 2차선 중심, 직선 방향
+
+
+def test_preview_near_lane2_goes_outer_lane():
+    """코너 직후(시작선 +300 mm) 2차선 LIMO: 코너 중간엔 차가 바깥을 보고 있어 안쪽 3차선은 코너보다 더 꺾어야 함
+    -> 비켜 가는 여유가 바깥 1차선이 훨씬 큼. 3차선이 멀리까지 비어 있어도 1차선 (켤 각: 비켜 갈 수 있는 가장 늦은 각)."""
+    d = _preview([(300.0, 0), (2000.0, 1)])
+    assert d['blocked'] is not None and d['blocked'] <= 300.0
+    assert d['gap'][1] > d['gap'][-1] + 50.0
+    assert d['lane'] == 1
+
+
+def test_preview_very_near_lane2_enables_earlier():
+    """시작선 바로 앞 2차선 LIMO: 80°에서 켜면 1차선으로도 못 비켜 감 -> 코너 안에서 더 일찍(60~75°) 켬."""
+    d = _preview([(50.0, 0)])
+    assert d['lane'] == 1 and 60.0 <= d['enable_deg'] < 80.0
+    pre = CornerPreview(M7LinkParams())
+    assert pre.reach_gap(1, 0.0, pre.enable_pose(80.0)) < 60.0 < pre.reach_gap(1, 0.0, pre.enable_pose(d['enable_deg']))
+
+
+def test_preview_checks_side_lane_obstacle_beside_lane2():
+    """2차선 옆(같은 줄) 1차선에도 LIMO -> 3차선. 3차선은 늦게(80°) 켜야 잘 비켜 감."""
+    d = _preview([(1000.0, 0), (1000.0, 1)])
+    assert d['free'][1] <= 1000.0 and d['free'][-1] > 9000.0
+    assert d['lane'] == -1 and d['enable_deg'] == 80.0           # 충분히 멀면 일찍 안 켬
+
+
+def test_preview_avoids_dead_end_lane():
+    """1차선 다음 장애물 근처에 2차선도 막힘(두 칸 건너야 함) -> 1차선은 막다름, 3차선으로."""
+    d = _preview([(1000.0, 0), (2200.0, 0), (2200.0, 1)])
+    assert d['dead'][1] and not d['dead'][-1]
+    assert d['lane'] == -1
+
+
+def test_preview_no_decision_when_lane2_clear_or_far():
+    assert _preview([(1000.0, 1), (1000.0, -1)])['lane'] is None      # 2차선 비어 있음 (옆 차로만)
+    assert _preview([(2200.0, 0)])['lane'] is None                     # 2차선 장애물이 멀면 회피 노드에 맡김
+
+
+def test_preview_both_side_lanes_blocked_beside_gives_up():
+    d = _preview([(300.0, 0), (300.0, 1), (300.0, -1)])
+    assert d['lane'] is None
+
+
+def test_preview_tie_prefers_fork_lane():
+    """둘 다 비고 둘 다 갈 수 있으면(2차선 장애물이 1 m 앞) 갈림길 방향 쪽."""
+    assert _preview([(1000.0, 0)], fork='A')['lane'] == 1
+    assert _preview([(1000.0, 0)], fork='B')['lane'] == -1
+
+
+def test_preview_left_corner_is_mirror():
+    """왼쪽 코너 트랙: 오른쪽 코너에서 1차선(+1)을 고를 배치의 거울상 -> 오른쪽(-1) 차로 (코너 바깥)."""
+    right = _preview([(300.0, 0), (2000.0, 1)])
+    left = _preview([(300.0, 0), (2000.0, 1)], mirror=True)
+    assert right['lane'] == 1 and left['lane'] == -1
+
+
+def _corner_drive_scan(link, cars, step=20.0):
+    """_corner_drive 와 같은 코너(-1293 ~ -288 mm, 90° 우회전)에서 라이다 점도 넣음. (켠 위치, 켤 때 돈 각) 반환."""
+    s, yaw0 = -1623.0, math.pi / 2
+    world = _limo_pts(cars)
+    while s < 1500.0:
+        turn = min(max(s + 1293.0, 0.0) / 1005.0, 1.0) * (math.pi / 2)
+        link.on_yaw(yaw0 - turn)
+        link.on_front(None)
+        if turn >= math.radians(link.p.pre_min_turn_deg):
+            link.on_scan_points(_to_vehicle(link.pre, world, turn))
+        acts = link.update(s / 1000.0, mission(13589.0 + s, dist=s + 1623.0),
+                           {'status': 'BOTH', 'heading_rad': 0.0})
+        if any(a[0] == 'enable' for a in acts):
+            return s, math.degrees(turn)
+        s += step
+    return None, None
+
+
+def test_link_corner_preview_enables_early_with_target():
+    link = obstacle_link()
+    s, deg = _corner_drive_scan(link, [(50.0, 0), (2000.0, -1)])
+    want = link.pre.decision['enable_deg']
+    assert s is not None and want < 80.0 and want - 1.0 <= deg <= want + 2.0   # 80°까지 안 기다리고 정한 각에서
+    assert link.trigger == 'pre' and link.start_target == 1          # 회피 노드에 1차선으로 바로
+    y_model = (-640.0 + 640.0 * math.sin(math.radians(deg))) / 1000.0
+    assert abs(link.start_y_m - y_model) < 0.005                     # 2차선 중심 오른쪽 (코너 안쪽)
+    assert abs(link.start_heading_deg - (90.0 - deg)) < 1.0          # 아직 왼쪽(바깥)을 보고 있음
+    st = link.state()['m7_pre']
+    assert st['lane'] == 1 and st['used'] is True
+
+
+def test_link_corner_preview_target_at_corner_end():
+    """2차선 LIMO가 조금 멀면(+300) 켜는 각은 그대로(80°)지만 회피 노드는 켜자마자 1차선으로."""
+    link = obstacle_link()
+    s, deg = _corner_drive_scan(link, [(300.0, 0), (2000.0, 1)])
+    assert s is not None and deg >= 79.0 and link.trigger == 'pre' and link.start_target == 1
+
+
+def test_link_corner_preview_off_keeps_old_behavior():
+    link = obstacle_link(pre_enable=False)
+    s, deg = _corner_drive_scan(link, [(50.0, 0), (2000.0, -1)])
+    assert s is not None and deg >= 79.0 and link.start_target == 0 and link.trigger != 'pre'
+
+
+def test_link_corner_preview_no_target_when_lane2_clear():
+    link = obstacle_link()
+    s, deg = _corner_drive_scan(link, [(1200.0, 1), (1200.0, -1)])
+    assert link.start_target == 0 and link.trigger != 'pre' and deg >= 79.0
+
+
+def test_link_preview_resets_each_run():
+    link = obstacle_link()
+    _corner_drive_scan(link, [(50.0, 0), (2000.0, -1)])
+    link.update(9.0, mission(20000.0, state='M2_FORK'), {})
+    link.update(10.0, mission(12000.0, dist=0.0), {})                # 다음 판 M7
+    assert link.pre.decision is None and link.start_target == 0 and not link.pre.hits
+
+
+def test_live_lane_texts():
+    """11/14 밤: /m7_1_now_lane, /m7_2_target_lane 문자열."""
+    link = obstacle_link()
+    link.update(0.0, mission(12000.0, dist=0.0), {})
+    assert '2차선' in link.now_text() and '진입 기본값' in link.now_text()
+    assert '2차선 직진' in link.target_text()
+    link.phase = 'running'
+    link.on_avoid_state({'state': 'RUN', 'target': 1, 'now_lane': 0,
+                         'lane_why': {'0': '지금 앞 0.40m', '1': '갈 수 있음 앞 9.90m'}})
+    assert '목표 1차선(왼쪽, A)' in link.target_text() and '갈 수 있음' in link.target_text()
+    assert '지금 2차선' in link.now_text() and '회피 노드' in link.now_text()

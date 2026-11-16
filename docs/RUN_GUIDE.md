@@ -69,6 +69,9 @@ ros2 topic pub --once /mission/set_state std_msgs/msg/String "{data: M4_PARKING}
 
 ## 4. 주행 중 보기
 ```bash
+ros2 topic echo /mission/stage      # 11/15: 지금 몇 번 미션인지 (mission: 7 / 확실하지 않으면 null, why에 이유)
+ros2 topic pub --once /mission/resume std_msgs/msg/Empty   # 11/15: 끊긴 뒤 이어 하기 (마지막 기록의 미션·갈림길·위치로)
+ros2 param set /mission_node stop_target_mm 200.0          # 11/15: 정지선 앞 멈추는 거리 바로 바꾸기 (빌드 없이)
 ros2 topic echo /mission/state      # state/sub, note(왜 바뀌었나), parking_armed
 ros2 topic echo /parking/state      # phase, row, stop_how
 ros2 topic echo /avoid/state        # M7 회피
