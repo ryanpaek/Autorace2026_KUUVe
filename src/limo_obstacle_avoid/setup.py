@@ -13,6 +13,7 @@ setup(
         ('share/' + package_name + '/launch', glob('launch/*.launch.py')),
         ('share/' + package_name + '/config', glob('config/*.yaml')),
         ('share/' + package_name + '/rviz', glob('rviz/*.rviz')),
+        ('share/' + package_name + '/paths', glob('paths/*.csv')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -29,6 +30,7 @@ setup(
             's4_lane_change_test = limo_obstacle_avoid.s4_lane_change:main',
             'avoid_node = limo_obstacle_avoid.s5_avoid_node:main',
             'cmd_mux = limo_obstacle_avoid.cmd_mux:main',
+            'm7_replay_node = limo_obstacle_avoid.m7_replay_node:main',
         ],
     },
 )

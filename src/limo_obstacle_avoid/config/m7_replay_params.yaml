@@ -1,0 +1,21 @@
+# M7 녹화 경로 재생 노드(m7_replay_node, launch에서 이름 avoid_node) 설정. avoid_params.yaml(차체·라이다) 뒤에 읽음.
+# 항목 설명: limo_obstacle_avoid/m7_replay_core.py ReplayParams. 실행 중 바꾸기: ros2 param set /avoid_node trigger_mm 560.0
+/**:
+  ros__parameters:
+    trigger_mm: 546.0          # ★ 녹화할 때 라이다 중심 -> 앞 장애물 거리 (녹화한 자리와 같게)
+    latency_s: 0.15            # 판단~반응 지연 (속도 x 지연만큼 일찍 판단)
+    brake_k: 0.13              # 정지 명령 후 밀림 = 0.13 x 속도 (calib 4번)
+    speed: 0.20                # 차로 따라 직진
+    exec_speed: 0.20           # ★ 재생 속도 = 녹화 속도 (path_check.py가 알려 주는 평균)
+    exec_rev_speed: 0.20
+    align_speed: 0.15
+    align_before: true         # 재생 전 가운데 맞추기 (허용 오차 안이면 서지 않고 바로 재생)
+    align_after: true          # 재생 뒤 가운데 맞추기
+    align_tol_y: 0.03
+    align_tol_psi_deg: 3.0
+    align_back: 0.35
+    align_cycles: 3
+    exit_lead: 0.30
+    hit_margin: 0.03
+    path_left: ''              # 비우면 share/limo_obstacle_avoid/paths/m7_left.csv
+    path_right: ''             #        .../m7_right.csv (한쪽만 있으면 거울상, 둘 다 없으면 기본 S자)
