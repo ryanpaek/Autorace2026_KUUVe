@@ -1494,7 +1494,7 @@ DEFAULTS = {
     'wait_blocked_before_pair': True,  # 짝 찾기 전 앞이 막히면 BLOCKED로 끝내지 말고 서서 기다림
     'turn_ref': 'pair',        # 꺾는 기준: 'pair'(짝 중점) | 'corner'(1번 모서리, 리모 폭 가정) | 'center1'(1번 앞면 가운데) | 'target'(꼭짓점 기준 꺾기) | 'path'(캡틴 경로: 정지·Q로 이동·원호, 11/13)
     # 11/16 캡틴 '고정 거리' 방식 (turn_ref: fixed): 주차선 정지 -> 0.3초 -> 104cm 직진 -> 오른쪽 최대 조향 -> (직진) -> 정지
-    'fixed_line_target_mm': 150.0,  # 앞바퀴가 주차선 이만큼 앞에서 정지 (팀 정지선 stop_target_mm과 같은 값)
+    'fixed_line_target_mm': 56.0,   # 앞바퀴가 주차선 이만큼 앞에서 정지 (11/16 캡틴: 앞범퍼가 선에 닿게 = front_bumper_from_axle_mm)
     'fixed_brake_mm': 0.0,     #   정지 명령 뒤 밀리는 거리 (미측정 -> 0). 실차에서 지나치면 그만큼 넣기
     'fixed_slow_speed': 0.10,  #   선 25cm 앞부터 이 속도 이하
     'fixed_line_max_mm': 4000.0,   # 주차 모드 시작 뒤 이만큼 가도 선을 못 보면 FAIL_NO_LINE (정지)

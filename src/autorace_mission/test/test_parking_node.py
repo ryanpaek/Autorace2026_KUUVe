@@ -736,7 +736,9 @@ def test_center_check_margin_and_short_pullout():
 
 
 # ---- 11/16 캡틴 고정 거리 방식 (turn_ref: fixed) ----
-FIXED = {'turn_ref': 'fixed', 'front_stop_mm': 150.0}
+# 시험 트랙(흰 선 -> 주차 구역 500mm)은 실제 트랙과 달라 직진 거리를 940으로 맞춰 논리만 시험한다.
+# 실제 값 1040은 캡틴이 실제 트랙에서 앞범퍼를 선에 대고 잰 값 (11/16).
+FIXED = {'turn_ref': 'fixed', 'front_stop_mm': 150.0, 'fixed_move_mm': 940.0}
 
 
 @pytest.mark.parametrize('r_min', [560.0, 590.0, 620.0, 650.0])
@@ -751,8 +753,8 @@ def test_fixed_stops_at_line_then_moves_1040():
     out, log = {}, []
     drive([1, 3, 5], 2, FIXED, y0=290.0, r_min=590.0, out=out, log=log)
     lg = out['logic']
-    assert abs(lg.turn_at['line_mm'] - 150.0) <= 10.0      # 앞바퀴가 선 15cm 앞에서 섬
-    assert lg.q_s == pytest.approx(1040.0, abs=15.0)
+    assert abs(lg.turn_at["line_mm"] - 56.0) <= 10.0       # 앞범퍼가 선에 닿게 (앞바퀴 5.6cm 앞)
+    assert lg.q_s == pytest.approx(940.0, abs=15.0)
     phases = [i['phase'] for i in log]
     assert phases.index('F_PAUSE') < phases.index('F_MOVE') < phases.index('F_TURN')
 
@@ -762,6 +764,11 @@ def test_fixed_turn_mm_ends_turn_early():
     out = {}
     drive([1, 3, 5], 2, dict(FIXED, fixed_turn_mm=400.0, fixed_turn_deg=0.0), y0=290.0, r_min=590.0, out=out)
     assert 30.0 <= -math.degrees(out['pose'][2]) <= 45.0
+
+
+def test_fixed_defaults_captain_values():
+    assert pn.DEFAULTS['fixed_move_mm'] == 1040.0 and pn.DEFAULTS['fixed_line_target_mm'] == 56.0
+    assert pn.DEFAULTS['fixed_line_target_mm'] == pn.DEFAULTS['front_bumper_from_axle_mm']
 
 
 def test_fixed_no_line_fails_and_stops():

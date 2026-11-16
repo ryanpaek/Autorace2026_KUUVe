@@ -280,7 +280,7 @@ parking_node:
     # 11/16 캡틴 '고정 거리' 방식: turn_ref를 fixed로 바꾸면 사용 (실행 중: ros2 param set /parking_node turn_ref fixed, M4 들어가기 전에)
     #   주차선 정지(앞바퀴 선 15cm 앞) -> 0.3초 -> 104cm 직진 -> 0.3초(조향 미리) -> 오른쪽 최대 조향 87도(IMU) -> (직진) -> 정지
     #   시뮬레이션(반경 560~650, 서보 지연 0~120mm, 차로 왼쪽 5cm): 모두 2번 칸 안·충돌 없음. 반경 590: 칸 가운데 ±1cm, 앞 여유 7cm
-    fixed_line_target_mm: 150.0            # 앞바퀴가 주차선 이만큼 앞에서 정지
+    fixed_line_target_mm: 56.0             # 앞바퀴가 주차선 이만큼 앞에서 정지. 11/16 캡틴 그림: 앞범퍼가 선에 닿게 = 앞바퀴→앞범퍼 56
     fixed_brake_mm: 0.0                    # 정지 명령 뒤 밀리는 거리 (미측정)
     fixed_pause_sec: 0.3
     fixed_move_mm: 1040.0                  # 캡틴 실측 104cm
