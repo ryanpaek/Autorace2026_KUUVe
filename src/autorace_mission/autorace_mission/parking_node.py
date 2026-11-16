@@ -782,6 +782,8 @@ class ParkingV2:
         if self.t_phase is None:
             self._enter('WAIT_LINE', inp)
         self._update_pose(inp)
+        if p.get('turn_ref') == 'fixed':
+            return self._step_fixed(inp)
         moved = inp['dist_mm'] - self.d_phase
 
         if self.phase == 'WAIT_LINE':       # ① 흰 선 기다림 (차선 노드 명령 넘김)
@@ -1251,6 +1253,109 @@ class ParkingV2:
 
         return self._out(0.0, 0.0)          # ⑥ DONE
 
+    # ------------------------------------------------------------------
+    # 11/16 캡틴 '고정 거리' 방식 (turn_ref: fixed). 라이다 판단 없이 선 + 오도메트리 + IMU만 씀.
+    # ① F_LINE   차선 따라가며 주차선(흰 가로선)을 찾고, 앞바퀴가 선 fixed_line_target_mm 앞에 오면 정지
+    #            (선이 카메라 아래로 사라지면 마지막으로 본 거리 - 오도메트리로 셈. fsm.StopApproach와 같은 원리)
+    # ② F_PAUSE  fixed_pause_sec 정지 (= 주차 모드로 바뀜)
+    # ③ F_MOVE   멈춘 자리부터 오도메트리 fixed_move_mm 직진 (멈출 때 방향 유지)
+    # ④ F_TPAUSE fixed_turn_pause_sec 정지 + 끝 presteer_sec 동안 오른쪽 최대 조향 미리 꺾기
+    # ⑤ F_TURN   오른쪽 최대 조향 전진. fixed_turn_deg(IMU) 돌거나 fixed_turn_mm(>0이면) 가면 끝
+    # ⑥ F_STR    바퀴 펴고 fixed_straight_mm 직진 (0이면 건너뜀)
+    # ⑦ DONE     PARKED_FIXED. ③~⑥ 중 앞범퍼 front_stop_mm 안에 물체 -> ③은 기다림, ⑤⑥은 그 자리 정지(PARKED_FIXED_BLOCKED)
+    # ------------------------------------------------------------------
+    def _step_fixed(self, inp):
+        p = self.p
+        if self.phase == 'WAIT_LINE':
+            self.trigger = 'fixed'
+            self.turn_ref_used = 'fixed'
+            self.lane_cfg = {'target_offset_mm': p['target_offset_mm']}   # (publish_lane_cfg일 때만 보냄. 보통 미션 노드가 50 보냄)
+            self._enter('F_LINE', inp)
+        moved = inp['dist_mm'] - self.d_phase
+
+        if self.phase == 'F_LINE':
+            if moved < p['ignore_mm']:                    # 시작 직후 횡단보도 선 무시
+                return self._out(inp['lane_v'], None)
+            lines = [d for d in inp['stoplines_mm'] if d >= p['line_min_mm']]
+            if lines:
+                if self.end_d is None:
+                    cand = lines[0]
+                else:                                     # 이미 잡은 선과 가까운 것만 (다른 선으로 안 갈아탐)
+                    pred = self.end_d - (inp['dist_mm'] - self.end_at)
+                    near = [d for d in lines if abs(d - pred) < 150.0]
+                    cand = min(near, key=lambda d: abs(d - pred)) if near else None
+                if cand is not None:
+                    self.end_d, self.end_at = cand, inp['dist_mm']
+            if self.end_d is None:
+                if moved >= p['fixed_line_max_mm']:
+                    return self._done('FAIL_NO_LINE', inp)
+                return self._out(inp['lane_v'], None)
+            remain = self.end_d - (inp['dist_mm'] - self.end_at)
+            if remain <= p['fixed_line_target_mm'] + p['fixed_brake_mm']:
+                self.turn_at = {'line_mm': round(remain)}
+                self._enter('F_PAUSE', inp)
+                return self._out(0.0, 0.0)
+            v = inp['lane_v']
+            if remain < p['fixed_line_target_mm'] + 250.0:
+                v = min(v, p['fixed_slow_speed'])          # 선 25cm 앞부터 천천히 (밀림 줄임)
+            return self._out(v, None)
+
+        if self.phase == 'F_PAUSE':
+            if inp['t'] - self.t_phase >= p['fixed_pause_sec']:
+                self.yaw_phase0 = inp['yaw']
+                self._enter('F_MOVE', inp)
+            else:
+                return self._out(0.0, 0.0)
+            moved = 0.0
+
+        if self.phase == 'F_MOVE':
+            if moved >= p['fixed_move_mm'] - p['fixed_brake_mm']:
+                self.q_s = round(moved)
+                self._enter('F_TPAUSE', inp)
+                return self._out(0.0, 0.0)
+            if inp['blocked']:
+                return self._out(0.0, 0.0)                 # 앞에 뭐가 있으면 서서 기다림
+            k = 0.0
+            if inp['yaw'] is not None and getattr(self, 'yaw_phase0', None) is not None:
+                k = -p['fixed_heading_gain'] * wrap(inp['yaw'] - self.yaw_phase0)   # 멈출 때 방향 유지
+                k = max(-1.0, min(1.0, k))
+            return self._out(p['fixed_move_speed'], k)
+
+        if self.phase == 'F_TPAUSE':
+            if inp['t'] - self.t_phase >= p['fixed_turn_pause_sec']:
+                self.yaw_turn0 = inp['yaw']
+                self._enter('F_TURN', inp)
+                moved = 0.0
+            elif self._presteer_due(p['fixed_turn_pause_sec'], inp) and not inp['blocked']:
+                return self._out(p['presteer_speed'], KAPPA_FULL_RIGHT)
+            else:
+                return self._out(0.0, 0.0)
+
+        if self.phase == 'F_TURN':
+            deg = self._turned_deg(inp)
+            by_deg = p['fixed_turn_deg'] > 0 and deg >= p['fixed_turn_deg']
+            by_mm = p['fixed_turn_mm'] > 0 and moved >= p['fixed_turn_mm']
+            if by_deg or by_mm:
+                self.stop_how = 'deg' if by_deg else 'mm'
+                self.err = ('turned', round(deg, 1), round(moved))
+                if p['fixed_straight_mm'] > 0:
+                    self._enter('F_STR', inp)
+                    return self._out(0.0, 0.0)
+                return self._done('PARKED_FIXED', inp)
+            if inp['blocked']:
+                self.err = ('blocked', round(deg, 1), round(moved))
+                return self._done('PARKED_FIXED_BLOCKED', inp)
+            return self._out(p['fixed_turn_speed'], KAPPA_FULL_RIGHT)
+
+        if self.phase == 'F_STR':
+            if moved >= p['fixed_straight_mm'] - p['fixed_brake_mm']:
+                return self._done('PARKED_FIXED', inp)
+            if inp['blocked']:
+                return self._done('PARKED_FIXED_BLOCKED', inp)
+            return self._out(p['fixed_move_speed'], 0.0)
+
+        return self._out(0.0, 0.0)                         # DONE
+
     def _look(self):
         """선 따라가기 앞보기 거리. 가운데 다시 맞출 때는 짧게(옆으로 더 빨리 붙음)."""
         if self.center_tries and self.p.get('center_look_mm', 0.0) > 0.0:
@@ -1388,6 +1493,20 @@ DEFAULTS = {
     'follow_max_direct_mm': 3500.0,  # 바로 시작했을 때 짝 없이 이만큼 가면 멈춤. 도면: M4 시작 약 3.8m -> 꺾는 곳 6.56m, 차선 끝 8.13m
     'wait_blocked_before_pair': True,  # 짝 찾기 전 앞이 막히면 BLOCKED로 끝내지 말고 서서 기다림
     'turn_ref': 'pair',        # 꺾는 기준: 'pair'(짝 중점) | 'corner'(1번 모서리, 리모 폭 가정) | 'center1'(1번 앞면 가운데) | 'target'(꼭짓점 기준 꺾기) | 'path'(캡틴 경로: 정지·Q로 이동·원호, 11/13)
+    # 11/16 캡틴 '고정 거리' 방식 (turn_ref: fixed): 주차선 정지 -> 0.3초 -> 104cm 직진 -> 오른쪽 최대 조향 -> (직진) -> 정지
+    'fixed_line_target_mm': 150.0,  # 앞바퀴가 주차선 이만큼 앞에서 정지 (팀 정지선 stop_target_mm과 같은 값)
+    'fixed_brake_mm': 0.0,     #   정지 명령 뒤 밀리는 거리 (미측정 -> 0). 실차에서 지나치면 그만큼 넣기
+    'fixed_slow_speed': 0.10,  #   선 25cm 앞부터 이 속도 이하
+    'fixed_line_max_mm': 4000.0,   # 주차 모드 시작 뒤 이만큼 가도 선을 못 보면 FAIL_NO_LINE (정지)
+    'fixed_pause_sec': 0.3,    # 선에서 멈추는 시간
+    'fixed_move_mm': 1040.0,   # 멈춘 자리부터 직진 거리 (캡틴 실측 104cm)
+    'fixed_move_speed': 0.10,
+    'fixed_heading_gain': 2.0,     # 직진 중 멈출 때 방향 유지 (1/m per rad)
+    'fixed_turn_pause_sec': 0.3,   # 104cm 뒤 멈춤 (끝 presteer_sec 동안 조향 미리 꺾기). 0이면 멈추지 않고 바로 꺾음
+    'fixed_turn_deg': 87.0,    # 오른쪽 최대 조향을 이만큼(IMU) 돌면 끝. 실차는 펴라 한 뒤 2~4도 더 돎 -> 약 90도
+    'fixed_turn_mm': 0.0,      # >0이면 최대 조향으로 이만큼 가면 끝 (각도와 먼저 닿는 쪽). 반경 590이면 400mm = 약 39도
+    'fixed_turn_speed': 0.12,
+    'fixed_straight_mm': 0.0,  # 바퀴 편 뒤 직진 거리 (0 = 바로 정지)
     'turn_from_corner_mm': 140.0,  # corner: 라이다가 1번 모서리 선을 이만큼 지나면 꺾기.
                                #   = turn_lead 320 을 바꾼 값: 2번 가운데 = 모서리 + 410 (칸 52 - 리모 반폭 11), 앞바퀴 = 가운데 - 320,
                                #   라이다 = 앞바퀴 + 47 -> 모서리 + 137. 실차로 맞출 것

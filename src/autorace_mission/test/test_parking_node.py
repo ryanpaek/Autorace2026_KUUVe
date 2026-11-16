@@ -733,3 +733,45 @@ def test_center_check_margin_and_short_pullout():
     assert pulls                                          # 120 mm 넘게 벗어나 한 번은 다시 함
     errs = [i['last_err'] for i in log if i.get('last_err') and i['last_err'][0] == 'center']
     assert all(abs(e[1]) > 50 for e in errs)              # 50 안이면 다시 안 함
+
+
+# ---- 11/16 캡틴 고정 거리 방식 (turn_ref: fixed) ----
+FIXED = {'turn_ref': 'fixed', 'front_stop_mm': 150.0}
+
+
+@pytest.mark.parametrize('r_min', [560.0, 590.0, 620.0, 650.0])
+@pytest.mark.parametrize('lag', [0.0, 120.0])
+def test_fixed_parks_in_cell2(r_min, lag):
+    """주차선 정지 -> 104cm -> 최대 조향 87도: 실제 반경 560~650mm, 서보 지연 0~120mm 모두 2번 칸 안, 충돌 없음."""
+    n_in, hit, res = drive([1, 3, 5], 2, FIXED, y0=290.0, r_min=r_min, steer_lag_mm=lag)
+    assert n_in == 4 and not hit and res == 'PARKED_FIXED'
+
+
+def test_fixed_stops_at_line_then_moves_1040():
+    out, log = {}, []
+    drive([1, 3, 5], 2, FIXED, y0=290.0, r_min=590.0, out=out, log=log)
+    lg = out['logic']
+    assert abs(lg.turn_at['line_mm'] - 150.0) <= 10.0      # 앞바퀴가 선 15cm 앞에서 섬
+    assert lg.q_s == pytest.approx(1040.0, abs=15.0)
+    phases = [i['phase'] for i in log]
+    assert phases.index('F_PAUSE') < phases.index('F_MOVE') < phases.index('F_TURN')
+
+
+def test_fixed_turn_mm_ends_turn_early():
+    """fixed_turn_mm 400 (각도 끔): 반경 590이면 약 39도에서 끝 -> 칸에 덜 들어감 (캡틴 '40cm' 값 확인용)."""
+    out = {}
+    drive([1, 3, 5], 2, dict(FIXED, fixed_turn_mm=400.0, fixed_turn_deg=0.0), y0=290.0, r_min=590.0, out=out)
+    assert 30.0 <= -math.degrees(out['pose'][2]) <= 45.0
+
+
+def test_fixed_no_line_fails_and_stops():
+    lg = pn.ParkingV2(dict(pn.DEFAULTS, **FIXED))
+    v, d, info = 0.18, 0.0, None
+    for i in range(2000):
+        v, k, info = lg.step({'t': i * 0.05, 'dist_mm': d, 'yaw': 0.0, 'lane_v': 0.18, 'lane_w': 0.0,
+                              'stoplines_mm': [], 'clusters': [], 'blocked': False})
+        d += v * 50.0
+        if info['done']:
+            break
+    assert info['result'] == 'FAIL_NO_LINE' and v == 0.0
+    assert d == pytest.approx(pn.DEFAULTS['fixed_line_max_mm'], abs=20.0)
