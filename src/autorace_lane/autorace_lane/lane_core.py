@@ -386,6 +386,11 @@ class LaneOutput:
     #   왼쪽 노란 실선 + 오른쪽 흰 점선 = +1, 양쪽 흰 점선 = 0, 왼쪽 흰 점선 + 오른쪽 노란 실선 = -1
     lane_id: Optional[int] = None
     yellow_guard: Optional[str] = None  # 노란 실선 이탈 방지 강제 조향 작동 여부 ('L' | 'R' | None)
+    # 11/18 시험: 노란 실선까지 옆 거리 (차 중심선 기준 mm, 양수) + 잰 곳의 앞 거리 (제어 기준점 기준 mm).
+    #   M7 재생 노드가 '차로 변경 중 노란선 밟기 직전'을 판단하는 데 씀. 그쪽 선이 노란 실선이 아니면 None
+    yellow_l_mm: Optional[float] = None
+    yellow_r_mm: Optional[float] = None
+    yellow_f_mm: Optional[float] = None
     floor_letter: Optional[str] = None  # 11/15 바닥 갈림길 글자 'A' | 'B' (내 차로 안, 구멍 수로 구분)
     floor_letter_mm: Optional[float] = None    # 앞바퀴 -> 글자 가까운 끝
     floor_letter_off_mm: Optional[float] = None  # 글자 가운데 옆 위치 (오른쪽 +)
@@ -400,7 +405,8 @@ class LaneOutput:
             'kappa', 'speed_scale', 'status', 'source', 'offset_mm',
             'heading_rad', 'path_kappa', 'low_conf', 'stoplines_mm',
             'crosswalk_lines_mm', 'end_lines_mm', 'line_left', 'line_right', 'lane_id',
-            'yellow_guard', 'floor_letter', 'floor_letter_mm', 'floor_letter_off_mm')}
+            'yellow_guard', 'yellow_l_mm', 'yellow_r_mm', 'yellow_f_mm',
+            'floor_letter', 'floor_letter_mm', 'floor_letter_off_mm')}
         d['target_mm'] = list(self.target_mm) if self.target_mm else None
         cl = self.debug.get('centerline')
         d['model'] = ('circle' if cl.circle is not None else 'poly') if cl is not None else None
@@ -1770,10 +1776,15 @@ class LaneFollower:
                 near_l = lpix_mm[lpix_mm[:, 1] <= y_lim]
                 pts_l = near_l if len(near_l) >= 3 else lpix_mm
                 dist_l = -float(np.percentile(pts_l[:, 0], 85))
+                out.yellow_l_mm = dist_l
+                out.yellow_f_mm = float(np.median(pts_l[:, 1]))
             if r_yellow_solid and rpix_mm is not None and len(rpix_mm) > 0:
                 near_r = rpix_mm[rpix_mm[:, 1] <= y_lim]
                 pts_r = near_r if len(near_r) >= 3 else rpix_mm
                 dist_r = float(np.percentile(pts_r[:, 0], 15))
+                out.yellow_r_mm = dist_r
+                if out.yellow_f_mm is None:
+                    out.yellow_f_mm = float(np.median(pts_r[:, 1]))
             span = max(p.yellow_guard_margin_mm - p.yellow_guard_hard_mm, 1.0)
             if dist_l is not None and dist_l < p.yellow_guard_margin_mm and (dist_r is None or dist_l <= dist_r):
                 out.yellow_guard = 'L'
