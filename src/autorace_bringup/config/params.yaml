@@ -52,7 +52,7 @@ mission_node:
     slow_speed: 0.20                       # 서행 (규정 최대 0.2, 11/09 팀 결정)
     approach_speed: 0.18
     m7_speed: 0.20                         # 11/12 밤: M7 전체(코너 차선 주행 + 회피 노드 avoid_params.yaml) 0.20
-    m7_lookahead_mm: 450.0                 # 11/17: 3차선 구간 차선 lookahead (기본 650보다 짧게, 차로 바꾼 뒤 지금 차로에 붙게). 0 = 기본값
+    m7_lookahead_mm: 400.0                 # 11/17 밤 450 -> 400: 차로 바꾼 뒤 지금 차로에 더 빨리 붙게 (시뮬레이션: 15 cm 벗어남 -> 3 cm 안 0.86 -> 0.78 m, 넘침 1.5 cm)
     det_conf: 0.5
     bump_slow_mm: 2500.0                   # 방지턱을 IMU로 못 느꼈을 때 서행 최대 거리 (2순위). 표지를 선 1m 앞에서 봐도 방지턱(위치 미상)까지 덮게. TODO 실측
     bump_imu_rate: 0.30                    # IMU 기울기 속도(rad/s)가 이 이상이면 방지턱. TODO 실측 (손으로 넘겨 보며 확인)
