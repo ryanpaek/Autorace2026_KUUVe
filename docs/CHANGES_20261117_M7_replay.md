@@ -59,3 +59,19 @@ ros2 topic echo /avoid/state     # phase(CRUISE/STOP/ALIGN/EXEC), now_lane, targ
 로그 `[M7 재생]`: 시작할 때 어떤 녹화 파일을 쓰는지, 차로 선택 이유, 정렬 전후 오차, 재생 끝 오차.
 M7만 연습: `/mission/set_state M7_OBSTACLE` (차를 3차선 시작선 30 cm 앞에).
 조정: `ros2 param set /avoid_node trigger_mm 560.0`, `latency_s`, `align_before false`(정렬 끄기) 등 (config/m7_replay_params.yaml).
+
+## 11/17 저녁: M2 갈림길도 녹화 재생 (M7 재생 노드가 이어서)
+- M7 재생 노드가 **M7 끝 지점**(앞범퍼가 섬 앞 꼭짓점 `m2_start_gap` 1.0 m 전)에 오면, 지금 차로(1·2·3)와 A/B
+  (`/fork_direction`, 못 봤으면 `m2_fork_default` A)로 `paths/m2_{차로}-{A|B}.csv` 하나를 재생 → 갈래 안에서 끝(m7_done).
+  끝 차로를 A면 1차선, B면 3차선으로 넘겨(m7_exit) FSM M2가 그 갈래 차선 주행을 이어 감 (섬 지나면 양쪽 선 보통 모드).
+- 차로 번호: 1 = 1차선(진행 방향 왼쪽, A 쪽) / 2 = 가운데 / 3 = 3차선(오른쪽, B 쪽). `/avoid/state`의 now_lane_no.
+- M2 녹화를 쓸 수 있는 차로면 예전 '섬 앞 바깥 차로로 옮기기'는 안 함 (차로 그대로 M7 끝 지점까지).
+- M2 녹화 길에 장애물(라이다)이 있으면 장애물 회피 먼저, 시작 지점 + 0.4 m까지 늦어지면 그 자리에서 M2 시작, 그보다 늦으면 예전 방식.
+- 없는 파일은 좌우 대칭 파일 거울상(1-A↔3-B, 1-B↔3-A, 2-A↔2-B). 시작 로그 `[M2 재생] N/6개`.
+- M2 재생이 섬 지나서까지 M7 안에서 돌므로 FSM `m7_force_after_island_mm` 500 → 1500.
+
+### M2 녹화 방법
+1. 차를 그 차로 **가운데에 반듯이**, **앞범퍼가 섬 앞 꼭짓점(가운데 차로가 갈라지기 시작하는 점)에서 1.0 m 앞**에 놓는다.
+   다른 거리로 녹화했으면 `m2_start_gap`을 그 값으로.
+2. `python3 path_recorder.py m2_1-A.csv` … 갈래 안으로 들어가 **차선 주행이 바로 이어받을 수 있게 갈래 차로 가운데·반듯이**에서 멈춘다.
+3. `paths/`에 복사 후 빌드. `python3 path_check.py m2_1-A.csv`로 모양 확인.

@@ -30,7 +30,7 @@ from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Imu, LaserScan
 from std_msgs.msg import Bool, String
 
-from limo_obstacle_avoid.m7_replay_core import M7Replay, ReplayParams, load_change
+from limo_obstacle_avoid.m7_replay_core import M2_LANE_NO, M7Replay, ReplayParams, load_change, load_m2, m2_name
 from limo_obstacle_avoid.path_track import yaw_of
 
 
@@ -63,6 +63,17 @@ class M7ReplayNode(Node):
         self.left, src_l = load_change(pl, pr, +1, self.p.lane_width)
         self.right, src_r = load_change(pr, pl, -1, self.p.lane_width)
         self.core = M7Replay(self.p, self.left, self.right)
+        self.declare_parameter('m2_dir', '')
+        m2d = self.gp('m2_dir') or d
+        m2, m2src = load_m2(m2d, self.p.m2_mirror)
+        self.core.set_m2(m2, m2src)
+        names = ', '.join(f'{m2_name(k, f)}<-{m2src[(k, f)]}' if not m2src[(k, f)].startswith(m2_name(k, f)) else m2_name(k, f)
+                          for k in (1, 0, -1) for f in ('A', 'B') if (k, f) in m2)
+        missing = [m2_name(k, f) for k in (1, 0, -1) for f in ('A', 'B') if (k, f) not in m2]
+        if self.p.m2_replay:
+            self.get_logger().info(f'[M2 재생] {len(m2)}/6개 ({names or "없음"})'
+                                   + (f' / 없음: {", ".join(missing)} -> 그 경우는 예전 방식' if missing else '')
+                                   + f' / 시작: 앞범퍼가 섬 앞 꼭짓점 {100 * self.p.m2_start_gap:.0f} cm 전')
         self.get_logger().info(f'[M7 재생] 왼쪽 경로: {src_l} / 오른쪽: {src_r} '
                                f'(옆 배율 {self.core.k_left:.2f}/{self.core.k_right:.2f}), 트리거 {self.p.trigger_mm:.0f} mm')
         # 11/17: 경로가 피하려는 장애물을 스스로 비켜 가는지 켤 때 점검 (안 되면 실차에서 늘 '옆 차로 막힘'으로 섬)

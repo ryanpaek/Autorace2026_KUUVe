@@ -19,6 +19,10 @@
     align_back: 0.35
     align_cycles: 3
     exit_lead: 0.30
+    m2_replay: true            # 11/17: M7 끝 지점에서 (지금 차로, A/B) 녹화 m2_{1|2|3}-{A|B}.csv 하나 재생 -> 갈래 안에서 끝
+    m2_start_gap: 1.00         # ★ M2 녹화 시작 자세: 앞범퍼 ~ 섬 앞 꼭짓점 (m). 녹화할 때 잰 거리와 같게
+    m2_fork_default: 'A'       #   A/B 표지를 그때까지 못 봤을 때
+    m2_mirror: true            #   없는 파일은 좌우 대칭 파일 뒤집어 씀 (1-A<->3-B, 1-B<->3-A, 2-A<->2-B)
     accel_reverse: true        # 11/17: 조종기(RC) 후진도 거리에서 빼기 (출발 가속도 방향으로 판단, 축은 자동으로 배움)
     accel_sign: 0              #   0 = 배움 / 1 = 가속도 +x가 앞 / -1 = 뒤 (고정)
     hit_margin: 0.03

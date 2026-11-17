@@ -71,7 +71,7 @@ mission_node:
     obstacle_source_ready: false           # obstacle 노드 완성 후 true
     m7_len_mm: 6000.0                      # 도면 기준, 모의맵 실측으로 확인
     m7_external_avoid: false               # launch의 m7_avoid:=true가 켬 (limo_obstacle_avoid로 회피)
-    m7_force_after_island_mm: 500.0        # 회피가 안 끝나도 섬 끝 + 이만큼에서 M2로
+    m7_force_after_island_mm: 1500.0       # 회피가 안 끝나도 섬 끝 + 이만큼에서 M2로. 11/17 500 -> 1500: M2 갈림길 녹화 재생이 섬 지나서까지 M7 안에서 돎
     fork_from_m7_exit: true                # 갈림길 표지를 못 읽으면 회피가 끝난 차로를 씀
     fork_follow_m7_exit: true              # 표지와 회피 차로가 다를 때 true=차로를 따름 (11/11: M2 시작 때 이미 섬 옆이라 건너갈 수 없음)
     cones_len_mm: 4300.0                   # cones_source_ready=false일 때만 씀 (차선 주행 통과 거리)
