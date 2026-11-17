@@ -168,8 +168,13 @@ def run(layout, left, right, seed=0, verbose=False, fork='A', start_err=True, p=
             if abs(math.degrees(car.th)) < 15 and abs(yin) < 0.15:
                 h = -car.th
                 off = (-(yin) + 0.55 * math.sin(h)) / math.cos(h)
-                m.on_lane({'status': 'BOTH', 'offset_mm': 1000 * off + random.gauss(0, 8),
-                           'heading_rad': h + random.gauss(0, 0.01), 'lane_id': lane})
+                # 차선 노드처럼: 차로 중심선 0.5 m 앞 점으로 pure pursuit 곡률 (왼쪽 +) -> CRUISE 차선 기반 조향
+                xr = 0.5 * math.cos(-car.th) - (-yin) * math.sin(-car.th)
+                yr = 0.5 * math.sin(-car.th) + (-yin) * math.cos(-car.th)
+                kap_l = max(-2.1, min(2.1, 2 * yr / (xr * xr + yr * yr)))
+                m.on_lane({'status': 'BOTH', 'offset_mm': 1000 * off + random.gauss(0, 8), 'source': 'lane',
+                           'heading_rad': h + random.gauss(0, 0.01), 'lane_id': lane,
+                           'kappa': kap_l + random.gauss(0, 0.03)}, t)
         v, kap = m.step(t)
         car.step(v, kap, dt)
         if v < 0:
