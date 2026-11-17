@@ -336,3 +336,35 @@ def test_sim_m2_replay_picks_file_and_ends_in_branch(fork):
         M7Replay.__init__ = orig
     assert r['ok'] and r['clear_cm'] > 1.0 and r['island'] == 0
     assert r['lane'] == (1 if fork == 'A' else -1)
+
+
+# ---------------- 11/17 저녁: 후진 재시도, 시험 시작, 막힌 차로 변경 뒤 차로 기억 ----------------
+def test_backup_when_too_close_then_change():
+    S = _sim()
+    import random
+    random.seed(99)
+    left = S.record_left()
+    S.TRIGGER_MM = 700.0
+    r = S.run([(0, 0.32), (1, 2.6), (-1, 2.6)], left, mirror(left), seed=0, fork='A', p=ReplayParams(trigger_mm=700.0))
+    assert r['ok'] and r['clear_cm'] > 1.0 and r['rev_m'] > 0.3 and r['fork_ok']
+
+
+def test_start_lane_no_and_m2_test_start():
+    m = M7Replay(ReplayParams(start_lane_no=3, m2_test_start=True), default_change(1), default_change(-1))
+    m.start()
+    assert m.lane == -1 and m.pose()[1] == pytest.approx(-0.52)
+    assert m.m2_x() == pytest.approx(0.0)
+
+
+def test_blocked_lane_change_does_not_count_as_changed():
+    m = M7Replay(ReplayParams(), default_change(1), default_change(-1))
+    m.start()
+    m.pts = []
+    m._begin_exec(1, None, 0.0, 'test')          # 0 -> 1 시작
+    assert m.target == 1 and m.lane == 0
+    m._shift(ddy=0.10)                            # 10 cm만 옮기고
+    m.pts = [(0.0, 0.0, 0.22, 0.0)]               # 바로 앞(앞범퍼 2 cm)에 물체 -> 재생 중 정지
+    for i in range(60):
+        m.step(0.1 * i)
+    assert m.state != 'EXEC'
+    assert m.lane == 0 and m.target == 0          # 바꾼 걸로 치지 않음 (위치로 본 가장 가까운 차로)

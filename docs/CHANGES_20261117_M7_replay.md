@@ -75,3 +75,15 @@ M7만 연습: `/mission/set_state M7_OBSTACLE` (차를 3차선 시작선 30 cm �
    다른 거리로 녹화했으면 `m2_start_gap`을 그 값으로.
 2. `python3 path_recorder.py m2_1-A.csv` … 갈래 안으로 들어가 **차선 주행이 바로 이어받을 수 있게 갈래 차로 가운데·반듯이**에서 멈춘다.
 3. `paths/`에 복사 후 빌드. `python3 path_check.py m2_1-A.csv`로 모양 확인.
+
+## 11/17 밤: 너무 가까우면 후진 후 재시도, 차로 기억, M2만 시험
+- **차로 기억**: 재생이 끝까지 가야(Track 끝) 목표 차로로 셈. 재생 중 2초 넘게 막혀 그만두거나 경로에서 벗어나면 그때 위치(odom+IMU,
+  카메라 보정)로 가장 가까운 차로. 평소엔 옆 위치가 차로 중심에서 0.6칸 넘게 벗어나면 그 차로로, 카메라 lane_id 7번 중 5번이면 그 차로로.
+- **후진 재시도** (`backup_if_mm` 350): 지금 차로 앞 장애물이 350 mm보다 가까우면 차로 중심선을 따라 후진(카메라로 고친 옆 위치·방향을
+  맞추며, 0.12 m/s, 최대 0.6 m) → `backup_to_mm`(0 = trigger_mm 540)까지 → 다시 판단(빈 차로면 녹화 재생).
+  540까지 가는 이유: 녹화 경로는 장애물 앞 540 mm에서 시작하는 모양이라 350에서 시작하면 앞부분을 건너뛰고 급하게 꺾음.
+- **M2만 시험**: `ros2 param set /avoid_node m2_test_start true`, `start_lane_no 1|2|3`,
+  `ros2 param set /obstacle_node m7_trigger_fallback_mm 0.0` → 차를 앞범퍼가 섬 앞 꼭짓점 m2_start_gap + 0.3 m 앞에 놓고
+  `/mission/set_state M7_OBSTACLE` (켜지는 자리 = 시작선 + 0, set_state는 시작선 30 cm 앞으로 잡음).
+- 안전 정지 범위: 각도가 아니라 차체 폭(±12 cm + 1.5~4 cm) 직사각형. 진행 방향 차체 바로 앞(앞범퍼 -2 ~ +4 cm + 제동 거리)만.
+  옆 물체는 아무리 가까워도 차체 폭 밖이면 안 멈춤.
