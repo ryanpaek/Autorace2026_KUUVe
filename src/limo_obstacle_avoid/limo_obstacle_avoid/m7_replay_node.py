@@ -65,6 +65,13 @@ class M7ReplayNode(Node):
         self.core = M7Replay(self.p, self.left, self.right)
         self.get_logger().info(f'[M7 재생] 왼쪽 경로: {src_l} / 오른쪽: {src_r} '
                                f'(옆 배율 {self.core.k_left:.2f}/{self.core.k_right:.2f}), 트리거 {self.p.trigger_mm:.0f} mm')
+        # 11/17: 경로가 피하려는 장애물을 스스로 비켜 가는지 켤 때 점검 (안 되면 실차에서 늘 '옆 차로 막힘'으로 섬)
+        chk = self.core.check_paths()
+        for d, name in ((+1, '왼쪽'), (-1, '오른쪽')):
+            if not chk[d]:
+                self.get_logger().warn(
+                    f'[M7 재생] ★ {name} 경로가 트리거 {self.p.trigger_mm:.0f} mm 앞 장애물에 닿음 -> 이 방향은 늘 막힘으로 판단됨. '
+                    f'녹화 파일(paths/m7_left.csv, m7_right.csv)이 있는지, 녹화 시작 거리와 trigger_mm이 같은지 확인')
         self.dry = bool(self.gp('dry_run'))
         self.pub_cmd = self.create_publisher(Twist, '/avoid/cmd_vel_preview' if self.dry else '/avoid/cmd_vel', 10)
         self.pub_active = self.create_publisher(Bool, '/avoid/active', 10)
@@ -128,7 +135,7 @@ class M7ReplayNode(Node):
         if not self.active:
             return
         try:
-            self.core.on_lane(json.loads(m.data))
+            self.core.on_lane(json.loads(m.data), time.monotonic())
         except (ValueError, TypeError, AttributeError):
             pass
 

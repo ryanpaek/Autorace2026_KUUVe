@@ -17,5 +17,7 @@
     align_cycles: 3
     exit_lead: 0.30
     hit_margin: 0.03
+    cruise_lane: true          # 11/17: 재생 전(직진)은 차선 기반 조향만 (/lane/status 곡률 그대로). 차선을 놓친 동안만 위치 추정
+    plan_ahead: true           # 11/17: 트리거 전에도 장애물 위치·빠질 차로를 미리 계산 (/avoid/state plan, 조향엔 안 씀)
     path_left: ''              # 비우면 share/limo_obstacle_avoid/paths/m7_left.csv
     path_right: ''             #        .../m7_right.csv (한쪽만 있으면 거울상, 둘 다 없으면 기본 S자)

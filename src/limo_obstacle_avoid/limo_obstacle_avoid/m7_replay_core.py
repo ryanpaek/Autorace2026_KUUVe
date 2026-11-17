@@ -98,6 +98,13 @@ class ReplayParams:
     cam_gate: float = 0.15
     cam_max_deg: float = 12.0
     cam_row: float = 0.55
+    # 11/17: 트리거 전(CRUISE) 조향은 차선 기반만. 차선 노드 /lane/status 곡률을 그대로 씀 (선이 보이고 같은 차로일 때).
+    #   차선이 cruise_lane_fresh_s 넘게 안 오거나 선을 놓쳤으면 그동안만 위치 추정(odom+IMU) 직선 따라가기
+    cruise_lane: bool = True
+    cruise_lane_fresh_s: float = 0.4
+    # 11/17: 트리거 전에도 장애물 위치와 '어느 차로로 빠질지'를 plan_period_s마다 미리 계산해 둠 (/avoid/state plan). 조향에는 안 씀
+    plan_ahead: bool = True
+    plan_period_s: float = 0.3
     cam_id_need: int = 5                # 차선 노드 lane_id가 최근 7번 중 이만큼 같으면 차로 번호를 그걸로 (CRUISE 때만)
     cam_id_window: int = 7
 
@@ -255,6 +262,11 @@ class M7Replay:
         self.n_exec = 0
         self.safety_since = None
         self.backed_off = False
+        self.lane_msg: Optional[dict] = None      # 마지막 /lane/status
+        self.lane_t: Optional[float] = None
+        self.steer_src = '-'                      # CRUISE 조향 출처: lane(차선 노드) / pose(위치 추정)
+        self.plan: dict = {}                      # 미리 계산한 회피 계획
+        self.plan_t = -1e9
 
     # ---------- 위치 ----------
     def reset_pose(self):
@@ -323,9 +335,11 @@ class M7Replay:
             out[k] = near
         return out
 
-    def on_lane(self, lane: dict):
-        """차선 노드 /lane/status: 양쪽 선이 보이면 옆 위치·방향 보정, 차로 번호 확인."""
+    def on_lane(self, lane: dict, t: Optional[float] = None):
+        """차선 노드 /lane/status: 양쪽 선이 보이면 옆 위치·방향 보정, 차로 번호 확인. CRUISE 조향에도 씀 (cruise_lane)."""
         p = self.p
+        if lane:
+            self.lane_msg, self.lane_t = lane, (t if t is not None else self.scan_t)
         if not p.cam_fix or not lane or self.state in ('IDLE', 'DONE', 'EXEC'):
             return
         lid = lane.get('lane_id')
@@ -341,7 +355,9 @@ class M7Replay:
         # 카메라 차로 번호가 여러 번 같고 지금 추정과 다르면 그 차로로 (CRUISE에서만)
         if self.state == 'CRUISE':
             for cand in (-1, 0, 1):
-                if cand != k and self.cam_ids.count(cand) >= p.cam_id_need:
+                # 양 끝 차로끼리(1 <-> 3차선) 바꾸는 것은 두 칸 차이 -> 창 전체(7번)가 같아야 (한 칸은 5번)
+                need = p.cam_id_need if abs(cand - k) == 1 else p.cam_id_window
+                if cand != k and self.cam_ids.count(cand) >= need:
                     self._shift(ddy=self.center(cand) - self.center(k))
                     self.events.append(f'카메라 차로 번호 {cand} -> 차로 {k} => {cand}로 고침')
                     self.lane = self.target = cand
@@ -448,6 +464,22 @@ class M7Replay:
                         return lx, ly
         return None
 
+    def check_paths(self, obs_len: float = 0.32, obs_half_w: float = 0.115) -> Dict[int, bool]:
+        """녹화 경로가 '피하려는 장애물'(지금 차로, 라이다 trigger_mm 앞 정차 LIMO)을 스스로 비켜 가나. {+1: 왼쪽 됨, -1: 오른쪽 됨}.
+        안 되면 실차에서 늘 '옆 차로 막힘'으로 서 있게 됨 (녹화 파일이 없어 기본 S자를 쓰거나, 녹화 시작 거리 != trigger_mm)"""
+        p = self.p
+        keep_pts, keep_lane = self.pts, self.lane
+        x, y, _ = self.pose()
+        yc = self.center(self.lane)
+        xo = x + p.lidar_x + p.trigger_mm / 1000.0
+        box = [(xo + obs_len * i / 16, yc + sgn * obs_half_w) for i in range(17) for sgn in (-1, 1)]
+        box += [(xo, yc - obs_half_w + 2 * obs_half_w * j / 12) for j in range(13)]
+        self.pts = [(bx, by, 0.0, 0.0) for bx, by in box]
+        try:
+            return {d: self.path_hit(d, x) is None for d in (+1, -1)}
+        finally:
+            self.pts, self.lane = keep_pts, keep_lane
+
     def aligned(self) -> bool:
         x, y, psi = self.pose()
         return (abs(y - self.center(self.lane)) <= self.p.align_tol_y
@@ -496,6 +528,15 @@ class M7Replay:
         return v, k
 
     def _cruise_cmd(self, t):
+        p = self.p
+        ln = self.lane_msg
+        if (p.cruise_lane and ln and self.lane_t is not None and t - self.lane_t <= p.cruise_lane_fresh_s
+                and ln.get('status') in ('BOTH', 'L', 'R') and not ln.get('low_conf')
+                and ln.get('kappa') is not None and ln.get('source') in (None, 'lane', 'memory')
+                and ln.get('lane_id') in (None, self.lane)):
+            self.steer_src = 'lane'                       # 차선 기반: 차선 노드 곡률 그대로
+            return p.speed, max(-MAX_CURV, min(MAX_CURV, float(ln['kappa'])))
+        self.steer_src = 'pose'
         x, y, psi = self.pose()
         tr = Track([_straight(self.center(self.lane), x - 0.5, x + 3.0)], self.p, self.p.speed, self.p.speed)
         return tr.step(x, y, psi, t, True)
@@ -587,6 +628,17 @@ class M7Replay:
             self.why = '섬 앞 가운데 차로: 옮길 곳 없음 -> 정지'
             return 0.0, 0.0
         v_now = p.speed
+        # 미리 계산 (조향에는 안 씀): 지금 차로 앞 장애물과 그때 빠질 차로
+        if p.plan_ahead and t - self.plan_t >= p.plan_period_s:
+            self.plan_t = t
+            g0 = self.gap(self.lane)
+            if g0 is None:
+                self.plan = {'obstacle_mm': None, 'to_lane': None, 'why': '지금 차로 앞 장애물 없음'}
+            else:
+                d0, why0 = self.choose(self.lane, self.obs[self.lane])
+                self.plan = {'obstacle_mm': round(1000 * g0), 'to_lane': None if d0 is None else self.lane + d0,
+                             'to_lane_no': None if d0 is None else 2 - (self.lane + d0),
+                             'start_in_mm': round(1000 * max(0.0, g0 - p.trigger_mm / 1000.0)), 'why': why0}
         # 4. 앞 장애물
         g = self.gap(self.lane)
         if g is not None:
@@ -687,12 +739,24 @@ class M7Replay:
             self.state = 'CRUISE'
         return 0.0, 0.0
 
+    def _cam_lane_no(self) -> Optional[int]:
+        """카메라(차선 노드 lane_id: 노란 실선·흰 점선으로 구분) 최근 값 중 과반인 차로 번호 1·2·3, 없으면 None"""
+        ids = [c for c in self.cam_ids if c is not None]
+        if not ids:
+            return None
+        best = max((-1, 0, 1), key=ids.count)
+        return 2 - best if ids.count(best) * 2 > len(self.cam_ids) else None
+
     # ---------- 상태 ----------
     def status(self) -> dict:
         x, y, psi = self.pose()
         return {'state': 'RUN' if self.state not in ('IDLE', 'DONE') else self.state,
                 'phase': self.state, 'x': round(x, 3), 'y': round(y, 3), 'psi_deg': round(math.degrees(psi), 1),
                 'now_lane': self.lane, 'target': self.target, 'exit_pref': self.exit_pref,
+                # 11/17: 지금 몇 차선 (1 = 왼쪽 A쪽, 2 = 가운데, 3 = 오른쪽 B쪽), 카메라 선 종류로 본 차로와 같은지
+                'lane_no': 2 - self.lane, 'cam_lane_no': self._cam_lane_no(),
+                'lane_agree': (None if self._cam_lane_no() is None else self._cam_lane_no() == 2 - self.lane),
+                'steer': self.steer_src if self.state == 'CRUISE' else self.state.lower(), 'plan': self.plan,
                 'gaps_mm': {str(k): (None if self.gap(k) is None else round(1000 * self.gap(k))) for k in self.obs},
                 'why': self.why, 'stop': self.stop_why, 'n_exec': self.n_exec, 'cam_fix_n': self.cam_n,
                 'align': None if not self.align else f'{self.align["leg"]}{self.align["cycle"]}',
