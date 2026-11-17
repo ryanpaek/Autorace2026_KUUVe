@@ -213,8 +213,8 @@ def test_cruise_steers_by_lane_node_only():
     m._cruise_cmd(2.1)
     assert m.steer_src == 'pose'                            # 선 놓침
     m.on_lane({'status': 'BOTH', 'kappa': 0.2, 'source': 'lane', 'lane_id': 1}, 3.0)
-    m._cruise_cmd(3.1)
-    assert m.steer_src == 'pose'                            # 카메라가 다른 차로라고 함 -> 그 곡률 안 씀
+    v, k = m._cruise_cmd(3.1)
+    assert m.steer_src == 'lane' and abs(k - 0.2) < 1e-9    # 카메라가 다른 차로라고 해도 차선 곡률 그대로
 
 
 def test_plan_ahead_before_trigger():
@@ -251,7 +251,7 @@ def test_check_paths_flags_default_curve_at_546():
     assert bad == {1: False, -1: False} and ok == {1: True, -1: True}
 
 
-# ── 11/17: 후진 없음 (재생 전후 가운데 맞추기·물러나기 빼고 차선 주행을 믿음) ──
+# ── 11/17: no_reverse (재생 전후 가운데 맞추기·물러나기 빼고 차선 주행을 믿음) ──
 def test_no_reverse_starts_replay_without_align_even_off_center():
     """가운데에서 6 cm·5° 벗어나 있어도 서서 앞뒤로 맞추지 않고 바로 재생 (예전: STOP -> ALIGN 후진)"""
     import math as _m
@@ -280,7 +280,7 @@ def test_no_reverse_never_backs_off_when_blocked():
     for i in range(80):                                     # 8초
         v, k = m.step(1.0 + 0.1 * i)
         assert v >= 0.0 and m.state != 'ALIGN'
-    assert '후진 안 함' in m.why
+    assert '서서 다시 봄' in m.why
 
 
 # ---------------- M2 갈림길 녹화 재생 (11/17) ----------------

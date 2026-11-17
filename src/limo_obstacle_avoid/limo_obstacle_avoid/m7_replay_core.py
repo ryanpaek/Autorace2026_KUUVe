@@ -17,7 +17,7 @@
   7. 평소: 지금 차로 중심 따라 직진 (CRUISE)
 
 상태: IDLE -> CRUISE <-> (STOP ->) ALIGN -> EXEC -> (ALIGN) -> CRUISE ... -> DONE
-  11/17: 기본 no_reverse -> CRUISE -> EXEC -> CRUISE (정렬·물러나기 없음, 재생 전후 위치는 차선 주행이 맞춤)
+  11/17: 기본 no_reverse -> CRUISE -> EXEC -> CRUISE (정렬 없음, 재생 전후 위치는 차선 주행이 맞춤)
   ALIGN: 가장 가까운 두 선 사이 가운데로 맞추기. 차로 중심선을 따라 align_back만큼 후진했다가 다시 전진
          (앞뒤로 움직이며 옆 오차·방향 오차를 줄임). 전진 끝 = 장애물까지 trigger_mm (재생 전) / 원래 x (재생 후).
          허용 오차 안이면 바로 끝, 최대 align_cycles번.
@@ -84,7 +84,8 @@ class ReplayParams:
     exit_prefer_m: float = 1.6          # 섬까지 이만큼 안이면 출구 쪽 차로를 먼저 고름
     blocked_wait_s: float = 3.0         # 갈 곳 없을 때 기다리는 시간 (그 뒤엔 가장 멀리 빈 쪽)
     # 정렬
-    # 11/17 실차 요청: 재생 전후 '앞뒤로 움직이며 가운데 맞추기'가 너무 쉽게 걸림 -> 후진은 빼고 차선 주행을 100% 믿음.
+    # 11/17 실차 요청: 재생 전후 '앞뒤로 움직이며 가운데 맞추기'가 너무 쉽게 걸림 -> 가운데 맞추기는 빼고 차선 주행을 100% 믿음.
+    #   (장애물이 backup_if_mm보다 가까울 때 후진은 그대로 함)
     #   no_reverse true: 정렬(ALIGN) 안 함, 오래 막혀도 물러나지 않음(서서 다시 봄), 트리거 때 서지 않고 바로 재생,
     #   재생 끝나면 바로 차선 주행(CRUISE). 녹화 파일 안의 후진 구간은 녹화대로 재생 (그것도 빼려면 replay_reverse false)
     no_reverse: bool = True
@@ -126,7 +127,7 @@ class ReplayParams:
     cam_gate: float = 0.15
     cam_max_deg: float = 12.0
     cam_row: float = 0.55
-    # 11/17: 트리거 전(CRUISE) 조향은 차선 기반만. 차선 노드 /lane/status 곡률을 그대로 씀 (선이 보이고 같은 차로일 때).
+    # 11/17: 트리거 전(CRUISE) 조향은 차선 기반만. 차선 노드 /lane/status 곡률을 그대로 씀 (선이 보이면. 카메라 차로 번호가 달라도).
     #   차선이 cruise_lane_fresh_s 넘게 안 오거나 선을 놓쳤으면 그동안만 위치 추정(odom+IMU) 직선 따라가기
     cruise_lane: bool = True
     cruise_lane_fresh_s: float = 0.4
@@ -676,8 +677,8 @@ class M7Replay:
         ln = self.lane_msg
         if (p.cruise_lane and ln and self.lane_t is not None and t - self.lane_t <= p.cruise_lane_fresh_s
                 and ln.get('status') in ('BOTH', 'L', 'R') and not ln.get('low_conf')
-                and ln.get('kappa') is not None and ln.get('source') in (None, 'lane', 'memory')
-                and ln.get('lane_id') in (None, self.lane)):
+                and ln.get('kappa') is not None and ln.get('source') in (None, 'lane', 'memory')):
+            # 11/17: 카메라 차로 번호가 내부 추정과 달라도 차선 곡률을 그대로 씀 (차선 주행 100% 신뢰)
             self.steer_src = 'lane'                       # 차선 기반: 차선 노드 곡률 그대로
             return p.speed, max(-MAX_CURV, min(MAX_CURV, float(ln['kappa'])))
         self.steer_src = 'pose'
@@ -860,7 +861,7 @@ class M7Replay:
                         self.align['cycle'] = p.align_cycles - 1
                         return 0.0, 0.0
                     self.why = why + (' (물러나 봐도 막힘: 정지 유지)' if self.backed_off
-                                      else ' (후진 안 함: 서서 다시 봄)' if p.no_reverse else '')
+                                      else ' (서서 다시 봄)' if p.no_reverse else '')
                     return 0.0, 0.0
                 self.blocked_since = None
                 self.backed_off = False
