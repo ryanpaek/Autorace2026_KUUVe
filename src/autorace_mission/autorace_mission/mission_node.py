@@ -47,6 +47,7 @@ from autorace_mission.command_inbox import CommandInbox
 from autorace_mission.fsm import DEFAULT_PARAMS, SEQUENCE, Inputs, MissionFSM
 from autorace_mission.route import (CornerAnchor, MapPose, RouteMap, RouteTracker, line_fix_allowed,
                                     motion_sign, _wrap)
+from autorace_mission.motion_dir import AccelDirection
 from autorace_mission.stage import stage_info
 
 # /mission/set_state로 점프할 때 차를 놓는 곳 (도면 경로 지점 + 오프셋 mm)
@@ -97,6 +98,10 @@ class MissionNode(Node):
         # 후진(odom twist.linear.x < 0) 거리는 경로 위치 s에서 뺀다. FSM 누적 거리(dist_mm)는 예전처럼 그대로 둔다.
         # TODO 실측: LIMO 후진 때 /odom twist.linear.x가 음수로 나오는지 (안 나오면 예전과 똑같이 동작)
         self.declare_parameter('route_signed_dist', True)
+        # 11/17 조종기(RC) 후진: 드라이버가 위치·속도를 전진으로 내서 출발 순간 가속도 방향으로 후진을 잡는다 (motion_dir.py).
+        # accel_sign: 0 = 가속도계 축 방향을 우리 /cmd_vel 출발로 배움 (2번 이상), 1 = +x가 앞, -1 = +x가 뒤
+        self.declare_parameter('reverse_from_accel', True)
+        self.declare_parameter('accel_sign', 0)
         # 11/11 위치 추정 강화
         # 후진 판단: odom 속도 부호 + odom 위치 변화 방향 + 최근 /cmd_vel 부호 중 하나라도 후진이면 후진
         # 경로 방향 투영: 차가 경로와 비스듬히 달린 거리는 cos(방향 차)만큼만 s에 더하고 나머지는 좌우 d로
@@ -166,6 +171,8 @@ class MissionNode(Node):
 
         self.dist_mm = 0.0
         self.route_dist_mm = 0.0      # 경로 위치용 거리: 후진이면 뺌 (route_signed_dist)
+        self.accdir = AccelDirection(fixed_sign=int(self.get_parameter('accel_sign').value))
+        self._acc_sign_logged = 0
         self.route_s_map = None       # 길을 잃어도 화면·곡률 미리보기용으로는 계속 내는 s
         self._last_xy = None
         self.yaw = None
@@ -340,9 +347,17 @@ class MissionNode(Node):
                 if self.get_parameter('route_signed_dist').value:
                     v, t = self._cmd_v
                     cmd_v = v if v is not None and time.monotonic() - t < 0.5 else None
+                    acc_dir = 0
+                    if self.get_parameter('reverse_from_accel').value:
+                        acc_dir = self.accdir.on_odom(time.monotonic(), p.x, p.y, cmd_v)
+                        sg = self.accdir.sign
+                        if sg != self._acc_sign_logged:
+                            self._acc_sign_logged = sg
+                            self.get_logger().info(f'가속도계 축 방향 배움: +x가 {"앞" if sg > 0 else "뒤"} '
+                                                   f'(출발 {self.accdir.n_pos}/{self.accdir.n_neg}번) -> 조종기 후진도 잡음')
                     sign, src = motion_sign(p.x - self._last_xy[0], p.y - self._last_xy[1],
                                             yaw_from_quaternion(msg.pose.pose.orientation),
-                                            msg.twist.twist.linear.x, cmd_v)
+                                            msg.twist.twist.linear.x, cmd_v, acc_dir)
                 if step > 1.0:
                     self.move_dir, self.rev_src = sign, src
                 if sign < 0:
@@ -363,6 +378,9 @@ class MissionNode(Node):
 
     def _on_imu(self, msg):
         self.yaw = yaw_from_quaternion(msg.orientation)
+        la = getattr(msg, 'linear_acceleration', None)
+        if la is not None and self.get_parameter('reverse_from_accel').value:
+            self.accdir.on_imu(time.monotonic(), la.x)
         av = msg.angular_velocity          # 앞뒤·좌우 기울기 속도 최대값 (방지턱 감지, 틱마다 0으로)
         self.tilt_peak = max(self.tilt_peak, math.hypot(av.x, av.y))
 

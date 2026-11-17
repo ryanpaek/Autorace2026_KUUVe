@@ -107,7 +107,8 @@ class M7ReplayNode(Node):
 
     # ---------- 입력 ----------
     def on_imu(self, m):
-        self.core.on_imu(self.stamp(m, time.monotonic()), m.angular_velocity.z)
+        la = getattr(m, 'linear_acceleration', None)
+        self.core.on_imu(self.stamp(m, time.monotonic()), m.angular_velocity.z, la.x if la is not None else None)
 
     def on_odom(self, m):
         self.t_odom = time.monotonic()
