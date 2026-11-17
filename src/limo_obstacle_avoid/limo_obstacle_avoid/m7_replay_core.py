@@ -17,6 +17,7 @@
   7. 평소: 지금 차로 중심 따라 직진 (CRUISE)
 
 상태: IDLE -> CRUISE <-> (STOP ->) ALIGN -> EXEC -> (ALIGN) -> CRUISE ... -> DONE
+  11/17: 기본 no_reverse -> CRUISE -> EXEC -> CRUISE (정렬·물러나기 없음, 재생 전후 위치는 차선 주행이 맞춤)
   ALIGN: 가장 가까운 두 선 사이 가운데로 맞추기. 차로 중심선을 따라 align_back만큼 후진했다가 다시 전진
          (앞뒤로 움직이며 옆 오차·방향 오차를 줄임). 전진 끝 = 장애물까지 trigger_mm (재생 전) / 원래 x (재생 후).
          허용 오차 안이면 바로 끝, 최대 align_cycles번.
@@ -63,8 +64,15 @@ class ReplayParams:
     exit_prefer_m: float = 1.6          # 섬까지 이만큼 안이면 출구 쪽 차로를 먼저 고름
     blocked_wait_s: float = 3.0         # 갈 곳 없을 때 기다리는 시간 (그 뒤엔 가장 멀리 빈 쪽)
     # 정렬
-    align_before: bool = True
-    align_after: bool = True
+    # 11/17 실차 요청: 재생 전후 '앞뒤로 움직이며 가운데 맞추기'가 너무 쉽게 걸림 -> 후진은 빼고 차선 주행을 100% 믿음.
+    #   no_reverse true: 정렬(ALIGN) 안 함, 오래 막혀도 물러나지 않음(서서 다시 봄), 트리거 때 서지 않고 바로 재생,
+    #   재생 끝나면 바로 차선 주행(CRUISE). 녹화 파일 안의 후진 구간은 녹화대로 재생 (그것도 빼려면 replay_reverse false)
+    no_reverse: bool = True
+    replay_reverse: bool = True
+    anchor_actual_y: bool = True      #   재생을 지금 옆 위치에서 시작해 목표 차로 중심에서 끝나게 (가운데로 확 끌려가 장애물에 붙지 않게)
+    anchor_max_off: float = 0.10      #   그 옆 위치 차이 최대 [m]. 시뮬레이션 최소 간격: 가운데 기준 1.4 -> 지금 위치 2.6 cm (예전 후진 정렬 7.3)
+    align_before: bool = False
+    align_after: bool = False
     align_tol_y: float = 0.03
     align_tol_psi_deg: float = 3.0
     align_back: float = 0.35
@@ -176,6 +184,21 @@ def anchor(segs: List[Path], x0: float, y0: float) -> List[Path]:
         h0 = 0.0
         out.append(Path([x0 + x for x in g.x], [y0 + y for y in g.y], [h - h0 for h in g.h], g.dir))
     return out
+
+
+def anchor_fade(segs: List[Path], x0: float, yc: float, off: float) -> List[Path]:
+    """anchor와 같되 시작 옆 위치를 yc + off(지금 차 위치)로, 끝으로 갈수록 off를 0으로 줄여 목표 차로 중심에서 끝남.
+    11/17: 후진으로 가운데를 안 맞추므로, 벗어난 채 재생을 시작해도 차로 가운데로 확 끌려가 장애물에 붙지 않게"""
+    out = anchor(segs, x0, yc)
+    xs_all = [x for g in out for x in g.x]
+    x_lo, x_hi = min(xs_all), max(xs_all)
+    span = max(1e-6, x_hi - x_lo)
+    res = []
+    for g in out:
+        ys = [y + off * (1.0 - min(1.0, max(0.0, (x - x_lo) / span))) for x, y in zip(g.x, g.y)]
+        hs = [h - math.atan(off / span) if g.dir > 0 else h for h in g.h]
+        res.append(Path(list(g.x), ys, hs, g.dir))
+    return res
 
 
 class Track:
@@ -439,10 +462,20 @@ class M7Replay:
         best = max(cands, key=lambda c: c[1])
         return best[0], '양쪽 비어 있음: 더 멀리 빈 쪽'
 
+    def _anchored(self, d: int, x0: float) -> List[Path]:
+        """재생할 경로: no_reverse면 지금 옆 위치에서 시작해 목표 차로 중심에서 끝나게(anchor_fade), 아니면 차로 중심에 붙임"""
+        p = self.p
+        yc = self.center(self.lane)
+        if p.no_reverse and p.anchor_actual_y:
+            _, y, _ = self.pose()
+            off = max(-p.anchor_max_off, min(p.anchor_max_off, y - yc))
+            return anchor_fade(self.change[d], x0, yc, off)
+        return anchor(self.change[d], x0, yc)
+
     def path_hit(self, d: int, x0: float) -> Optional[Tuple[float, float]]:
         """녹화 경로를 (x0, 지금 차로 중심)에 붙여 굴려 봤을 때 차체(+여유)에 라이다 점이 들어오면 그 점 (x, y). 없으면 None."""
         p = self.p
-        segs = anchor(self.change[d], x0, self.center(self.lane))
+        segs = self._anchored(d, x0)
         m = p.hit_margin
         pts = [(lx, ly) for lx, ly, _, _ in self.pts]
         isl_half = p.island_half_width
@@ -545,7 +578,9 @@ class M7Replay:
         p = self.p
         x, y, psi = self.pose()
         x0 = (xo - p.lidar_x - p.trigger_mm / 1000.0) if xo is not None else x
-        segs = anchor(self.change[d], x0, self.center(self.lane))
+        segs = self._anchored(d, x0)
+        if not p.replay_reverse:
+            segs = [g for g in segs if g.dir > 0] or segs           # 녹화 안 후진 구간 빼기 (전진만)
         self.track = Track(segs, p, p.exec_speed, p.exec_rev_speed)
         self.target = self.lane + d
         self.cam_ids.clear()
@@ -576,7 +611,7 @@ class M7Replay:
                 if self.pending is not None:
                     d, xo = self.pending
                     x0 = xo - p.lidar_x - p.trigger_mm / 1000.0
-                    if (p.align_before and not self.aligned()) or x - x0 > 0.05:
+                    if not p.no_reverse and ((p.align_before and not self.aligned()) or x - x0 > 0.05):
                         # 가운데가 아니거나 녹화 시작 거리보다 가까움 -> 앞뒤로 움직여 맞추며 x0로
                         self._begin_align(x0, after=False)
                     else:
@@ -601,7 +636,7 @@ class M7Replay:
                 self.events.append(f'[x={x:.2f}] 재생 끝 -> 차로 {self.lane} (최대 옆 오차 {100 * tr.max_e:.1f} cm, '
                                    f'조향 한계 {100 * tr.n_sat / max(1, tr.n):.0f}%)')
                 self.track = None
-                if p.align_after and not self.aligned():
+                if p.align_after and not p.no_reverse and not self.aligned():
                     self._begin_align(None, after=True)
                 else:
                     self.state = 'CRUISE'
@@ -643,8 +678,8 @@ class M7Replay:
         g = self.gap(self.lane)
         if g is not None:
             # 바로 재생: 이미 가운데이고 녹화 시작 거리보다 많이 가깝지 않을 때 (가까우면 서서 정렬하며 뒤로 물러남)
-            ok = (p.align_skip_if_ok and (self.aligned() or not p.align_before)
-                  and g >= p.trigger_mm / 1000.0 - 0.05)
+            ok = p.no_reverse or (p.align_skip_if_ok and (self.aligned() or not p.align_before)
+                                  and g >= p.trigger_mm / 1000.0 - 0.05)
             lead = v_now * p.latency_s + (0.0 if ok else p.brake_k * v_now)
             if g <= p.trigger_mm / 1000.0 + lead:
                 d, why = self.choose(self.lane, self.obs[self.lane])
@@ -652,7 +687,7 @@ class M7Replay:
                     if self.blocked_since is None:
                         self.blocked_since = t
                         self.events.append(f'[x={x:.2f}] 앞 막힘 ({why}) -> 정지하고 기다림')
-                    if t - self.blocked_since >= p.blocked_wait_s and not self.backed_off:
+                    if t - self.blocked_since >= p.blocked_wait_s and not self.backed_off and not p.no_reverse:
                         # 오래 막힘: 한 번만 align_back만큼 물러나서 다시 봄 (가려졌던 것이 보이거나 시작점이 바뀜)
                         self.backed_off = True
                         self.blocked_since = None
@@ -660,7 +695,8 @@ class M7Replay:
                         self._begin_align(x, after=True)
                         self.align['cycle'] = p.align_cycles - 1
                         return 0.0, 0.0
-                    self.why = why + (' (물러나 봐도 막힘: 정지 유지)' if self.backed_off else '')
+                    self.why = why + (' (물러나 봐도 막힘: 정지 유지)' if self.backed_off
+                                      else ' (후진 안 함: 서서 다시 봄)' if p.no_reverse else '')
                     return 0.0, 0.0
                 self.blocked_since = None
                 self.backed_off = False

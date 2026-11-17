@@ -9,8 +9,11 @@
     exec_speed: 0.20           # ★ 재생 속도 = 녹화 속도 (path_check.py가 알려 주는 평균)
     exec_rev_speed: 0.20
     align_speed: 0.15
-    align_before: true         # 재생 전 가운데 맞추기 (허용 오차 안이면 서지 않고 바로 재생)
-    align_after: true          # 재생 뒤 가운데 맞추기
+    no_reverse: true           # 11/17: 후진 없음. 재생 전후 앞뒤로 가운데 맞추기·오래 막힐 때 물러나기 빼고 차선 주행을 100% 믿음
+    replay_reverse: true       #   녹화 파일 안 후진 구간은 녹화대로 (false면 전진 구간만 재생)
+    anchor_actual_y: true      #   재생을 지금 옆 위치에서 시작해 목표 차로 가운데에서 끝나게 (가운데로 확 끌려가 장애물에 붙지 않게)
+    align_before: false        # (no_reverse false일 때만) 재생 전 가운데 맞추기
+    align_after: false         # (no_reverse false일 때만) 재생 뒤 가운데 맞추기
     align_tol_y: 0.03
     align_tol_psi_deg: 3.0
     align_back: 0.35

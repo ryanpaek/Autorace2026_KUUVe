@@ -249,3 +249,35 @@ def test_check_paths_flags_default_curve_at_546():
     bad = M7Replay(ReplayParams(trigger_mm=546.0), left, mirror(left)).check_paths()
     ok = M7Replay(ReplayParams(trigger_mm=900.0), left, mirror(left)).check_paths()
     assert bad == {1: False, -1: False} and ok == {1: True, -1: True}
+
+
+# ── 11/17: 후진 없음 (재생 전후 가운데 맞추기·물러나기 빼고 차선 주행을 믿음) ──
+def test_no_reverse_starts_replay_without_align_even_off_center():
+    """가운데에서 6 cm·5° 벗어나 있어도 서서 앞뒤로 맞추지 않고 바로 재생 (예전: STOP -> ALIGN 후진)"""
+    import math as _m
+    m = _cruising()
+    m._shift(ddy=0.06, ddpsi=_m.radians(5.0))
+    assert not m.aligned()
+    pts = [(0.10 + 0.88 + 0.01 * i, -0.10 + 0.02 * j) for i in range(3) for j in range(11)]   # 라이다 880 mm 앞 2차선
+    m.on_scan_points(0.0, pts)
+    v, k = m.step(1.0)
+    assert m.state == 'EXEC' and v > 0
+    old = _cruising()
+    old.p.no_reverse, old.p.align_before = False, True
+    old._shift(ddy=0.06, ddpsi=_m.radians(5.0))
+    old.on_scan_points(0.0, pts)
+    old.step(1.0)
+    assert old.state == 'STOP'                              # 예전: 서서 가운데 맞추기로
+
+
+def test_no_reverse_never_backs_off_when_blocked():
+    """앞도 옆도 막혀 오래 서 있어도 물러나지 않고 서서 다시 봄"""
+    m = _cruising()
+    pts = []
+    for yc in (0.0, 0.52, -0.52):
+        pts += [(0.10 + 0.80 + 0.01 * i, yc - 0.10 + 0.02 * j) for i in range(3) for j in range(11)]
+    m.on_scan_points(0.0, pts)
+    for i in range(80):                                     # 8초
+        v, k = m.step(1.0 + 0.1 * i)
+        assert v >= 0.0 and m.state != 'ALIGN'
+    assert '후진 안 함' in m.why
