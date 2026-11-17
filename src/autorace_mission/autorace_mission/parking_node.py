@@ -1261,7 +1261,7 @@ class ParkingV2:
     # ③ F_MOVE   멈춘 자리부터 오도메트리 fixed_move_mm 직진 (멈출 때 방향 유지)
     # ④ F_TPAUSE fixed_turn_pause_sec 정지 + 끝 presteer_sec 동안 오른쪽 최대 조향 미리 꺾기
     # ⑤ F_TURN   오른쪽 최대 조향 전진. fixed_turn_deg(IMU) 돌거나 fixed_turn_mm(>0이면) 가면 끝
-        # ⑥ DONE     PARKED_FIXED (11/18 공지: 2행 주차 없음 -> 돌고 바로 끝). ③·⑤ 중 앞범퍼 front_stop_mm 안에 물체 -> ③은 기다림, ⑤는 그 자리 정지(PARKED_FIXED_BLOCKED)
+    # ⑥ DONE     PARKED_FIXED (11/18 공지: 2행 주차 없음 -> 돌고 바로 끝). ③·⑤ 중 앞범퍼 front_stop_mm 안에 물체 -> ③은 기다림, ⑤는 그 자리 정지(PARKED_FIXED_BLOCKED)
     # ------------------------------------------------------------------
     def _step_fixed(self, inp):
         p = self.p
