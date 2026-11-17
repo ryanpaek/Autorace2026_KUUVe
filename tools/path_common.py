@@ -47,7 +47,7 @@ class PoseFusion:
         self.sign_ok_turn = 0
         self.v_bad = 0
         self.v_ok = 0
-        self.rev_by = {'pos': 0, 'twist': 0, 'cmd': 0}   # 후진을 무엇으로 알았나 (걸음 수)
+        self.rev_by = {'pos': 0, 'twist': 0, 'cmd': 0, 'acc': 0}   # 후진을 무엇으로 알았나 (걸음 수)
         self.rev_steps = 0
         self.warn = []
 
@@ -74,10 +74,11 @@ class PoseFusion:
             self.turn_imu += d
         self.t_imu = t
 
-    def on_odom(self, t, x, y, yaw_odom, v_twist, cmd_v=0.0):
+    def on_odom(self, t, x, y, yaw_odom, v_twist, cmd_v=0.0, acc_rev=False):
         """odom 한 번 들어올 때. 반환: 이번에 움직인 부호 있는 거리.
         후진 판단: odom 위치 변화 방향 / odom 속도값 부호 / 명령(cmd_v) 부호 중 하나라도 후진이면 후진
-        (LIMO 드라이버가 후진에도 위치를 앞으로 쌓거나 속도를 양수로 내는 경우 대비. mission_node와 같은 규칙)"""
+        (LIMO 드라이버가 후진에도 위치를 앞으로 쌓거나 속도를 양수로 내는 경우 대비. mission_node와 같은 규칙)
+        acc_rev: 출발 가속도로 본 후진 (motion_dir.AccelDirection, 조종기 후진용, 11/17)"""
         self.t_odom = t
         if self.last_odom is None:
             self.last_odom = (x, y, yaw_odom)
@@ -98,7 +99,8 @@ class PoseFusion:
                     self.v_ok += 1
                 else:
                     self.v_bad += 1
-            by = [k for k, c in (('pos', pos_sgn < 0), ('twist', v_twist < -0.02), ('cmd', cmd_v < -0.02)) if c]
+            by = [k for k, c in (('pos', pos_sgn < 0), ('twist', v_twist < -0.02), ('cmd', cmd_v < -0.02),
+                                 ('acc', bool(acc_rev))) if c]
             sgn = -1.0 if by else 1.0
             if by:
                 self.rev_steps += 1

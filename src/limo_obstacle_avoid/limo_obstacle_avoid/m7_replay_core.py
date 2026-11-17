@@ -30,12 +30,15 @@ import math
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
+from limo_obstacle_avoid.motion_dir import AccelDirection
 from limo_obstacle_avoid.path_track import MAX_CURV, Path, PoseFusion, load_segments, wrap
 
 
 @dataclass
 class ReplayParams:
     lane_width: float = 0.52
+    accel_reverse: bool = True          # 11/17: 조종기(RC) 후진도 거리에서 빼기 (출발 가속도 방향, motion_dir.py)
+    accel_sign: int = 0                 #   0 = 가속도계 축을 우리 명령 출발로 배움 / 1 / -1 고정
     num_side_lanes: int = 1
     start_lane: int = 0
     # 켜는 노드가 넣어 줌
@@ -50,7 +53,7 @@ class ReplayParams:
     exec_rev_speed: float = 0.20
     align_speed: float = 0.15
     # 트리거: 라이다 중심 -> 앞 장애물 거리가 이만큼이 되는 지점에서 녹화 동작 시작 (녹화할 때 잰 거리)
-    trigger_mm: float = 546.0
+    trigger_mm: float = 540.0
     latency_s: float = 0.15             # 판단~바퀴 반응 지연 -> 속도 x 지연만큼 일찍 판단
     brake_k: float = 0.13               # 정지 명령 후 밀리는 거리 = brake_k x 속도 (m, calib 4번 13 x v cm)
     lidar_x: float = 0.10               # 위치 기준점 -> 라이다 (앞 +)
@@ -262,6 +265,7 @@ class M7Replay:
         (left, self.k_left), (right, self.k_right) = fit_lateral(left, p.lane_width), fit_lateral(right, p.lane_width)
         self.change = {+1: left, -1: right}
         self.fu = PoseFusion()
+        self.acc = AccelDirection(fixed_sign=p.accel_sign)
         self.state = 'IDLE'
         self.events: List[str] = []
         self.reset_pose()
@@ -320,11 +324,16 @@ class M7Replay:
         return max(-n, min(n, int(round(y / self.p.lane_width))))
 
     # ---------- 입력 ----------
-    def on_imu(self, t, gz):
+    def on_imu(self, t, gz, ax=None):
         self.fu.on_imu(t, gz)
+        if ax is not None and self.p.accel_reverse:
+            self.acc.on_imu(t, ax)
 
     def on_odom(self, t, x, y, yaw, v):
-        self.fu.on_odom(t, x, y, yaw, v, self.last_v)
+        acc_rev = False
+        if self.p.accel_reverse:
+            acc_rev = self.acc.on_odom(t, x, y, self.last_v) < 0
+        self.fu.on_odom(t, x, y, yaw, v, self.last_v, acc_rev)
 
     def set_exit(self, s):
         s = (s or 'auto').strip().upper()
@@ -795,5 +804,6 @@ class M7Replay:
                 'steer': self.steer_src if self.state == 'CRUISE' else self.state.lower(), 'plan': self.plan,
                 'gaps_mm': {str(k): (None if self.gap(k) is None else round(1000 * self.gap(k))) for k in self.obs},
                 'why': self.why, 'stop': self.stop_why, 'n_exec': self.n_exec, 'cam_fix_n': self.cam_n,
+                'acc_dir': self.acc.state(),
                 'align': None if not self.align else f'{self.align["leg"]}{self.align["cycle"]}',
                 'lane_why': {'reason': self.why}}

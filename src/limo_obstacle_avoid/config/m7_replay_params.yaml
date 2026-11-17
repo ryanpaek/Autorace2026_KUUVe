@@ -2,7 +2,7 @@
 # 항목 설명: limo_obstacle_avoid/m7_replay_core.py ReplayParams. 실행 중 바꾸기: ros2 param set /avoid_node trigger_mm 560.0
 /**:
   ros__parameters:
-    trigger_mm: 546.0          # ★ 녹화할 때 라이다 중심 -> 앞 장애물 거리 (녹화한 자리와 같게)
+    trigger_mm: 540.0          # ★ 녹화할 때 라이다 중심 -> 앞 장애물 거리 (녹화한 자리와 같게). 11/17 546 -> 540
     latency_s: 0.15            # 판단~반응 지연 (속도 x 지연만큼 일찍 판단)
     brake_k: 0.13              # 정지 명령 후 밀림 = 0.13 x 속도 (calib 4번)
     speed: 0.20                # 차로 따라 직진
@@ -19,6 +19,8 @@
     align_back: 0.35
     align_cycles: 3
     exit_lead: 0.30
+    accel_reverse: true        # 11/17: 조종기(RC) 후진도 거리에서 빼기 (출발 가속도 방향으로 판단, 축은 자동으로 배움)
+    accel_sign: 0              #   0 = 배움 / 1 = 가속도 +x가 앞 / -1 = 뒤 (고정)
     hit_margin: 0.03
     cruise_lane: true          # 11/17: 재생 전(직진)은 차선 기반 조향만 (/lane/status 곡률 그대로). 차선을 놓친 동안만 위치 추정
     plan_ahead: true           # 11/17: 트리거 전에도 장애물 위치·빠질 차로를 미리 계산 (/avoid/state plan, 조향엔 안 씀)
