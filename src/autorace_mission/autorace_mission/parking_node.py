@@ -1306,16 +1306,30 @@ class ParkingV2:
             # 11/17 빈 칸 찾기: 서 있는 동안 라이다 점을 앞줄 1·2·3번 칸 상자마다 세어 가장 빈 칸을 고른다
             if p['fixed_detect']:
                 if not hasattr(self, 'cell_cnt') or self.cell_cnt is None:
-                    self.cell_cnt, self.cell_frames = [0, 0, 0], 0
-                for x, y in inp.get('points_far', []):
-                    for c in range(3):
-                        x0, x1, y0, y1 = self._cell_box(c)
-                        if x0 <= x <= x1 and y0 <= y <= y1:
-                            self.cell_cnt[c] += 1
+                    self.cell_cnt, self.cell_frames, self.cell_occ = [0, 0, 0], 0, [0, 0, 0]
+                    self.detect_extra = False
+                pts = inp.get('points_far', [])
+                for x, y in pts:                            # B. 칸마다 점 개수
+                    c = self._cell_of(x, y)
+                    if c is not None:
+                        self.cell_cnt[c] += 1
+                occ = set()                                 # A. 캡틴 방식: 덩어리 중심이 어느 칸 범위에 있나
+                for cx, cy, n in self._blobs(pts):
+                    c = self._cell_of(cx, cy)
+                    if c is not None and n >= p['fixed_blob_min_pts']:
+                        occ.add(c)
+                for c in occ:
+                    self.cell_occ[c] += 1
                 self.cell_frames += 1
             wait = max(p['fixed_pause_sec'], p['fixed_detect_sec'] if p['fixed_detect'] else 0.0)
+            if getattr(self, 'detect_extra', False):
+                wait += p['fixed_detect_sec']
             if inp['t'] - self.t_phase >= wait:
-                self.fixed_cell = self._pick_cell()
+                cell = self._pick_cell()
+                if cell is None:                            # A·B 불일치 첫 번째 -> 1초 더 모음
+                    self.detect_extra = True
+                    return self._out(0.0, 0.0)
+                self.fixed_cell = cell
                 self.yaw_phase0 = inp['yaw']
                 self._enter('F_MOVE', inp)
             else:
@@ -1400,21 +1414,55 @@ class ParkingV2:
         lx = -p['front_axle_from_lidar_mm']                 # 앞바퀴 -> 라이다 (앞 +). 점은 앞바퀴 기준이라 라이다 거리 + lx
         return (r[2 * c] + lx, r[2 * c + 1] + lx, -p['fixed_cell_y_far_mm'], -p['fixed_cell_y_near_mm'])
 
+    def _cell_of(self, x, y):
+        """앞바퀴 기준 점(x, y)이 앞줄 몇 번째 칸 상자(0~2)에 드나. 없으면 None."""
+        for c in range(3):
+            x0, x1, y0, y1 = self._cell_box(c)
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                return c
+        return None
+
+    def _blobs(self, pts):
+        """각도 순서 점들 -> 덩어리 [(중심 x, 중심 y, 점 수)]. 이웃 점이 gap보다 멀면 나눔 (scan_clusters와 같은 원리)."""
+        out, cur = [], []
+        gap = self.p['fixed_blob_gap_mm']
+        for q in pts:
+            if cur and math.hypot(q[0] - cur[-1][0], q[1] - cur[-1][1]) > gap:
+                out.append(cur)
+                cur = []
+            cur.append(q)
+        if cur:
+            out.append(cur)
+        return [(sum(a for a, _ in c) / len(c), sum(b for _, b in c) / len(c), len(c)) for c in out]
+
     def _pick_cell(self):
-        """가장 점이 적은 칸 (1~3). 강제(fixed_force_cell>0)면 그 칸, 감지 꺼짐/점 없음이면 fixed_default_cell."""
+        """빈 칸 (1~3). A(캡틴: 덩어리 없는 칸)와 B(점이 가장 적은 칸)를 같이 본다.
+        같음 -> 그 칸 / A가 0개·2개 이상 -> B / 다름 -> 처음엔 None(1초 더), 두 번째면 B.
+        강제(fixed_force_cell>0)면 그 칸, 감지 꺼짐이면 fixed_default_cell."""
         p = self.p
         if int(p['fixed_force_cell']) in (1, 2, 3):
             self.cell_src = 'force'
             return int(p['fixed_force_cell'])
-        cnt = getattr(self, 'cell_cnt', None)
-        if not p['fixed_detect'] or not cnt or not getattr(self, 'cell_frames', 0):
+        frames = getattr(self, 'cell_frames', 0)
+        if not p['fixed_detect'] or not frames:
             self.cell_src = 'default'
             return int(p['fixed_default_cell'])
-        avg = [n / float(self.cell_frames) for n in cnt]
+        avg = [n / float(frames) for n in self.cell_cnt]
         self.cell_avg = [round(a, 1) for a in avg]
-        best = min(range(3), key=lambda c: avg[c])
-        self.cell_src = 'empty' if avg[best] <= p['fixed_empty_max_pts'] else 'least'
-        return best + 1
+        b = min(range(3), key=lambda c: avg[c]) + 1
+        free = [c + 1 for c in range(3) if self.cell_occ[c] * 2 < frames]    # 절반 넘는 장면에서 덩어리가 없던 칸
+        a = free[0] if len(free) == 1 else None
+        self.cell_a, self.cell_b = a, b
+        if a == b:
+            self.cell_src = 'agree'
+            return b
+        if a is None:
+            self.cell_src = 'a_fail_b'
+            return b
+        if not getattr(self, 'detect_extra', False):
+            return None
+        self.cell_src = 'mismatch_b'
+        return b
 
     def _fixed_move(self):
         p, c = self.p, getattr(self, 'fixed_cell', None)
@@ -1540,7 +1588,7 @@ class ParkingV2:
         """/parking/state에 실을 내용."""
         return {'phase': self.phase, 'done': self.phase == 'DONE', 'result': self.result,
                 'backs': self.backs, 'realigns': self.realigns, 'last_err': self.err,
-                'cell': getattr(self, 'fixed_cell', None), 'cell_src': getattr(self, 'cell_src', None), 'cell_avg': getattr(self, 'cell_avg', None), 'row': self.row, 'stop_how': self.stop_how, 'trigger': self.trigger, 'turn_ref': self.turn_ref_used, 'corner_s': None if self.corner_s is None else round(self.corner_s), 'corner_n': self.corner_n, 'turn_at': self.turn_at, 'target_s': None if self.target_s is None else round(self.target_s), 'target_src': self.target_src, 'n_c5': len(self.tgt_c5), 'n_pm': len(self.tgt_pm), 'q_s': self.q_s, 'r_meas': None if self.r_meas is None else round(self.r_meas), 'fix_n': self.fix_n, 'fix_pred': self.fix_pred,
+                'cell': getattr(self, 'fixed_cell', None), 'cell_src': getattr(self, 'cell_src', None), 'cell_a': getattr(self, 'cell_a', None), 'cell_b': getattr(self, 'cell_b', None), 'cell_avg': getattr(self, 'cell_avg', None), 'row': self.row, 'stop_how': self.stop_how, 'trigger': self.trigger, 'turn_ref': self.turn_ref_used, 'corner_s': None if self.corner_s is None else round(self.corner_s), 'corner_n': self.corner_n, 'turn_at': self.turn_at, 'target_s': None if self.target_s is None else round(self.target_s), 'target_src': self.target_src, 'n_c5': len(self.tgt_c5), 'n_pm': len(self.tgt_pm), 'q_s': self.q_s, 'r_meas': None if self.r_meas is None else round(self.r_meas), 'fix_n': self.fix_n, 'fix_pred': self.fix_pred,
                 'end_mm': None if self.end_d is None else round(self.end_d)}
 
 
@@ -1569,7 +1617,8 @@ DEFAULTS = {
     'fixed_cell_y_near_mm': 330.0, # 칸 상자 옆 범위 (오른쪽, 차 중심에서) 가까운 쪽
     'fixed_cell_y_far_mm': 750.0,  #   먼 쪽 (리모 앞면은 약 400~500)
     'fixed_detect_range_mm': 2500.0,
-    'fixed_empty_max_pts': 3.0,    # 프레임당 점이 이 이하면 '빈 칸' (아니면 가장 적은 칸 'least')
+    'fixed_blob_gap_mm': 80.0,     # A(캡틴 방식) 덩어리 나누는 점 간격
+    'fixed_blob_min_pts': 2,       # A: 이만큼 점이 있는 덩어리만 물체로 봄
     'fixed_default_cell': 2,       # 감지 꺼짐일 때
     'fixed_force_cell': 0,         # 1~3이면 감지 무시하고 그 칸 (시험용)
     'fixed_check_mm': 500.0,       # 11/18 캡틴 ④: 돌고 나서 앞범퍼 앞 이 거리 안에 물체 -> 앞칸 완료

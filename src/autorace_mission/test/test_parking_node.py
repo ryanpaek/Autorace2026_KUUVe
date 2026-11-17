@@ -829,7 +829,7 @@ def test_fixed_finds_empty_cell_and_parks(empty, r_min):
     out, log = {}, []
     n_in, hit, res = drive(parked, empty, FIXED, y0=290.0, r_min=r_min, steer_lag_mm=60.0, out=out, log=log)
     lg = out['logic']
-    assert lg.fixed_cell == empty and lg.cell_src == 'empty'
+    assert lg.fixed_cell == empty and lg.cell_src == 'agree' and lg.cell_a == empty and lg.cell_b == empty
     assert n_in == 4 and not hit and res == 'PARKED_FIXED'
 
 
@@ -859,3 +859,16 @@ def test_fixed_back_row_unmeasured_stays_front():
     out = {}
     n_in, hit, res = drive([2, 3, 5, 6], 1, FIXED, y0=290.0, r_min=590.0, out=out)
     assert res == 'PARKED_FIXED_NO_BACKROW' and n_in == 4 and not hit
+
+
+def test_pick_cell_a_b_rules():
+    lg = pn.ParkingV2(dict(pn.DEFAULTS, **FIXED))
+    lg.cell_frames, lg.detect_extra = 10, False
+    lg.cell_cnt, lg.cell_occ = [100, 0, 80], [10, 0, 10]        # 둘 다 2번
+    assert lg._pick_cell() == 2 and lg.cell_src == 'agree'
+    lg.cell_cnt, lg.cell_occ = [100, 0, 80], [10, 0, 0]         # A: 2·3번 둘 다 빔 -> B
+    assert lg._pick_cell() == 2 and lg.cell_src == 'a_fail_b'
+    lg.cell_cnt, lg.cell_occ = [100, 5, 0], [10, 0, 10]         # A 2번, B 3번 -> 처음엔 더 봄
+    assert lg._pick_cell() is None
+    lg.detect_extra = True
+    assert lg._pick_cell() == 3 and lg.cell_src == 'mismatch_b'
