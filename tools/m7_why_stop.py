@@ -171,6 +171,11 @@ class Why(Node):
                 out.append(f'F mission_node 출처 {src}는 {want[0]:.2f} m/s인데 /cmd_vel 0 -> mission_node 정지 조건(상한·안전)')
             else:
                 out.append(f'F /cmd_vel 0, 출처={src} ({src} 명령도 0) -> 위 원인 중 그 출처 쪽')
+                if src == 'obstacle' and av:
+                    # 11/17 밤: 출처가 회피(재생) 노드면 그 노드가 왜 0을 내는지 바로 (phase/why/stop)
+                    out.append(f'   -> 재생 노드: phase={av.get("phase")} why={av.get("why") or "-"} '
+                               f'stop={av.get("stop") or "-"} 막힘후진={av.get("backup")} 차로 {av.get("lane_no")}'
+                               f' 카메라차로 {av.get("cam_lane_no")} 조향={av.get("steer")}')
         return out
 
     def tick(self):
