@@ -446,13 +446,15 @@ class CornerAnchor:
 
 
 def motion_sign(dx_m: float, dy_m: float, odom_yaw: Optional[float], twist_x: float,
-                cmd_v: Optional[float]) -> Tuple[int, str]:
+                cmd_v: Optional[float], acc_dir: int = 0) -> Tuple[int, str]:
     """이번 오도메트리 걸음이 전진(+1)인지 후진(-1)인지와 그 근거 (11/11).
 
     근거 셋 중 하나라도 후진이면 후진:
       'odom_v'  : /odom twist.linear.x < 0
       'odom_xy' : /odom 위치 변화가 /odom 방향과 반대 (드라이버가 속도 부호를 안 줘도 위치가 뒤로 가면 잡힘)
       'cmd'     : 최근 /cmd_vel 속도 < 0 (드라이버가 후진에도 위치를 앞으로 쌓는 경우 대비)
+      'imu_acc' : 출발할 때 가속도 방향이 후진 (motion_dir.AccelDirection, 11/17). 조종기(RC)로 후진하면
+                  드라이버가 위치·속도를 다 전진으로 내고 /cmd_vel도 없어서 이것만 잡음
     11/10까지는 twist.linear.x만 봤는데 LIMO가 후진 때 음수를 주는지 실측 전이었다.
     """
     if twist_x < -0.005:
@@ -462,6 +464,8 @@ def motion_sign(dx_m: float, dy_m: float, odom_yaw: Optional[float], twist_x: fl
             return -1, 'odom_xy'
     if cmd_v is not None and cmd_v < -0.02:
         return -1, 'cmd'
+    if acc_dir < 0:
+        return -1, 'imu_acc'
     return 1, ''
 
 

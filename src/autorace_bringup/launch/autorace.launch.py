@@ -6,7 +6,8 @@ LIMO 드라이버·카메라·라이다를 먼저 띄운 뒤 실행한다 (애�
   ros2 launch orbbec_camera dabai.launch.py
   ros2 launch autorace_bringup autorace.launch.py
   ros2 launch autorace_bringup autorace.launch.py start_state:=M3_PEDESTRIAN use_detector:=false
-  ros2 launch autorace_bringup autorace.launch.py m7_avoid:=true            # M7을 limo_obstacle_avoid로
+  ros2 launch autorace_bringup autorace.launch.py m7_avoid:=true            # M7을 limo_obstacle_avoid로 (기본 m7_impl:=replay)
+  ros2 launch autorace_bringup autorace.launch.py m7_avoid:=true m7_impl:=legacy   # 예전 avoid_node 방식
   ros2 launch autorace_bringup autorace.launch.py m7_avoid:=true m7_dry_run:=true   # 판단만 (바퀴는 차선)
   ros2 launch autorace_bringup autorace.launch.py m7_avoid:=true use_fork_node:=true  # + 갈림길 판단 노드
 출발: ros2 topic pub --once /mission/start std_msgs/msg/Empty
@@ -18,7 +19,7 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.conditions import IfCondition
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
@@ -28,6 +29,14 @@ def _avoid_params() -> str:
     try:
         return os.path.join(get_package_share_directory('limo_obstacle_avoid'),
                             'config', 'avoid_params.yaml')
+    except Exception:
+        return ''
+
+
+def _replay_params() -> str:
+    try:
+        return os.path.join(get_package_share_directory('limo_obstacle_avoid'),
+                            'config', 'm7_replay_params.yaml')
     except Exception:
         return ''
 
@@ -50,7 +59,16 @@ def generate_launch_description():
     route = LaunchConfiguration('route_file')
     m7_avoid = LaunchConfiguration('m7_avoid')
     m7_dry = LaunchConfiguration('m7_dry_run')
+    m7_impl = LaunchConfiguration('m7_impl')
+    # 11/17: M7 방식. replay(기본) = 녹화한 차로 변경 재생 (m7_replay_node) / legacy = 예전 avoid_node
+    is_replay = IfCondition(PythonExpression(["'", m7_avoid, "' == 'true' and '", m7_impl, "' == 'replay'"]))
+    is_legacy = IfCondition(PythonExpression(["'", m7_avoid, "' == 'true' and '", m7_impl, "' != 'replay'"]))
+    not_replay = IfCondition(PythonExpression(["not ('", m7_avoid, "' == 'true' and '", m7_impl, "' == 'replay')"]))
+    # 재생 방식일 때 obstacle_node(m7_link) 설정: 코너 미리보기(코너 중간 켜기)·표지 보고 끄기 끔 -> 시작선 근처에서 켜고 재생 노드가 끝냄
+    replay_link = {'m7_pre_enable': False, 'm7_off_mode': 'none'}
     return LaunchDescription([
+        DeclareLaunchArgument('m7_impl', default_value='replay'),
+        DeclareLaunchArgument('m7_replay_params', default_value=_replay_params()),
         DeclareLaunchArgument('params', default_value=os.path.join(share, 'config', 'params.yaml')),
         DeclareLaunchArgument('bev_config',
                               default_value=os.path.join(share, 'config', 'bev_limo.yaml')),
@@ -110,12 +128,19 @@ def generate_launch_description():
              parameters=[params, {'enabled': ParameterValue(LaunchConfiguration('parking'), value_type=bool)}],
              output='screen'),
         Node(package='autorace_obstacle', executable='obstacle_node', name='obstacle_node',
-             parameters=[params, {'bev_config': bev}], output='screen'),
+             parameters=[params, {'bev_config': bev}], output='screen', condition=not_replay),
+        Node(package='autorace_obstacle', executable='obstacle_node', name='obstacle_node',
+             parameters=[params, {'bev_config': bev}, replay_link], output='screen', condition=is_replay),
         Node(package='limo_obstacle_avoid', executable='avoid_node', name='avoid_node',
              parameters=[LaunchConfiguration('m7_avoid_params'),
                          {'dry_run': ParameterValue(m7_dry, value_type=bool)}],
              remappings=[('/avoid/cmd_vel', '/obstacle/cmd_vel')],
-             output='screen', condition=IfCondition(m7_avoid)),
+             output='screen', condition=is_legacy),
+        Node(package='limo_obstacle_avoid', executable='m7_replay_node', name='avoid_node',
+             parameters=[LaunchConfiguration('m7_avoid_params'), LaunchConfiguration('m7_replay_params'),
+                         {'dry_run': ParameterValue(m7_dry, value_type=bool)}],
+             remappings=[('/avoid/cmd_vel', '/obstacle/cmd_vel')],
+             output='screen', condition=is_replay),
         Node(package='autorace_fork', executable='fork_node', name='fork_node',
              parameters=[LaunchConfiguration('fork_params')], output='screen',
              condition=IfCondition(LaunchConfiguration('use_fork_node'))),

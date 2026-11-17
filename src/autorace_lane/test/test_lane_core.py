@@ -401,3 +401,26 @@ def test_corner_takes_lane_kappa_when_it_asks_for_more(cfg):
     g = LaneFollower(cfg, LaneParams(corner_inner_line=False))
     plain = run(g, img, frames=20, yaw=0.0)
     assert out.kappa < -0.9 and out.kappa <= plain.kappa * 0.6   # 0.5만 섞였다면 약 -0.8 근처. 차선 요구가 살아 있음
+
+
+def test_stopline_tilted_up_to_15deg():
+    """11/16: 곡선 돌자마자 나오는 비스듬한 라바콘 시작선 (40 mm). 예전엔 약 ±11°까지만, 지금 ±15° (25°는 아님)."""
+    import math
+    from synth import blank, draw_polyline_mm
+    cfg = synth.make_cfg(ref_bottom=550.0)
+    p = LaneParams(lane_width_mm=500.0)
+    for deg, expect in ((0, True), (8, True), (13, True), (-15, True), (15, True), (25, False), (-25, False)):
+        img = blank(cfg)
+        y0 = 500.0 + cfg.ref_to_front_axle_mm
+        xs = np.array([-400.0, 400.0])
+        draw_polyline_mm(img, cfg, xs, y0 + 20.0 + math.tan(math.radians(deg)) * xs, thick_mm=40.0)
+        info = {}
+        lines = detect_stoplines(img, cfg.vehicle_col, cfg, p, info=info)
+        assert bool(lines) == expect, deg
+        if expect:
+            assert lines[0][0] == pytest.approx(500.0, abs=12)
+    old = LaneParams(lane_width_mm=500.0, stopline_max_angle_deg=0.0)
+    img = blank(cfg)
+    draw_polyline_mm(img, cfg, np.array([-400.0, 400.0]), 720.0 + math.tan(math.radians(15)) * np.array([-400.0, 400.0]),
+                     thick_mm=40.0)
+    assert detect_stoplines(img, cfg.vehicle_col, cfg, old) == []      # 끄면 예전과 같음

@@ -52,6 +52,7 @@ mission_node:
     slow_speed: 0.20                       # 서행 (규정 최대 0.2, 11/09 팀 결정)
     approach_speed: 0.18
     m7_speed: 0.20                         # 11/12 밤: M7 전체(코너 차선 주행 + 회피 노드 avoid_params.yaml) 0.20
+    m7_lookahead_mm: 450.0                 # 11/17: 3차선 구간 차선 lookahead (기본 650보다 짧게, 차로 바꾼 뒤 지금 차로에 붙게). 0 = 기본값
     det_conf: 0.5
     bump_slow_mm: 2500.0                   # 방지턱을 IMU로 못 느꼈을 때 서행 최대 거리 (2순위). 표지를 선 1m 앞에서 봐도 방지턱(위치 미상)까지 덮게. TODO 실측
     bump_imu_rate: 0.30                    # IMU 기울기 속도(rad/s)가 이 이상이면 방지턱. TODO 실측 (손으로 넘겨 보며 확인)
@@ -70,7 +71,7 @@ mission_node:
     obstacle_source_ready: false           # obstacle 노드 완성 후 true
     m7_len_mm: 6000.0                      # 도면 기준, 모의맵 실측으로 확인
     m7_external_avoid: false               # launch의 m7_avoid:=true가 켬 (limo_obstacle_avoid로 회피)
-    m7_force_after_island_mm: 500.0        # 회피가 안 끝나도 섬 끝 + 이만큼에서 M2로
+    m7_force_after_island_mm: 1500.0       # 회피가 안 끝나도 섬 끝 + 이만큼에서 M2로. 11/17 500 -> 1500: M2 갈림길 녹화 재생이 섬 지나서까지 M7 안에서 돎
     fork_from_m7_exit: true                # 갈림길 표지를 못 읽으면 회피가 끝난 차로를 씀
     fork_follow_m7_exit: true              # 표지와 회피 차로가 다를 때 true=차로를 따름 (11/11: M2 시작 때 이미 섬 옆이라 건너갈 수 없음)
     cones_len_mm: 4300.0                   # cones_source_ready=false일 때만 씀 (차선 주행 통과 거리)
@@ -83,6 +84,7 @@ mission_node:
     fork_lane_width_mm: 460.0              # 11/12 밤: M2·합류 한쪽 선 모드 차로 폭 (바깥선에서 230 mm). 섬 쪽 선을 밟고 들어가던 것 -> 바깥선 쪽으로
     fork_lost_search: true                 #   M7 차선 구간·M2·합류에서 선을 놓치면 직선 방향으로 풀고 좌우 30° 찾기 (서서 끝내지 않음)
     m8_corner_k_gain: 1.0                  # 11/14: 1.15 -> 1.0 (R557은 코너 안쪽 노란 선을 밟고 출구에서 차선 이탈 유발 -> R640 그대로)
+    cones_line_camera_first: true          # 11/16: 라바콘 시작선 = 카메라로 본 흰 가로선 통과 (도면과 달라도 같은 선 3프레임 연속이면)
     cones_enter_before_mm: 0.0             # 도면 예비: 시작선 이만큼 앞에서 라바콘 모드 (1순위는 카메라로 선 통과)
     cones_enter_cone_mm: 150.0             # 11/14 밤: 400 -> 150 원복 (d4d4c70 라바콘 변경 되돌림, 실차 '라바콘 인식 못 함')
     cones_corner_close_mm: 0.0             # 11/14 밤: 250 -> 0 = 끔 (d4d4c70 원복)

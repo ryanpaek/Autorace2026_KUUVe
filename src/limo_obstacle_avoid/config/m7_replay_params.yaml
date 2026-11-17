@@ -1,0 +1,37 @@
+# M7 녹화 경로 재생 노드(m7_replay_node, launch에서 이름 avoid_node) 설정. avoid_params.yaml(차체·라이다) 뒤에 읽음.
+# 항목 설명: limo_obstacle_avoid/m7_replay_core.py ReplayParams. 실행 중 바꾸기: ros2 param set /avoid_node trigger_mm 560.0
+/**:
+  ros__parameters:
+    trigger_mm: 540.0          # ★ 녹화할 때 라이다 중심 -> 앞 장애물 거리 (녹화한 자리와 같게). 11/17 546 -> 540
+    latency_s: 0.15            # 판단~반응 지연 (속도 x 지연만큼 일찍 판단)
+    brake_k: 0.13              # 정지 명령 후 밀림 = 0.13 x 속도 (calib 4번)
+    speed: 0.20                # 차로 따라 직진
+    exec_speed: 0.20           # ★ 재생 속도 = 녹화 속도 (path_check.py가 알려 주는 평균)
+    exec_rev_speed: 0.20
+    align_speed: 0.15
+    no_reverse: true           # 11/17: 후진 없음. 재생 전후 앞뒤로 가운데 맞추기·오래 막힐 때 물러나기 빼고 차선 주행을 100% 믿음
+    replay_reverse: true       #   녹화 파일 안 후진 구간은 녹화대로 (false면 전진 구간만 재생)
+    anchor_actual_y: true      #   재생을 지금 옆 위치에서 시작해 목표 차로 가운데에서 끝나게 (가운데로 확 끌려가 장애물에 붙지 않게)
+    align_before: false        # (no_reverse false일 때만) 재생 전 가운데 맞추기
+    align_after: false         # (no_reverse false일 때만) 재생 뒤 가운데 맞추기
+    align_tol_y: 0.03
+    align_tol_psi_deg: 3.0
+    align_back: 0.35
+    align_cycles: 3
+    exit_lead: 0.30
+    m2_replay: true            # 11/17: M7 끝 지점에서 (지금 차로, A/B) 녹화 m2_{1|2|3}-{A|B}.csv 하나 재생 -> 갈래 안에서 끝
+    m2_start_gap: 1.00         # ★ M2 녹화 시작 자세: 앞범퍼 ~ 섬 앞 꼭짓점 (m). 녹화할 때 잰 거리와 같게
+    m2_fork_default: 'A'       #   A/B 표지를 그때까지 못 봤을 때
+    m2_test_start: false       # 시험용: 켜지는 자리를 곧바로 M2 시작 지점으로 (M7 건너뛰고 갈림길만)
+    start_lane_no: 0           # 시험용: 켤 때 차로 번호 1/2/3 (0 = 2차선 가정, 카메라 차로 번호로 고쳐짐)
+    backup_if_mm: 350.0        # 11/17: 앞 장애물이 이보다 가까우면(차로 변경 못 함) 차로 가운데 맞추며 후진 (0 = 끔)
+    backup_to_mm: 0.0          #   이 거리까지 후진 (0 = trigger_mm = 녹화 시작 거리 -> 녹화 그대로 재생). 350이면 350까지만
+    backup_speed: 0.12
+    m2_mirror: true            #   없는 파일은 좌우 대칭 파일 뒤집어 씀 (1-A<->3-B, 1-B<->3-A, 2-A<->2-B)
+    accel_reverse: true        # 11/17: 조종기(RC) 후진도 거리에서 빼기 (출발 가속도 방향으로 판단, 축은 자동으로 배움)
+    accel_sign: 0              #   0 = 배움 / 1 = 가속도 +x가 앞 / -1 = 뒤 (고정)
+    hit_margin: 0.03
+    cruise_lane: true          # 11/17: 재생 전(직진)은 차선 기반 조향만 (/lane/status 곡률 그대로). 차선을 놓친 동안만 위치 추정
+    plan_ahead: true           # 11/17: 트리거 전에도 장애물 위치·빠질 차로를 미리 계산 (/avoid/state plan, 조향엔 안 씀)
+    path_left: ''              # 비우면 share/limo_obstacle_avoid/paths/m7_left.csv
+    path_right: ''             #        .../m7_right.csv (한쪽만 있으면 거울상, 둘 다 없으면 기본 S자)

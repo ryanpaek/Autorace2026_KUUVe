@@ -89,10 +89,14 @@ DEFAULT_PARAMS = {
                                    # 섬 테두리를 따르거나 선을 놓친다 -> 결과는 같고 선만 잃는다. false = 예전(표지 쪽 모드)
     # 3차선: 차로 500mm, 바깥 실선은 노랑·안쪽 점선은 흰색(모의 맵 10/30 확인) -> 두 색 다 차선으로
     'three_lane_width_mm': 520.0,       # 도면: 선 사이 500 + 점선 20 = 선 가운데끼리 520 (회피 lane_width 0.52와 같게)
+    # 11/17: 3차선(M7) 구간 차선 lookahead. 기본(650)보다 짧게 -> 차로 바꾼 뒤 차선 주행이 옆 차로·장애물 쪽으로 미리 꺾지 않고
+    #   지금 차로 가운데에 붙게. 0이면 차선 노드 기본값 그대로
+    'm7_lookahead_mm': 450.0,
     'three_lane_color': 'both',         # 도면: M3 종료 ~ 우하단 코너(약1.6m) + 3차선 약4.5m(섬 오른쪽 끝까지)
     'cones_len_mm': 4300.0,      # 도면: M8 진입(갈림길 끝) ~ 좌하단 코너 ~ 라바콘 구간(약2.2m) 끝 + 여유
     # M8 라바콘 (obstacle 노드의 ConeFollower). false면 위 cones_len_mm 동안 차선 주행으로 통과
     'cones_source_ready': False,
+    'cones_line_camera_first': True,  # 11/16: 라바콘 시작선 카메라 1순위 (도면과 달라도 같은 선 3프레임이면)
     'cones_enter_before_mm': 0.0,    # 도면 위치 예비: 시작선 이만큼 앞(앞바퀴)에서 라바콘 모드 (1순위는 카메라로 선 통과)
     'cones_enter_cone_mm': 150.0,    # 11/14 밤: 400 -> 150 원복 (d4d4c70 라바콘 변경 되돌림, 실차 '라바콘 인식 못 함')
     'cones_corner_close_mm': 0.0,    # 11/14 밤: 250 -> 0 = 끔 (d4d4c70 원복). >0이면 70° 넘게 돌았고 콘이 이 안이면 콘 모드
@@ -644,9 +648,13 @@ class MissionFSM:
         정지선 정지와 같은 방식: 카메라가 본 거리에서 그 뒤 달린 거리를 뺀다
         (선은 앞바퀴 약 350mm 앞에서 화면 아래로 사라진다). 도면 위치는 처음 잡는 선을 고르는 데에도 쓴다."""
         if self.line is None:
+            # 11/16: 라바콘 시작선은 카메라 1순위. 도면 위치(s)가 M7·M2를 지나며 1 m 넘게 틀어져
+            #   (1114 분석) 맞는 카메라 선을 gate로 버리던 것 -> 같은 선이 3프레임 연속이면 도면과 달라도 받음
+            cam_first = name == 'm8_start_line' and self.p.get('cones_line_camera_first', True)
             self.line = StopApproach(0.0, 0.0, self.p['stop_lost_ok_mm'], key='stoplines_mm',
                                      freeze_mm=self.p['stop_freeze_mm'],
-                                     route_gate_mm=self.p['stop_route_gate_mm'])
+                                     route_gate_mm=self.p['stop_route_gate_mm'],
+                                     camera_first=cam_first)
             self.line.route_line_s = self._rp(name)
         rem = self.line.remaining(inp)
         if rem is not None and self.line.seen_d is not None:
@@ -838,9 +846,10 @@ class MissionFSM:
         if done or ((d >= self.p['m7_len_mm']) if end is None else end):
             self._next(inp, 'obstacle zone done' if done else f'm7 end at {d:.0f}mm')
         src = 'obstacle' if self.p['obstacle_source_ready'] else 'lane'
+        kw = {'lookahead_mm': float(self.p['m7_lookahead_mm'])} if self.p.get('m7_lookahead_mm', 0.0) > 0.0 else {}
         return Command(src, self._lane(self.p['m7_speed'],
                                        lane_width_mm=self.p['three_lane_width_mm'],
-                                       lane_color=self.p['three_lane_color']))
+                                       lane_color=self.p['three_lane_color'], **kw))
 
     def _m7_external(self, inp, d, done):
         """limo_obstacle_avoid 회피. 회피 노드는 섬 끝을 약 30 cm 지나서 끝나므로
@@ -860,9 +869,10 @@ class MissionFSM:
             #   직선(흰 선)을 따라 코너를 직진했다(IMU 3°만 돎). 코너를 IMU로 다 돌 때까지는 보통 차선 설정 그대로
             kw = {'lost_search': True} if self.p.get('fork_lost_search', False) else {}
             return Command('lane', self._lane(self.p['m7_speed'], **kw), note='M7_OBSTACLE/corner (plain lane)')
+        kw = {'lookahead_mm': float(self.p['m7_lookahead_mm'])} if self.p.get('m7_lookahead_mm', 0.0) > 0.0 else {}
         return Command(src, self._lane(self.p['m7_speed'],
                                        lane_width_mm=self.p['three_lane_width_mm'],
-                                       lane_color=self.p['three_lane_color']))
+                                       lane_color=self.p['three_lane_color'], **kw))
 
     def _watch_floor_letter(self, inp) -> None:
         """바닥 글자 A/B 투표 -> self.floor_fork (한 번 정하면 그 판 끝까지)."""

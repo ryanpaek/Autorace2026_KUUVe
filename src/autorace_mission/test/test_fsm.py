@@ -1002,3 +1002,34 @@ def test_lane_first_overrides_forced_corner_until_lane_lost():
     off = MissionFSM({'start_state': 'M1_TRAFFIC', 'lane_first': False})
     off.m1fc = dict(fsm.m1fc, done=False, s=0.0, last=0.0)
     assert off._m1_lane(Inputs(t=0.0, dist_mm=10.0, yaw=0.0, lane=seen), 0.2).get('mode') == 'heading'
+
+
+def _m2_exit_camera_line(params, yaw_deg):
+    """M2_EXIT: 도면 위치(route_s)는 1.5 m 뒤처짐(1114 분석). 카메라는 앞바퀴 600 mm 앞 흰 선을 보고 다가감."""
+    import math as _m
+    fsm = MissionFSM(dict({'start_state': 'M2_FORK', 'cones_source_ready': True, 'odom_jump_mm': 1e9,
+                           'route_points': {'m8_start_line': 7000.0}}, **params))
+    fsm.fork_choice = 'A'
+    fsm._next(Inputs(t=0.0, dist_mm=5000.0, yaw=0.0), 'fork A done')
+    assert fsm.state == 'M2_EXIT'
+    line_at = 6400.0                                  # 실제 선 위치 (주행 거리)
+    t, entered = 0.0, None
+    for d in range(5000, 7200, 20):
+        t += 0.05
+        rem = line_at - d
+        lane = {'status': 'BOTH', 'stoplines_mm': [rem] if 350.0 <= rem <= 900.0 else []}   # 350 mm 안은 카메라 사각
+        fsm.step(Inputs(t=t, dist_mm=float(d), yaw=_m.radians(yaw_deg), route_s=float(d) - 1500.0, lane=lane))
+        if fsm.state == 'M8_CONES':
+            entered = d
+            break
+    return fsm, entered, line_at
+
+
+def test_cones_start_by_camera_line_even_if_route_off():
+    """11/16: 라바콘 시작선 = 카메라로 본 흰 가로선을 앞바퀴가 지난 순간. 도면 위치가 1.5 m 틀려도 (예전엔 gate로 버림)."""
+    for yaw in (-90.0, -60.0):                         # 코너 다 돈 뒤 / 아직 도는 중 (곡선 돌자마자 선)
+        fsm, entered, line_at = _m2_exit_camera_line({}, yaw)
+        assert entered is not None and line_at <= entered <= line_at + 40, (yaw, entered)
+        assert 'camera' in fsm.m2x_how
+    _, old, line_at = _m2_exit_camera_line({'cones_line_camera_first': False}, -90.0)
+    assert old is None or old > line_at + 400            # 예전: 카메라 선 버리고 도면/거리로 늦게

@@ -5,8 +5,21 @@ CSV는 **명령을 친 폴더**에 저장되므로 데이터 폴더(예: `~/auto
 
 | 파일 | 역할 | 실행 |
 | --- | --- | --- |
-| `path_recorder.py` | 키보드 주행 중 odom 위치·속도·명령 + IMU 융합 위치(`xf, yf, yawf`)를 CSV로 기록 | `python3 path_recorder.py line1.csv` |
-| `path_follower.py` | 기록한 CSV 경로를 따라 주행(pure pursuit) | `python3 path_follower.py line1.csv 0.2 0.023` |
+| `path_recorder.py` | 키보드 주행 중 odom 위치·속도·명령 + 재생 기준 위치(`xs, ys, yaws, s` = odom 거리 + IMU 방향)를 CSV로 기록 | `python3 path_recorder.py line1.csv` |
+| `path_follower.py` | 기록한 CSV 경로를 따라 주행 (옆 오차·방향 오차·기록 곡률로 조향) | `python3 path_follower.py line1.csv 0.2 0.023` |
+| `path_check.py` | 기록 CSV 점검: 끝 위치/방향, 최대 곡률, 뒤로 간 구간, odom·IMU 부호 (ROS 불필요) | `python3 path_check.py line1.csv --png` |
+| `path_common.py` | 위 셋이 같이 쓰는 위치 계산·경로 처리. **같은 폴더에 같이 복사** | — |
+
+> 11/17 변경: 위치를 odom **이동 거리**(위치 변화량) + IMU 자이로 **방향**으로 계산하고(기록·재생 같은 코드),
+> 재생 조향은 위치 목표점 하나(pure pursuit) 대신 **옆 오차 + 방향 오차 + 기록 곡률 미리 넣기**로 바꿨다.
+> 돌 때 odom 방향과 IMU 방향 부호가 반대면 기록 중 경고, 재생 중 정지한다 (한쪽으로 끝까지 꺾이던 증상의 원인 후보).
+> 예전 CSV(`xs` 열 없음)는 자동으로 `--pose odom`으로 재생된다.
+> **후진 지원**: 기록에 후진이 있으면 전진↔후진이 바뀌는 곳(3 cm 넘게 반대로 간 곳)마다 구간을 나눠
+> 그 순서대로 재생한다. 구간 끝에서 멈추고 `--pause`초 쉰 뒤 다음 방향으로 출발.
+> 후진 판단은 odom 위치 변화 방향 / odom 속도값 부호 / `/cmd_vel` 명령 부호 중 하나라도 후진이면 후진
+> (LIMO 드라이버가 후진을 전진처럼 쌓는 경우 대비, mission_node와 같은 규칙). 재생할 때 경로는 CSV의 원본 열
+> (odom·명령·자이로)로 다시 계산하므로 예전 규칙으로 기록한 CSV도 후진이 살아난다.
+> 후진이 있는 경로는 `--pose` 기본값(fused)으로 재생할 것 (`odom`은 드라이버가 후진 방향을 틀리면 못 따라감).
 
 > 정지 시간·거리 측정 스크립트(`stop_test_ack.py`)는 [`calib/20261102_stop_test_ack.py`](../calib/20261102_stop_test_ack.py)에 있다.
 > 사용법은 [calib/USAGE.md](../calib/USAGE.md), 결과는 [calib/README.md](../calib/README.md) 4번.
@@ -17,7 +30,7 @@ CSV는 **명령을 친 폴더**에 저장되므로 데이터 폴더(예: `~/auto
 스크립트는 `~/autorace_tools`에 복사해 두고 쓴다 (CSV도 거기에 쌓인다):
 
 ```bash
-mkdir -p ~/autorace_tools && cp ~/autorace_ws/tools/*.py ~/autorace_tools/
+mkdir -p ~/autorace_tools && cp ~/autorace_ws/tools/*.py ~/autorace_tools/    # path_common.py도 같이 복사됨
 ```
 
 ### 0. 드라이버 (T1, 기록·재생 내내 켜 둠)
@@ -89,14 +102,21 @@ rm ~/autorace_tools/line1.csv
 | `csv` | — | `path_recorder.py`로 만든 파일 |
 | `speed` | 0.2 | m/s |
 | `stop_early` | 0.0 | m, 끝점 이만큼 앞에서 정지 명령 (제동 거리 보정. 0.2 m/s면 0.023~0.024) |
-| `--pose` | `odom` | `odom`: odom 위치·방향 / `imu`: odom 속도 + IMU 방향으로 만든 위치(`xf, yf`) |
+| `--pose` | `auto` | `auto`: 새 기록이면 `fused`, 예전 기록이면 `odom` / `fused`: odom 거리 + IMU 방향 (`xs, ys`) / `odom`: odom 위치·방향 / `imu`: 예전 `xf, yf` 열 |
+| `--ctrl` | `track` | `track`: 곡률 = 기록 곡률(앞 `preview`초) - `k_e`×옆 오차 - `k_psi`×방향 오차 / `pp`: 예전 pure pursuit |
+| `--k_e` | 6.0 | 옆 오차 게인 (1/m²). 크면 빨리 붙지만 출렁임 |
+| `--k_psi` | 3.4 | 방향 오차 게인 (1/m) |
+| `--preview` | 0.3 | s, 조향 지연 보정용으로 기록 곡률을 미리 봄 |
+| `--rev_speed` | = speed | m/s, 후진 구간 속도 |
+| `--pause` | 0.5 | s, 전진↔후진 바뀔 때 멈춰 있는 시간 |
+| `--max_err` | 0.30 | m, 옆 오차가 이보다 크거나 방향 오차 50° 넘으면 정지 |
 | `--topic` | `/cmd_vel` | 발행 토픽 |
 | `--type` | `twist` | `twist` 또는 `ackermann` |
-| `--lookahead` | 0.3 | m, pure pursuit 전방 주시 거리 |
+| `--lookahead` | 0.3 | m, `--ctrl pp`일 때만 |
 
-- 방향은 IMU가 더 정확하다(odom yaw는 중간 조향에서 약 12% 틀림, calib 결과 3번) → 커브가 있는 경로는 `--pose imu` 권장.
-- 브리지 없이 재생하려면 `--type ackermann --topic /limo/ack_cmd`.
-  이때 `path_follower.py`의 `WHEELBASE`(0.21)를 브리지 유효 축거(0.222)와 맞춰야 한다.
+- 끝나면 `최대 옆 오차`, `조향 한계에 붙은 비율`을 출력한다. 한계 비율이 높으면 기록이 너무 급한 것 → 더 완만하게 다시 기록.
+- 재생 속도는 `path_check.py`가 알려 주는 기록 평균 속도에 맞춘다.
+- 브리지 없이 재생하려면 `--type ackermann --topic /limo/ack_cmd` (축거 0.222 사용).
 
 ## 주의
 
