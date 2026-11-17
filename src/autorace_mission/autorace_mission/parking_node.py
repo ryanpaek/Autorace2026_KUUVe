@@ -1261,8 +1261,7 @@ class ParkingV2:
     # ③ F_MOVE   멈춘 자리부터 오도메트리 fixed_move_mm 직진 (멈출 때 방향 유지)
     # ④ F_TPAUSE fixed_turn_pause_sec 정지 + 끝 presteer_sec 동안 오른쪽 최대 조향 미리 꺾기
     # ⑤ F_TURN   오른쪽 최대 조향 전진. fixed_turn_deg(IMU) 돌거나 fixed_turn_mm(>0이면) 가면 끝
-    # ⑥ F_CHECK  앞 50cm 확인: 있으면 앞칸 완료 / 없으면 F_STR 뒷줄로 fixed_backrow_mm 직진 (11/18 캡틴)
-    # ⑦ DONE     PARKED_FIXED. ③~⑥ 중 앞범퍼 front_stop_mm 안에 물체 -> ③은 기다림, ⑤⑥은 그 자리 정지(PARKED_FIXED_BLOCKED)
+        # ⑥ DONE     PARKED_FIXED (11/18 공지: 2행 주차 없음 -> 돌고 바로 끝). ③·⑤ 중 앞범퍼 front_stop_mm 안에 물체 -> ③은 기다림, ⑤는 그 자리 정지(PARKED_FIXED_BLOCKED)
     # ------------------------------------------------------------------
     def _step_fixed(self, inp):
         p = self.p
@@ -1366,44 +1365,11 @@ class ParkingV2:
             if by_deg or by_mm:
                 self.stop_how = 'deg' if by_deg else 'mm'
                 self.err = ('turned', round(deg, 1), round(moved))
-                self.yaw_str0 = inp['yaw']
-                self._enter('F_CHECK', inp)                # 11/18 캡틴 ④: 앞 50cm 확인 (뒷줄 빈 칸이면 더 들어감)
-                return self._out(0.0, 0.0)
+                return self._done('PARKED_FIXED', inp)     # 11/18 공지: 2행 주차 없음 -> 돌고 바로 끝
             if inp['blocked']:
                 self.err = ('blocked', round(deg, 1), round(moved))
                 return self._done('PARKED_FIXED_BLOCKED', inp)
             return self._out(p['fixed_turn_speed'], KAPPA_FULL_RIGHT)
-
-        if self.phase == 'F_CHECK':
-            # 11/18 캡틴 ④: 돌고 나서 앞 fixed_check_mm(50cm) 안, 차 폭 띠에 물체가 있으면 앞칸 완료.
-            # 없으면 뒷줄 칸이 빈 것 -> fixed_backrow_mm 더 직진 (0 = 미측정 -> 앞칸에서 끝)
-            if not hasattr(self, 'chk_hits') or self.chk_hits is None:
-                self.chk_hits, self.chk_frames = 0, 0
-            bump = p['front_bumper_from_axle_mm']
-            half = p['fixed_check_half_mm']
-            n = sum(1 for x, y in inp.get('points_far', []) if bump < x <= bump + p['fixed_check_mm'] and abs(y) <= half)
-            self.chk_hits += 1 if n >= p['fixed_check_min_pts'] else 0
-            self.chk_frames += 1
-            if inp['t'] - self.t_phase < p['fixed_check_sec']:
-                return self._out(0.0, 0.0)
-            ahead = self.chk_hits * 2 >= self.chk_frames      # 절반 넘는 장면에서 보이면 '있음'
-            self.row = 'front' if ahead else 'back'
-            if ahead:
-                return self._done('PARKED_FIXED', inp)
-            if p['fixed_backrow_mm'] <= 0:
-                return self._done('PARKED_FIXED_NO_BACKROW', inp)   # 뒷줄 거리 미측정
-            self._enter('F_STR', inp)
-            return self._out(0.0, 0.0)
-
-        if self.phase == 'F_STR':                          # 뒷줄 칸으로 더 직진 (방향 유지)
-            if moved >= p['fixed_backrow_mm'] - p['fixed_brake_mm']:
-                return self._done('PARKED_FIXED_BACK', inp)
-            if inp['blocked']:
-                return self._done('PARKED_FIXED_BLOCKED', inp)
-            k = 0.0
-            if inp['yaw'] is not None and getattr(self, 'yaw_str0', None) is not None:
-                k = max(-1.0, min(1.0, -p['fixed_heading_gain'] * wrap(inp['yaw'] - self.yaw_str0)))
-            return self._out(p['fixed_move_speed'], k)
 
         return self._out(0.0, 0.0)                         # DONE
 
@@ -1621,11 +1587,6 @@ DEFAULTS = {
     'fixed_blob_min_pts': 2,       # A: 이만큼 점이 있는 덩어리만 물체로 봄
     'fixed_default_cell': 2,       # 감지 꺼짐일 때
     'fixed_force_cell': 0,         # 1~3이면 감지 무시하고 그 칸 (시험용)
-    'fixed_check_mm': 500.0,       # 11/18 캡틴 ④: 돌고 나서 앞범퍼 앞 이 거리 안에 물체 -> 앞칸 완료
-    'fixed_check_half_mm': 130.0,  #   검사 띠 반폭 (차 폭 220/2 + 2cm, 양옆 리모는 약 15cm 옆)
-    'fixed_check_min_pts': 3,      #   한 장면에 점이 이만큼 있으면 '있음'
-    'fixed_check_sec': 0.5,        #   확인 시간 (절반 넘는 장면에서 보이면 있음)
-    'fixed_backrow_mm': 0.0,       # 뒷줄 빈 칸일 때 더 직진할 거리 (미측정 = 0 -> 앞칸에서 끝, 결과 PARKED_FIXED_NO_BACKROW)
     'fixed_line_target_mm': 56.0,   # 앞바퀴가 주차선 이만큼 앞에서 정지 (11/16 캡틴: 앞범퍼가 선에 닿게 = front_bumper_from_axle_mm)
     'fixed_first_min_mm': 250.0,   # 처음 잡는 주차선은 앞바퀴에서 이보다 멀리 보인 것만 (횡단보도 끝 선 무시)
     'fixed_brake_mm': 0.0,     #   정지 명령 뒤 밀리는 거리 (미측정 -> 0). 실차에서 지나치면 그만큼 넣기

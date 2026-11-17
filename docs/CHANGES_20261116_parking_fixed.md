@@ -57,3 +57,6 @@
 - B: 칸마다 점 수 → 가장 적은 칸
 - 같음 → 출발(agree) / A 답 없음 → B(a_fail_b) / 다름 → 1초 더 모은 뒤 또 다르면 B(mismatch_b)
 - /parking/state: cell_a, cell_b, cell_src, cell_avg
+
+## 11/18 공지: 2행 주차 없음 → 뒷줄 단계 삭제
+- F_CHECK(앞 50cm 확인)·F_STR(뒷줄 직진)·fixed_check_*·fixed_backrow_mm 삭제. 87도 돌면 바로 PARKED_FIXED.

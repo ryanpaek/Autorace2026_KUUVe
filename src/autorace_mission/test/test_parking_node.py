@@ -839,28 +839,6 @@ def test_fixed_force_cell_overrides_detection():
     assert out['logic'].fixed_cell == 2 and out['logic'].cell_src == 'force'
 
 
-# ---- 11/18 캡틴 ④: 돌고 나서 앞 50cm 확인 -> 뒷줄 ----
-def test_fixed_front_cell_when_back_occupied():
-    out = {}
-    n_in, hit, res = drive([1, 3, 4, 5, 6], 2, FIXED, y0=290.0, r_min=590.0, out=out)
-    assert out['logic'].row == 'front' and res == 'PARKED_FIXED' and n_in == 4 and not hit
-
-
-@pytest.mark.parametrize('front,back', [(1, 4), (2, 5), (3, 6)])
-def test_fixed_back_row_goes_deeper(front, back):
-    parked = [i for i in range(1, 7) if i not in (front, back)]
-    out = {}
-    n_in, hit, res = drive(parked, back, dict(FIXED, fixed_backrow_mm=620.0), y0=290.0, r_min=590.0, out=out)
-    assert out['logic'].fixed_cell == front and out['logic'].row == 'back'
-    assert res == 'PARKED_FIXED_BACK' and n_in == 4 and not hit
-
-
-def test_fixed_back_row_unmeasured_stays_front():
-    out = {}
-    n_in, hit, res = drive([2, 3, 5, 6], 1, FIXED, y0=290.0, r_min=590.0, out=out)
-    assert res == 'PARKED_FIXED_NO_BACKROW' and n_in == 4 and not hit
-
-
 def test_pick_cell_a_b_rules():
     lg = pn.ParkingV2(dict(pn.DEFAULTS, **FIXED))
     lg.cell_frames, lg.detect_extra = 10, False
