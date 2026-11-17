@@ -281,3 +281,90 @@ def test_no_reverse_never_backs_off_when_blocked():
         v, k = m.step(1.0 + 0.1 * i)
         assert v >= 0.0 and m.state != 'ALIGN'
     assert '후진 안 함' in m.why
+
+
+# ---------------- M2 갈림길 녹화 재생 (11/17) ----------------
+def _m2_paths(L=1.6):
+    """모형 M2 녹화: 바깥 차로는 그대로 직진, 가운데는 갈래 쪽으로 반 칸 + 조금 (섬 피함)"""
+    from limo_obstacle_avoid.path_track import Path
+    out = {}
+    for k in (1, 0, -1):
+        for f in ('A', 'B'):
+            side = 1 if f == 'A' else -1
+            goal = side * 0.52 - k * 0.52        # 갈래 = 바깥 차로 중심으로
+            n = int(L / 0.02) + 1
+            xs = [i * 0.02 for i in range(n)]
+            Ls = 1.2
+            ys = [goal * (1 - math.cos(math.pi * min(x, Ls) / Ls)) / 2 for x in xs]
+            hs = [math.atan(goal * math.pi / (2 * Ls) * math.sin(math.pi * min(x, Ls) / Ls)) if x < Ls else 0.0 for x in xs]
+            out[(k, f)] = [Path(xs, ys, hs, 1)]
+    return out
+
+
+def test_m2_file_names_and_mirror(tmp_path):
+    from limo_obstacle_avoid.m7_replay_core import load_m2, m2_name
+    assert m2_name(1, 'A') == 'm2_1-A.csv' and m2_name(0, 'B') == 'm2_2-B.csv' and m2_name(-1, 'A') == 'm2_3-A.csv'
+    # 1-A 하나만 있으면 3-B는 그 거울상
+    rows = ['t,x,y,yaw,vx,wz,cmd_vx,cmd_wz,xs,ys,yaws,s,gz']
+    for i in range(80):
+        t = i * 0.05
+        x = max(0.0, (t - 1.2) * 0.2)
+        rows.append(f'{t},{x},{0.1 * x},0,{0.2 if t > 1.2 else 0},0,{0.2 if t > 1.2 else 0},0,,,,,0')
+    (tmp_path / 'm2_1-A.csv').write_text('\n'.join(rows))
+    got, src = load_m2(str(tmp_path))
+    assert (1, 'A') in got and (-1, 'B') in got and '거울상' in src[(-1, 'B')]
+    assert got[(-1, 'B')][-1].y[-1] == pytest.approx(-got[(1, 'A')][-1].y[-1])
+
+
+@pytest.mark.parametrize('fork', ['A', 'B'])
+def test_sim_m2_replay_picks_file_and_ends_in_branch(fork):
+    S = _sim()
+    import random
+    random.seed(99)
+    left = S.record_left()
+    S.TRIGGER_MM = 700.0
+    p = ReplayParams(trigger_mm=700.0)
+    orig = M7Replay.__init__
+
+    def init(self, pp, l, r):
+        orig(self, pp, l, r)
+        self.set_m2(_m2_paths(), {k: 'test' for k in _m2_paths()})
+    M7Replay.__init__ = init
+    try:
+        r = S.run(S.LAYOUTS[0], left, mirror(left), seed=0, fork=fork, p=p)
+    finally:
+        M7Replay.__init__ = orig
+    assert r['ok'] and r['clear_cm'] > 1.0 and r['island'] == 0
+    assert r['lane'] == (1 if fork == 'A' else -1)
+
+
+# ---------------- 11/17 저녁: 후진 재시도, 시험 시작, 막힌 차로 변경 뒤 차로 기억 ----------------
+def test_backup_when_too_close_then_change():
+    S = _sim()
+    import random
+    random.seed(99)
+    left = S.record_left()
+    S.TRIGGER_MM = 700.0
+    r = S.run([(0, 0.32), (1, 2.6), (-1, 2.6)], left, mirror(left), seed=0, fork='A', p=ReplayParams(trigger_mm=700.0))
+    assert r['ok'] and r['clear_cm'] > 1.0 and r['rev_m'] > 0.3 and r['fork_ok']
+
+
+def test_start_lane_no_and_m2_test_start():
+    m = M7Replay(ReplayParams(start_lane_no=3, m2_test_start=True), default_change(1), default_change(-1))
+    m.start()
+    assert m.lane == -1 and m.pose()[1] == pytest.approx(-0.52)
+    assert m.m2_x() == pytest.approx(0.0)
+
+
+def test_blocked_lane_change_does_not_count_as_changed():
+    m = M7Replay(ReplayParams(), default_change(1), default_change(-1))
+    m.start()
+    m.pts = []
+    m._begin_exec(1, None, 0.0, 'test')          # 0 -> 1 시작
+    assert m.target == 1 and m.lane == 0
+    m._shift(ddy=0.10)                            # 10 cm만 옮기고
+    m.pts = [(0.0, 0.0, 0.22, 0.0)]               # 바로 앞(앞범퍼 2 cm)에 물체 -> 재생 중 정지
+    for i in range(60):
+        m.step(0.1 * i)
+    assert m.state != 'EXEC'
+    assert m.lane == 0 and m.target == 0          # 바꾼 걸로 치지 않음 (위치로 본 가장 가까운 차로)

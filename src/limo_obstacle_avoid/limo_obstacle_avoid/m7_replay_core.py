@@ -37,6 +37,23 @@ from limo_obstacle_avoid.path_track import MAX_CURV, Path, PoseFusion, load_segm
 @dataclass
 class ReplayParams:
     lane_width: float = 0.52
+    # 11/17 M2 갈림길 재생: M7 끝 지점(섬 앞 꼭짓점 - m2_start_gap, 앞범퍼 기준)에서 (지금 차로, A/B)에 맞는
+    #   녹화 파일 m2_{1|2|3}-{A|B}.csv 하나를 재생해 갈래에 들어간 뒤 끝(DONE) -> FSM M2가 차선 주행으로 이어 감.
+    #   차로 번호 1 = 1차선(왼쪽, A 쪽, 코드 +1) / 2 = 가운데(0) / 3 = 3차선(오른쪽, B 쪽, -1)
+    m2_replay: bool = True
+    m2_start_gap: float = 1.00          # ★ M2 녹화 시작 자세: 앞범퍼 ~ 섬 앞 꼭짓점 거리 (m). 녹화한 거리와 같게
+    m2_fork_default: str = 'A'          # 그때까지 A/B 표지를 못 보면
+    m2_late_max: float = 0.40           # 장애물 때문에 늦어지면 M2 시작 지점 + 이만큼까지는 그 자리에서 시작, 넘으면 예전 방식
+    m2_test_start: bool = False         # 시험용: 켜지는 자리를 곧바로 M2 시작 지점으로 (M7 건너뛰고 갈림길만 연습)
+    start_lane_no: int = 0              # 시험용: 켤 때 차로 번호 1/2/3 (0 = start_lane 그대로, 기본 2차선)
+    # 11/17 저녁: 차로 변경을 못 하고 장애물이 너무 가까워지면 후진해서 다시 시도
+    backup_if_mm: float = 350.0         # 지금 차로 앞 장애물(라이다 거리)이 이보다 가까우면 후진 시작 (0 = 끔)
+    backup_to_mm: float = 0.0           # 이 거리까지 후진 (0 = trigger_mm: 녹화 시작 거리로 돌아가 녹화 그대로 재생)
+    backup_speed: float = 0.12
+    backup_max: float = 0.60            # 한 번에 최대 후진 거리 (m)
+    backup_k_e: float = 8.0             # 후진 중 차로 가운데 맞추기 게인 (카메라로 고친 옆 위치·방향 기준)
+    backup_k_psi: float = 4.0
+    m2_mirror: bool = True              # 파일이 없으면 좌우 대칭 파일을 뒤집어 씀 (1-A <-> 3-B, 1-B <-> 3-A, 2-A <-> 2-B)
     accel_reverse: bool = True          # 11/17: 조종기(RC) 후진도 거리에서 빼기 (출발 가속도 방향, motion_dir.py)
     accel_sign: int = 0                 #   0 = 가속도계 축을 우리 명령 출발로 배움 / 1 / -1 고정
     num_side_lanes: int = 1
@@ -165,6 +182,42 @@ def load_change(path_file: Optional[str], other_file: Optional[str], direction: 
     return default_change(direction, lane_width), '기본 S자 (녹화 파일 없음)'
 
 
+M2_LANE_NO = {1: 1, 0: 2, -1: 3}          # 코드 차로 -> 파일 차로 번호
+M2_LANE_K = {v: k for k, v in M2_LANE_NO.items()}
+
+
+def m2_name(k: int, fork: str) -> str:
+    return f'm2_{M2_LANE_NO[k]}-{fork}.csv'
+
+
+def load_m2(dirpath: str, mirror_ok: bool = True) -> Tuple[Dict[Tuple[int, str], List[Path]], Dict[Tuple[int, str], str]]:
+    """M2 녹화 6개 읽기. 반환 ({(차로 k, 'A'|'B'): 구간들}, {(k, f): 출처 설명}). 없는 건 대칭 파일 거울상."""
+    import os
+    got, src = {}, {}
+    for k in (1, 0, -1):
+        for f in ('A', 'B'):
+            fn = os.path.join(dirpath, m2_name(k, f)) if dirpath else ''
+            if not fn or not os.path.exists(fn):
+                continue
+            for mode in ('fused', 'odom'):
+                try:
+                    segs, _ = load_segments(fn, mode)
+                except (OSError, ValueError):
+                    continue
+                if segs and sum(g.length for g in segs) > 0.1:
+                    got[(k, f)] = segs
+                    src[(k, f)] = f'{m2_name(k, f)} [{mode}]'
+                    break
+    if mirror_ok:
+        for k in (1, 0, -1):
+            for f in ('A', 'B'):
+                mk, mf = -k, ('B' if f == 'A' else 'A')
+                if (k, f) not in got and (mk, mf) in src and not src[(mk, mf)].endswith('거울상'):
+                    got[(k, f)] = mirror(got[(mk, mf)])
+                    src[(k, f)] = f'{m2_name(mk, mf)} 거울상'
+    return got, src
+
+
 def fit_lateral(segs: List[Path], lane_width: float) -> Tuple[List[Path], float]:
     """녹화 끝 옆 위치를 정확히 ±차로 간격으로 (녹화가 0.50·0.55 m에서 끝났어도 다음 차로 중심에 닿게).
     배율이 0.8~1.25 밖이면 손대지 않음. 반환 (구간들, 배율)"""
@@ -264,6 +317,9 @@ class M7Replay:
         self.p = p
         (left, self.k_left), (right, self.k_right) = fit_lateral(left, p.lane_width), fit_lateral(right, p.lane_width)
         self.change = {+1: left, -1: right}
+        self.m2: Dict[Tuple[int, str], List[Path]] = {}
+        self.m2_src: Dict[Tuple[int, str], str] = {}
+        self.m2_run = None            # 재생 중인 M2 (k, fork)
         self.fu = PoseFusion()
         self.acc = AccelDirection(fixed_sign=p.accel_sign)
         self.state = 'IDLE'
@@ -274,6 +330,7 @@ class M7Replay:
         self.exit_pref: Optional[int] = None
         self.set_exit(p.exit_lane)
         self.track: Optional[Track] = None
+        self.backup = None
         self.align = None
         self.after_align = False
         self.pending = None           # 정렬 뒤 실행할 동작 (방향, 장애물 x)
@@ -334,6 +391,36 @@ class M7Replay:
         if self.p.accel_reverse:
             acc_rev = self.acc.on_odom(t, x, y, self.last_v) < 0
         self.fu.on_odom(t, x, y, yaw, v, self.last_v, acc_rev)
+
+    def set_m2(self, paths: Dict[Tuple[int, str], List[Path]], src: Dict[Tuple[int, str], str]):
+        self.m2, self.m2_src = dict(paths), dict(src)
+
+    def m2_on(self) -> bool:
+        return bool(self.p.m2_replay and self.m2)
+
+    def m2_possible(self, x: float) -> bool:
+        """아직 M2 녹화로 갈 수 있나 (파일 있음, 시작 지점 + m2_late_max 안)"""
+        return self.m2_on() and x <= self.m2_x() + self.p.m2_late_max
+
+    def m2_hit(self, key, x0: float) -> Optional[Tuple[float, float]]:
+        """M2 녹화를 붙여 굴려 봤을 때 차체 + hit_margin에 라이다 점 (섬은 녹화가 이미 피했다고 보고 안 봄)"""
+        p = self.p
+        m = p.hit_margin
+        pts = [(lx, ly) for lx, ly, _, _ in self.pts]
+        for g in anchor(self.m2[key], x0, self.center(self.lane)):
+            for i in range(0, len(g), 3):
+                cx, cy, h = g.x[i], g.y[i], g.h[i]
+                c, s_ = math.cos(h), math.sin(h)
+                for lx, ly in pts:
+                    a = c * (lx - cx) + s_ * (ly - cy)
+                    b = -s_ * (lx - cx) + c * (ly - cy)
+                    if -p.robot_rear - m <= a <= p.robot_front + m and abs(b) <= p.robot_half_width + m:
+                        return lx, ly
+        return None
+
+    def m2_x(self) -> float:
+        """M2 녹화 시작 위치 (위치 기준점 x) = 섬 앞 꼭짓점 - m2_start_gap - 앞범퍼"""
+        return self.p.section_length - self.p.m2_start_gap - self.p.robot_front
 
     def set_exit(self, s):
         s = (s or 'auto').strip().upper()
@@ -412,7 +499,16 @@ class M7Replay:
         self.fu.x = self.fu.y = 0.0
         self.fu.s = self.fu.dist = 0.0
         self.offset = (0.0, self.center(p.start_lane) + p.start_y, math.radians(p.start_heading_deg) - self.fu.yaw)
-        self.lane = self.target = p.start_lane
+        if p.start_lane_no in (1, 2, 3):
+            k0 = M2_LANE_K[p.start_lane_no]
+            self.offset = (0.0, self.center(k0) + p.start_y, self.offset[2])
+            self.lane = self.target = k0
+        else:
+            self.lane = self.target = p.start_lane
+        if p.m2_test_start:
+            p.section_length = p.m2_start_gap + p.robot_front       # 지금 자리 = M2 시작 지점
+            self.events.append(f'시험: 지금 자리를 M2 시작 지점으로 (차로 {M2_LANE_NO[self.lane]})')
+        self.backup = None
         self.state = 'CRUISE'
         self.track = None
         self.align = None
@@ -421,6 +517,9 @@ class M7Replay:
         self.n_exec = 0
         self.safety_since = None
         self.backed_off = False
+        self.m2_run = None
+        self._m2_missing_logged = False
+        self._m2_hit_logged = False
         self.cam_ids.clear()
         self.events.append(f'시작: 차로 {self.lane}, 섬까지 {p.section_length:.2f} m, 출구 {self._exit_name()}')
 
@@ -542,6 +641,9 @@ class M7Replay:
                 self.lane = self.target = self.nearest_lane(y)
                 self.track = None
                 self.state = 'STOP'
+                if self.m2_run is not None:          # M2 재생 중이면 다시 하지 않고 끝 -> FSM 차선 주행
+                    self.target = self.lane = 1 if self.m2_run[1] == 'A' else -1
+                    self.state = 'DONE'
                 self.safety_since = None
         else:
             self.safety_since = None
@@ -632,11 +734,26 @@ class M7Replay:
 
         if self.state == 'EXEC':
             v, k = self.track.step(x, y, psi, t, still)
+            if self.track.off_track() and self.m2_run is not None:
+                self.events.append(f'[x={x:.2f}] M2 재생 경로에서 벗어남 (옆 {100 * self.track.e:+.0f} cm) -> 끝내고 차선 주행으로')
+                self.target = self.lane = 1 if self.m2_run[1] == 'A' else -1
+                self.track = None
+                self.state = 'DONE'
+                return 0.0, 0.0
             if self.track.off_track():
                 self.events.append(f'[x={x:.2f}] 재생 경로에서 벗어남 (옆 {100 * self.track.e:+.0f} cm) -> 멈추고 지금 차로에서 다시 판단')
                 self.lane = self.target = self.nearest_lane(y)
                 self.track = None
                 self.state = 'STOP'
+                return 0.0, 0.0
+            if self.track.done and self.m2_run is not None:
+                k0, f = self.m2_run
+                tr = self.track
+                self.target = self.lane = 1 if f == 'A' else -1     # 갈래 A/B -> m7_exit -> FSM M2가 그 갈래 차선 주행
+                self.track = None
+                self.state = 'DONE'
+                self.events.append(f'[x={x:.2f}] M2 갈림길 재생 끝 ({m2_name(k0, f)} -> 갈래 {f}, 최대 옆 오차 '
+                                   f'{100 * tr.max_e:.1f} cm) -> 차선 주행으로')
                 return 0.0, 0.0
             if self.track.done:
                 self.lane = self.target
@@ -652,6 +769,9 @@ class M7Replay:
                 return 0.0, 0.0
             return v, k
 
+        if self.state == 'BACKUP':
+            return self._backup_step(t, x, y, psi, still)
+
         if self.state == 'ALIGN':
             return self._align_step(t, x, y, psi, still)
 
@@ -663,6 +783,37 @@ class M7Replay:
             self.state = 'DONE'
             self.events.append(f'[x={x:.2f}] 끝: 차로 {self.lane}')
             return 0.0, 0.0
+        # 1b. M2 갈림길 재생: M7 끝 지점에 오면 (지금 차로, A/B) 녹화 하나 재생 -> 갈래 안에서 끝
+        if self.m2_possible(x):
+            fork = 'A' if self.exit_pref == 1 else ('B' if self.exit_pref == -1 else None)
+            x_m2 = self.m2_x()
+            hit = None
+            if x >= x_m2 - p.speed * p.latency_s:
+                key0 = (self.lane, fork or p.m2_fork_default)
+                hit = self.m2_hit(key0, max(x_m2, x)) if key0 in self.m2 else None
+                if hit is not None and not getattr(self, '_m2_hit_logged', False):
+                    self._m2_hit_logged = True
+                    self.events.append(f'[x={x:.2f}] M2 녹화 길에 물체 ({hit[0] - x:+.2f} m) -> 장애물 먼저 (늦어도 '
+                                       f'{100 * p.m2_late_max:.0f} cm까지는 그 자리에서 M2 시작)')
+            if x >= x_m2 - p.speed * p.latency_s and hit is None:
+                why_f = '표지' if fork else f'표지 못 봄 -> 기본 {p.m2_fork_default}'
+                fork = fork or p.m2_fork_default
+                key = (self.lane, fork)
+                if key in self.m2:
+                    x0 = max(x_m2, x)
+                    segs = anchor(self.m2[key], x0, self.center(self.lane))
+                    self.track = Track(segs, p, p.exec_speed, p.exec_rev_speed)
+                    self.m2_run = key
+                    self.state = 'EXEC'
+                    self.n_exec += 1
+                    self.why = f'M2 {m2_name(*key)} ({why_f})'
+                    self.events.append(f'[x={x:.2f}] M7 끝 지점 -> M2 갈림길 재생 {self.m2_src.get(key, m2_name(*key))} '
+                                       f'(차로 {M2_LANE_NO[self.lane]}, 갈래 {fork}: {why_f}, 옆 오차 '
+                                       f'{100 * (y - self.center(self.lane)):+.1f} cm, 방향 {math.degrees(psi):+.1f}°)')
+                    return self.track.step(x, y, psi, t, still)
+                if not getattr(self, '_m2_missing_logged', False):
+                    self._m2_missing_logged = True
+                    self.events.append(f'[x={x:.2f}] M2 녹화 {m2_name(*key)} 없음 -> 예전 방식(바깥 차로로 옮겨 섬 지나 끝)')
         # 2. 섬 앞 가운데 차로 -> 정지
         if self.lane == 0 and x >= island - p.island_stop - p.robot_front:
             d, why = self.choose(self.lane, None)
@@ -685,6 +836,10 @@ class M7Replay:
                              'start_in_mm': round(1000 * max(0.0, g0 - p.trigger_mm / 1000.0)), 'why': why0}
         # 4. 앞 장애물
         g = self.gap(self.lane)
+        if g is not None and p.backup_if_mm > 0 and g < p.backup_if_mm / 1000.0:
+            # 차로 변경을 못 했는데(막힘·재생 중단) 장애물이 너무 가까움 -> 차로 가운데 맞추며 후진 -> 다시 판단
+            self._begin_backup(x, g)
+            return 0.0, 0.0
         if g is not None:
             # 바로 재생: 이미 가운데이고 녹화 시작 거리보다 많이 가깝지 않을 때 (가까우면 서서 정렬하며 뒤로 물러남)
             ok = p.no_reverse or (p.align_skip_if_ok and (self.aligned() or not p.align_before)
@@ -722,6 +877,8 @@ class M7Replay:
         #    반대쪽 바깥 차로면 가운데로 한 칸 (두 칸 거리 전부터), 안 되면 그 차로로 끝 (FSM이 그 갈래를 따름)
         L = self._change_len(1)
         want = self.exit_pref
+        if self.m2_possible(x) and any((self.lane, f) in self.m2 for f in ('A', 'B')):
+            return self._cruise_cmd(t)               # 출구는 M2 녹화가 맡음 (차로 그대로 M7 끝 지점까지)
         if self.lane == 0 and p.num_side_lanes > 0 and x >= island - L - p.exit_lead:
             order = ([1 if want > 0 else -1] if want else []) + [d for d in (1, -1) if not want or d != (1 if want > 0 else -1)]
             for d in order:
@@ -734,6 +891,36 @@ class M7Replay:
                 self._begin_exec(d, None, t, f'출구 {self._exit_name()} 쪽으로 (두 칸 중 첫 칸)')
                 return self.track.step(x, y, psi, t, still)
         return self._cruise_cmd(t)
+
+    def _begin_backup(self, x, g):
+        p = self.p
+        xb = x - p.backup_max
+        n = 31
+        line = Path([x - (x - xb) * i / (n - 1) for i in range(n)], [self.center(self.lane)] * n, [0.0] * n, -1)
+        self.backup = {'x0': x, 'track': Track([line], p, p.backup_speed, p.backup_speed, p.backup_k_e, p.backup_k_psi),
+                       'stopping': False}
+        self.state = 'BACKUP'
+        self.blocked_since = None
+        to = (p.backup_to_mm or p.trigger_mm)
+        self.events.append(f'[x={x:.2f}] 장애물 {1000 * g:.0f} mm (< {p.backup_if_mm:.0f}) -> {to:.0f} mm까지 후진 '
+                           f'(차로 {M2_LANE_NO.get(self.lane)} 가운데 맞추며)')
+
+    def _backup_step(self, t, x, y, psi, still):
+        p = self.p
+        b = self.backup
+        g = self.gap(self.lane)
+        to = (p.backup_to_mm or p.trigger_mm) / 1000.0
+        done = (g is None or g >= to - p.brake_k * p.backup_speed or b['track'].done
+                or b['x0'] - x >= p.backup_max)
+        if done or b['stopping']:
+            b['stopping'] = True
+            if still:
+                self.events.append(f'[x={x:.2f}] 후진 끝: 앞 {"없음" if g is None else f"{1000 * g:.0f} mm"}, '
+                                   f'옆 {100 * (y - self.center(self.lane)):+.1f} cm, 방향 {math.degrees(psi):+.1f}° -> 다시 판단')
+                self.backup = None
+                self.state = 'CRUISE'
+            return 0.0, 0.0
+        return b['track'].step(x, y, psi, t, still)
 
     def _align_step(self, t, x, y, psi, still):
         p = self.p
@@ -797,7 +984,11 @@ class M7Replay:
         x, y, psi = self.pose()
         return {'state': 'RUN' if self.state not in ('IDLE', 'DONE') else self.state,
                 'phase': self.state, 'x': round(x, 3), 'y': round(y, 3), 'psi_deg': round(math.degrees(psi), 1),
-                'now_lane': self.lane, 'target': self.target, 'exit_pref': self.exit_pref,
+                'now_lane': self.lane, 'now_lane_no': M2_LANE_NO.get(self.lane), 'target': self.target,
+                'exit_pref': self.exit_pref,
+                'm2': (None if not self.m2_on() else
+                       {'run': None if self.m2_run is None else m2_name(*self.m2_run),
+                        'start_in_m': round(self.m2_x() - x, 2), 'files': len(self.m2)}),
                 # 11/17: 지금 몇 차선 (1 = 왼쪽 A쪽, 2 = 가운데, 3 = 오른쪽 B쪽), 카메라 선 종류로 본 차로와 같은지
                 'lane_no': 2 - self.lane, 'cam_lane_no': self._cam_lane_no(),
                 'lane_agree': (None if self._cam_lane_no() is None else self._cam_lane_no() == 2 - self.lane),
@@ -805,5 +996,6 @@ class M7Replay:
                 'gaps_mm': {str(k): (None if self.gap(k) is None else round(1000 * self.gap(k))) for k in self.obs},
                 'why': self.why, 'stop': self.stop_why, 'n_exec': self.n_exec, 'cam_fix_n': self.cam_n,
                 'acc_dir': self.acc.state(),
+                'backup': None if not getattr(self, 'backup', None) else round(self.backup['x0'] - x, 2),
                 'align': None if not self.align else f'{self.align["leg"]}{self.align["cycle"]}',
                 'lane_why': {'reason': self.why}}
