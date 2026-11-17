@@ -134,6 +134,18 @@ class ReplayParams:
     # 11/17: 트리거 전에도 장애물 위치와 '어느 차로로 빠질지'를 plan_period_s마다 미리 계산해 둠 (/avoid/state plan). 조향에는 안 씀
     plan_ahead: bool = True
     plan_period_s: float = 0.3
+    # 11/18 시험 (브랜치 test/m7-exec-yellow-guard): 재생(EXEC) 중 노란선 안전장치.
+    #   '노란선이 보인다'가 아니라 '지금 노란선 반대로 최대 조향해도 바퀴~노란선 여유가 eyg_clear_mm 밑으로 떨어진다'일 때만 걸림.
+    #   차선 노드 /lane/status의 yellow_l_mm / yellow_r_mm(차 중심 -> 노란 실선 옆 거리, 앞 yellow_f_mm에서 잰 값)을
+    #   차 방향(위치 추정 ψ)으로 차 기준점 옆 거리로 되돌린 뒤, 앞 모서리가 쓸려 나가는 양 + 반응 지연 + 방향 펴는 데 드는 옆 이동을 뺌.
+    #   걸리면 재생을 끝내고 그 틱은 노란선 반대로 최대 조향, 다음부터 CRUISE(차선 노드 곡률, 차선 노드 자체 노란선 지킴 포함)
+    exec_yellow_guard: bool = True
+    eyg_clear_mm: float = 50.0          # 바퀴(차체 옆) ~ 노란선 최소 여유
+    eyg_psi_deg: float = 2.0            # 노란선 쪽으로 이만큼 이상 틀어져 있을 때만
+    eyg_front: float = 0.20             # 위치 기준점 -> 차 앞 모서리 (m)
+    eyg_arm_frac: float = 0.30          # 재생 진행률(전진 구간 길이 기준)이 이만큼 지나야 켬 (0 = 처음부터)
+    eyg_frames: int = 2                 # 연속 이만큼 걸려야 인정
+    eyg_fresh_s: float = 0.3            # 이보다 오래된 /lane/status는 안 씀
     cam_id_need: int = 5                # 차선 노드 lane_id가 최근 7번 중 이만큼 같으면 차로 번호를 그걸로 (CRUISE 때만)
     cam_id_window: int = 7
 
@@ -352,6 +364,9 @@ class M7Replay:
         self.steer_src = '-'                      # CRUISE 조향 출처: lane(차선 노드) / pose(위치 추정)
         self.plan: dict = {}                      # 미리 계산한 회피 계획
         self.plan_t = -1e9
+        self.eyg_n = 0                            # 노란선 안전장치 연속 걸린 수
+        self.eyg_hits = 0                         # 이번 판 노란선 안전장치로 재생 끊은 횟수
+        self.eyg_last: Optional[dict] = None      # 마지막 계산 값 (디버그)
 
     # ---------- 위치 ----------
     def reset_pose(self):
@@ -702,6 +717,58 @@ class M7Replay:
         self.events.append(f'[x={x:.2f}] 차로 {self.lane} -> {self.target} 재생 시작 ({why}, '
                            f'옆 오차 {100 * (y - self.center(self.lane)):+.1f} cm, 방향 {math.degrees(psi):+.1f}°)')
 
+    def _track_progress(self) -> float:
+        """재생 진행률 0~1 (전진 구간 길이 기준)."""
+        tr = self.track
+        if tr is None:
+            return 0.0
+        tot = sum(g.length for g in tr.segs if g.dir > 0)
+        if tot <= 0:
+            return 1.0
+        done = sum(g.length for g in tr.segs[:tr.i] if g.dir > 0)
+        if tr.seg.dir > 0:
+            done += max(0.0, tr.s)
+        return min(1.0, done / tot)
+
+    def _exec_yellow_check(self, t, psi) -> Optional[int]:
+        """재생 중 노란선에 붙기 직전인지. 반환 +1(왼쪽 노란선) / -1(오른쪽) / None."""
+        p = self.p
+        if not p.exec_yellow_guard:
+            return None
+        ln = self.lane_msg
+        if not ln or self.lane_t is None or t - self.lane_t > p.eyg_fresh_s:
+            self.eyg_n = 0
+            return None
+        prog = self._track_progress()
+        f = ln.get('yellow_f_mm')
+        f = (float(f) / 1000.0) if f is not None else 0.575
+        best = None
+        for side, key in ((+1, 'yellow_l_mm'), (-1, 'yellow_r_mm')):
+            d = ln.get(key)
+            if d is None:
+                continue
+            a = side * psi                                   # 노란선 쪽으로 틀어진 각 (+ = 그쪽으로)
+            if math.degrees(a) < p.eyg_psi_deg:
+                continue
+            d_ref = float(d) / 1000.0 + f * math.tan(a)      # 앞 f에서 잰 거리 -> 차 기준점 옆 거리 (선은 차로와 나란하다고 봄)
+            sweep = p.eyg_front * math.sin(a)                # 앞 모서리가 그쪽으로 더 나가 있음
+            lag = p.exec_speed * p.latency_s * math.sin(a)   # 반응 지연 동안 더 감
+            turn = (1.0 / MAX_CURV) * (1.0 - math.cos(a))    # 최대 조향으로 방향 펴는 동안 옆 이동
+            clear = d_ref - p.robot_half_width - sweep - lag - turn
+            if best is None or clear < best[1]:
+                best = (side, clear, a)
+        if best is None:
+            self.eyg_n = 0
+            self.eyg_last = {'prog': prog}
+            return None
+        side, clear, a = best
+        self.eyg_last = {'side': side, 'clear_mm': 1000.0 * clear, 'toward_deg': math.degrees(a), 'prog': prog}
+        if prog < p.eyg_arm_frac or 1000.0 * clear >= p.eyg_clear_mm:
+            self.eyg_n = 0
+            return None
+        self.eyg_n += 1
+        return side if self.eyg_n >= p.eyg_frames else None
+
     def _begin_align(self, x_end: Optional[float], after: bool):
         x, _, _ = self.pose()
         self.align = {'cycle': 0, 'leg': 'back', 'x_start': x, 'x_end': x_end if x_end is not None else x,
@@ -747,6 +814,20 @@ class M7Replay:
                 self.track = None
                 self.state = 'STOP'
                 return 0.0, 0.0
+            if self.m2_run is None and not self.track.done:
+                side = self._exec_yellow_check(t, psi)
+                if side is not None:
+                    self.lane = self.target
+                    tr = self.track
+                    ev = self.eyg_last or {}
+                    self.events.append(f'[x={x:.2f}] 노란선 안전장치 ({"왼쪽" if side > 0 else "오른쪽"}): 여유 '
+                                       f'{ev.get("clear_mm", 0):.0f} mm, 방향 {ev.get("toward_deg", 0):+.1f}°, 진행 '
+                                       f'{100 * ev.get("prog", 0):.0f}% -> 재생 끝, 차로 {self.lane} 차선 주행')
+                    self.track = None
+                    self.cam_ids.clear()
+                    self.eyg_hits += 1
+                    self.state = 'CRUISE'
+                    return max(v, 0.0), -side * MAX_CURV
             if self.track.done and self.m2_run is not None:
                 k0, f = self.m2_run
                 tr = self.track
@@ -999,4 +1080,7 @@ class M7Replay:
                 'acc_dir': self.acc.state(),
                 'backup': None if not getattr(self, 'backup', None) else round(self.backup['x0'] - x, 2),
                 'align': None if not self.align else f'{self.align["leg"]}{self.align["cycle"]}',
-                'lane_why': {'reason': self.why}}
+                'lane_why': {'reason': self.why},
+                'eyg': (None if not self.eyg_last else {k: (round(v, 1) if isinstance(v, float) else v)
+                                                        for k, v in self.eyg_last.items()}),
+                'eyg_hits': self.eyg_hits}

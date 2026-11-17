@@ -35,3 +35,9 @@
     plan_ahead: true           # 11/17: 트리거 전에도 장애물 위치·빠질 차로를 미리 계산 (/avoid/state plan, 조향엔 안 씀)
     path_left: ''              # 비우면 share/limo_obstacle_avoid/paths/m7_left.csv
     path_right: ''             #        .../m7_right.csv (한쪽만 있으면 거울상, 둘 다 없으면 기본 S자)
+    # 11/18 시험 브랜치: 재생 중 노란선 안전장치 (끄기: ros2 param set /avoid_node exec_yellow_guard false)
+    exec_yellow_guard: true
+    eyg_clear_mm: 50.0         #   바퀴~노란선 여유가 이 밑으로 떨어질 때만 (최대 조향·지연·앞 모서리 고려한 예측값)
+    eyg_psi_deg: 2.0           #   노란선 쪽으로 이만큼 이상 틀어져 있을 때만
+    eyg_arm_frac: 0.30         #   재생 진행률 30% 지나야 켬
+    eyg_frames: 2              #   연속 2프레임
