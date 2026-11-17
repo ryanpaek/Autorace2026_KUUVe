@@ -116,6 +116,8 @@ def drive(parked, target, overrides=None, y0=240.0, fov_deg=360.0, camera=False,
                                  'stoplines_mm': lines, 'clusters': cl, 'blocked': bl,
                                  'end_lines_mm': camera_lines(fx, fy, th) if camera else [],
                                  'points': pn.scan_points(rng, amin, ainc, 0.05, 8.0, p['front_axle_from_lidar_mm']),
+                                 'points_far': pn.scan_points(rng, amin, ainc, 0.05, 8.0, p['front_axle_from_lidar_mm'],
+                                                              max_dist_mm=p['fixed_detect_range_mm']),
                                  'clusters_pair': pn.scan_clusters(rng, amin, ainc, 0.05, 8.0, p['front_axle_from_lidar_mm'], 0.0,
                                                                    max_dist_mm=max(1500.0, p['side_far_mm'] + 200.0),
                                                                    x_mode='extent', min_size_mm=p['car_min_size_mm']),
@@ -744,7 +746,8 @@ def test_center_check_margin_and_short_pullout():
 # ---- 11/16 캡틴 고정 거리 방식 (turn_ref: fixed) ----
 # 시험 트랙(흰 선 -> 주차 구역 500mm)은 실제 트랙과 달라 직진 거리를 940으로 맞춰 논리만 시험한다.
 # 실제 값 1040은 캡틴이 실제 트랙에서 앞범퍼를 선에 대고 잰 값 (11/16).
-FIXED = {'turn_ref': 'fixed', 'front_stop_mm': 150.0, 'fixed_move_mm': 940.0, 'fixed_turn_mm': 0.0}   # 시험 트랙은 87도로 끝
+FIXED = {'turn_ref': 'fixed', 'front_stop_mm': 150.0, 'fixed_move_mm': 940.0, 'fixed_turn_mm': 0.0,   # 시험 트랙은 87도로 끝
+         'fixed_cells_move_mm': [420.0, 940.0, 1460.0]}                       # 시험 트랙 칸 간격 520
 
 
 @pytest.mark.parametrize('r_min', [560.0, 590.0, 620.0, 650.0])
@@ -816,3 +819,21 @@ def test_fixed_full_run_skips_crosswalk_end_line():
     """통주행 M4 시작: 횡단보도 끝 선 약 120mm 앞, 주차선 약 1950mm 앞 -> 횡단보도 선에서 서지 않음."""
     lg, stop_d = _fixed_lines([120.0], 1950.0)
     assert stop_d == pytest.approx(1950.0 - 56.0, abs=15.0)
+
+
+# ---- 11/17 공지: 빈 칸 랜덤 (한 칸만 비움) -> 선에서 라이다로 빈 칸 찾기 ----
+@pytest.mark.parametrize('empty', [1, 2, 3])
+@pytest.mark.parametrize('r_min', [590.0, 620.0])
+def test_fixed_finds_empty_cell_and_parks(empty, r_min):
+    parked = [i for i in range(1, 7) if i != empty]          # 나머지 다섯 칸은 모두 막음
+    out, log = {}, []
+    n_in, hit, res = drive(parked, empty, FIXED, y0=290.0, r_min=r_min, steer_lag_mm=60.0, out=out, log=log)
+    lg = out['logic']
+    assert lg.fixed_cell == empty and lg.cell_src == 'empty'
+    assert n_in == 4 and not hit and res == 'PARKED_FIXED'
+
+
+def test_fixed_force_cell_overrides_detection():
+    out = {}
+    drive([1, 3, 4, 5, 6], 2, dict(FIXED, fixed_force_cell=2), y0=290.0, r_min=590.0, out=out)
+    assert out['logic'].fixed_cell == 2 and out['logic'].cell_src == 'force'

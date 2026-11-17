@@ -287,6 +287,11 @@ parking_node:
     fixed_brake_mm: 0.0                    # 정지 명령 뒤 밀리는 거리 (미측정)
     fixed_pause_sec: 0.3
     fixed_move_mm: 870.0                   # 11/16 캡틴 실차 확정 (87도 회전과 같이). 3번 쪽으로 붙으면 줄이고 1번 쪽이면 늘림 (1cm = 10)
+    # 11/17 공지: 빈 칸 랜덤 -> 선에서 서 있는 1초 동안 라이다로 앞줄 1·2·3번 중 빈 칸 찾기 -> 칸별 직진 거리
+    fixed_detect: true
+    fixed_detect_sec: 1.0
+    fixed_cells_move_mm: [350.0, 870.0, 1390.0]   # 1·2·3번 칸 직진 (2번 실차 870 ± 칸 간격 520). 1·3번은 실차 미확인
+    fixed_force_cell: 0                    # 1~3이면 그 칸으로 강제 (시험용), 0 = 자동
     fixed_move_speed: 0.10
     fixed_turn_pause_sec: 0.3              # 0이면 멈추지 않고 바로 꺾음 (서보가 늦게 꺾여 원이 커질 수 있음)
     fixed_turn_deg: 87.0                   # 최대 조향 끝 = IMU 87도 (실차는 2~4도 더 돎)
