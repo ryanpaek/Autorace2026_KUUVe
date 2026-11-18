@@ -8,7 +8,7 @@ lane_node:
     imu_topic: /imu
     image_qos_depth: 1                     # 11/18: 최신 프레임만 처리 (예전 5 -> 1118_04 찍힘->결과 340 ms)
     require_calibration: true              # BEV yaml이 calibrated:false면 정지 명령만
-    base_speed: 0.50                       # 11/18 0.30 -> 0.50 (미션 노드가 덮어씀)
+    base_speed: 0.40                       # 11/19 0.50 -> 0.40 (1118_10 직선 S자). 11/18 0.30 -> 0.50 (미션 노드가 덮어씀)
     min_speed: 0.08                        # TODO 실측: 이보다 느리면 차가 안 움직이는 속도
     publish_debug: true
     debug_every: 3
@@ -24,6 +24,8 @@ lane_node:
     yellow_v_min: 80
     lane_width_mm: 515.0                   # 모의 맵 실측(10/30): 바깥~바깥 535, 테이프 20 -> 중심 간 515
     lookahead_mm: 650.0
+    lookahead_per_mps: 1000.0              # 11/19: 0.3 m/s 넘으면 lookahead 늘림 (0.4 -> 750, 0.5 -> 850). 그 밑은 그대로. 0 = 끔
+    lookahead_max_mm: 850.0
     corner_speed: 0.15                     # 11/19: 모든 커브 속도 상한 (m/s). 도면 앞 600 mm 안 또는 조향 곡률 |k| > 0.6이면. 0 = 끔
     curve_kappa_gain: 1.2                  # 11/19: 위 커브 판단에 걸릴 때만 조향 배율 (지그재그·M7 3차선은 corner_kappa_gain 1.1 그대로). '코너 크게 돎'
     corner_lookahead_mm: 600.0             # 11/19 700 -> 600 (0.15 m/s에서는 짧은 쪽이 덜 밀림: 실제 도면 코너 시뮬레이션 바깥 여유 23 -> 54 mm). 11/18: 커브에서만 lookahead. 0 = 끔
@@ -52,7 +54,7 @@ mission_node:
     imu_topic: /imu
     tick_hz: 20.0
     max_speed: 0.55                        # 11/18 0.45 -> 0.55 (평상시 0.50 + 여유)
-    base_speed: 0.50                       # 11/18 0.30 -> 0.50 평상시 속도 (서행·M7·정지 접근 속도는 그대로)
+    base_speed: 0.40                       # 11/19 0.50 -> 0.40 (1118_10 직선 S자·C1 진입 흔들림). 11/18 0.30 -> 0.50 평상시 속도 (서행·M7·정지 접근 속도는 그대로)
     slow_speed: 0.20                       # 서행 (규정 최대 0.2, 11/09 팀 결정)
     approach_speed: 0.18
     # 11/19: 속도 S자(시그모이드 모양) 가감속 (autorace_mission/speed_smooth.py). 예전엔 미션·차선 노드 속도가 계단처럼 바뀌어 툭툭 끊김.
