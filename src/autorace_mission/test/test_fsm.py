@@ -671,6 +671,49 @@ def test_corner_preview_lookahead_in_m7_corner_and_m2_exit():
     assert cmd.lane['lookahead_mm'] == 500.0
 
 
+def _m2x(**kw):
+    fsm = MissionFSM({'start_state': 'M2_FORK', 'cones_source_ready': True, 'odom_jump_mm': 1e9, **kw})
+    fsm.fork_choice, fsm.axis_yaw = 'B', 0.0
+    fsm._next(Inputs(t=0.0, dist_mm=5000.0, yaw=0.0), 'fork B done')
+    assert fsm.state == 'M2_EXIT'
+    return fsm
+
+
+def test_m8_cones_on_when_camera_sees_tilted_start_line():
+    """11/19: 코너를 30° 넘게 돈 뒤 카메라가 시작선을 2번 보면 바로 라바콘 모드 (지나가기 전). 그동안 가로선 기울기 60°까지 찾음"""
+    import math as _m
+    fsm = _m2x()
+    cmd = fsm.step(Inputs(t=0.1, dist_mm=5100.0, yaw=_m.radians(-10.0), lane={'status': 'BOTH', 'stoplines_mm': [700.0]}))
+    assert fsm.state == 'M2_EXIT'                                  # 10°: 아직 (가짜 선 거름)
+    cmd = fsm.step(Inputs(t=0.2, dist_mm=5600.0, yaw=_m.radians(-40.0), lane={'status': 'BOTH'}))
+    assert fsm.state == 'M2_EXIT' and cmd.lane.get('stopline_max_angle_deg') == 60.0
+    fsm.step(Inputs(t=0.3, dist_mm=5650.0, yaw=_m.radians(-45.0), lane={'status': 'BOTH', 'stoplines_mm': [650.0]}))
+    assert fsm.state == 'M2_EXIT'                                  # 한 번
+    fsm.step(Inputs(t=0.4, dist_mm=5700.0, yaw=_m.radians(-50.0), lane={'status': 'BOTH', 'stoplines_mm': [600.0]}))
+    assert fsm.state == 'M8_CONES'                                 # 두 번 -> 시작선 600 mm 앞에서 켬
+    cmd = fsm.step(Inputs(t=0.5, dist_mm=5720.0, yaw=_m.radians(-52.0), lane={'status': 'BOTH'}))
+    assert fsm.sub == 'cones' and cmd.source == 'obstacle'
+
+
+def test_m8_cones_on_after_full_turn_or_cone_even_without_line():
+    """11/19: 선을 놓쳐도 80° 넘게 돌고 200 mm 더 가면, 또는 70° 넘게 돌았고 차로 안 콘이 가까우면 바로 라바콘 모드"""
+    import math as _m
+    fsm = _m2x()
+    fsm.step(Inputs(t=0.1, dist_mm=6000.0, yaw=_m.radians(-82.0), lane={'status': 'BOTH'}))
+    assert fsm.state == 'M2_EXIT'
+    cmd = fsm.step(Inputs(t=0.2, dist_mm=6100.0, yaw=_m.radians(-88.0), lane={'status': 'BOTH'}))
+    assert fsm.state == 'M2_EXIT' and cmd.lane['speed'] <= 0.12 + 1e-9    # 코너 끝 천천히 (선이 잘 보이게)
+    fsm.step(Inputs(t=0.3, dist_mm=6210.0, yaw=_m.radians(-90.0), lane={'status': 'BOTH'}))
+    assert fsm.state == 'M8_CONES'
+    c = _m2x()
+    c.step(Inputs(t=0.1, dist_mm=6000.0, yaw=_m.radians(-72.0), lane={'status': 'BOTH'}, obstacle={'cone_ahead_mm': 140.0}))
+    assert c.state == 'M8_CONES'
+    off = _m2x(m8_line_trigger=False)
+    off.step(Inputs(t=0.1, dist_mm=6000.0, yaw=_m.radians(-82.0), lane={'status': 'BOTH'}))
+    off.step(Inputs(t=0.3, dist_mm=6300.0, yaw=_m.radians(-90.0), lane={'status': 'BOTH'}))
+    assert off.state == 'M2_EXIT'                                  # 끄면 예전 규칙
+
+
 def test_m2_exit_off_keeps_old_m8_approach():
     fsm = MissionFSM({'start_state': 'M2_FORK', 'm2_exit': False})
     fsm.fork_choice = 'A'
