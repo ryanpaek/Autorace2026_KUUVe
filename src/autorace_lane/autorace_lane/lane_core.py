@@ -219,6 +219,9 @@ class LaneParams:
     jump_max_frames: int = 6          # 이만큼 연속으로 튀면 새 값을 받아들인다
     lost_hold_frames: int = 30        # 차선을 놓친 뒤 버티는 프레임 수 (30fps면 1초)
     lost_corner_frames: int = 120     # 11/12 밤: M7 직전 코너 미리보기가 있을 때 선을 놓쳐도 코너 곡률로 버티는 프레임 수
+    # 11/18: 코너 미리보기가 켜져 있어도 아직 코너 앞(미리보기 곡률 0)이면 섞지 않고 차선 그대로.
+    #   예전엔 0과 80% 섞여 차선 조향이 20%로 줄었다 -> M2 합류(B 왼쪽 비스듬)를 못 따라 직진, A는 비스듬한 채 코너 안쪽으로
+    route_corner_zero_lane: bool = False   # 미션 노드가 M2_EXIT에서만 켬 (/lane/config). M7·M1 코너는 예전 그대로
     route_corner_weight: float = 0.8  # 11/12 밤: M7 직전 코너에서 선이 보여도 코너 곡률을 섞는 비율 (실차 60~70도 뒤 직진 -> 0.6에서 0.8)
     # 11/12 밤 실차 요청: 미리 아는 코너(M7 직전, M2 뒤 = 미션이 코너 미리보기를 줄 때)에서는 안쪽 선 기준.
     #   코너에서 바깥 선은 화면(BEV) 밖으로 나가거나 다른 차로 선과 헷갈리고, 안쪽 선은 차 가까이 계속 보인다.
@@ -1722,7 +1725,7 @@ class LaneFollower:
                 kappa_raw = self.last_good_kappa * (p.lost_decay ** self.lost_frames)
         # 도면 곡률 미리 넣기
         k_ff = self._route_kappa(p.route_ff_preview_mm + speed * p.latency_comp_sec * 1000.0)
-        if k_ff is not None and self.route_corner and source in ('lane', 'memory'):
+        if k_ff is not None and self.route_corner and source in ('lane', 'memory') and (abs(k_ff) > 1e-6 or not p.route_corner_zero_lane):
             # 11/12 밤 실차: M7 직전 코너(미션 노드가 IMU로 '아직 코너 중')에서 차선 노드가 선을 '보고' 있는데도 직진했다.
             #   이 코너에서는 선이 잘 보여도 코너 곡률을 route_corner_weight 만큼 섞고, 도면과 다르다고 버리지 않는다
             out.ff_kappa = k_ff

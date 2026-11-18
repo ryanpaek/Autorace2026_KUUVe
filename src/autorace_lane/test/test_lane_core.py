@@ -327,6 +327,28 @@ def test_m7_corner_blends_corner_even_when_lines_seen(cfg):
     assert abs(out.kappa) < 0.3                                     # 코너가 아니면 예전대로 선을 따름
 
 
+def test_route_corner_zero_preview_keeps_lane_when_flag_on(cfg):
+    """11/18 (M2_EXIT): 코너 미리보기가 켜져 있어도 아직 코너 앞(미리보기 0)이면 route_corner_zero_lane일 때 차선 조향 그대로.
+    끄면(기본, M7·M1 코너) 예전처럼 0과 80% 섞여 차선 조향이 줄어든다."""
+    bev = synth.straight_lane(cfg, center_x_mm=150.0)          # 차로 중심이 오른쪽 150 mm -> 오른쪽으로 꺾어야
+    lane_only = run(LaneFollower(cfg, LaneParams()), bev, frames=20, yaw=0.0).kappa
+    outs = {}
+    for flag in (False, True):
+        f = LaneFollower(cfg, LaneParams(route_corner_zero_lane=flag))
+        f.route_k = [0.0] * 14
+        f.route_step_mm = 100.0
+        f.route_corner = True
+        outs[flag] = run(f, bev, frames=20, yaw=0.0).kappa
+    assert lane_only < -0.1
+    assert outs[True] == pytest.approx(lane_only, abs=0.05)
+    assert abs(outs[False]) < 0.5 * abs(lane_only)
+    f = LaneFollower(cfg, LaneParams(route_corner_zero_lane=True))   # 코너 곡률이 있으면 그대로 섞음
+    f.route_k = [-1.5625] * 14
+    f.route_step_mm = 100.0
+    f.route_corner = True
+    assert run(f, synth.straight_lane(cfg), frames=20, yaw=0.0).kappa < -0.6
+
+
 def test_corner_uses_inner_line_only(cfg):
     """11/12 밤: 미리 아는 코너(오른쪽)에서는 양쪽이 보여도 안쪽(오른쪽) 선 + 반폭으로 중앙선.
     바깥(왼쪽) 선이 다른 차로 선이라 멀리 잡혀도 안쪽 선 기준이면 차로 가운데를 유지"""
