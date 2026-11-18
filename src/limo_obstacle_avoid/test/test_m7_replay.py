@@ -273,6 +273,7 @@ def test_no_reverse_starts_replay_without_align_even_off_center():
 def test_no_reverse_never_backs_off_when_blocked():
     """앞도 옆도 막혀 오래 서 있어도 물러나지 않고 서서 다시 봄"""
     m = _cruising()
+    m.p.backup_when_blocked = False                         # 11/18: 막히면 후진하는 새 동작은 test_exec_from_here에서
     pts = []
     for yc in (0.0, 0.52, -0.52):
         pts += [(0.10 + 0.80 + 0.01 * i, yc - 0.10 + 0.02 * j) for i in range(3) for j in range(11)]

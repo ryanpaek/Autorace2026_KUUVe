@@ -47,12 +47,19 @@ class ReplayParams:
     m2_test_start: bool = False         # 시험용: 켜지는 자리를 곧바로 M2 시작 지점으로 (M7 건너뛰고 갈림길만 연습)
     start_lane_no: int = 0              # 시험용: 켤 때 차로 번호 1/2/3 (0 = start_lane 그대로, 기본 2차선)
     # 11/17 저녁: 차로 변경을 못 하고 장애물이 너무 가까워지면 후진해서 다시 시도
-    backup_if_mm: float = 350.0         # 지금 차로 앞 장애물(라이다 거리)이 이보다 가까우면 후진 시작 (0 = 끔)
-    backup_to_mm: float = 0.0           # 이 거리까지 후진 (0 = trigger_mm: 녹화 시작 거리로 돌아가 녹화 그대로 재생)
+    # 11/18 시험: 54 -> 46 cm 사이는 그 자리에서 바로 재생(exec_from_here), 46 cm 밑이면 50 cm까지 후진.
+    #   녹화 경로(m7_left/right) 시뮬레이션: 차로 중심·반듯할 때 여유 3 cm로 통과하는 최소 시작 거리 = 46 cm (44 cm 닿음)
+    backup_if_mm: float = 350.0         # 지금 차로 앞 장애물(라이다 거리)이 이보다 가까우면 후진 시작 (0 = 끔). 실차 yaml 460 (11/18)
+    backup_to_mm: float = 0.0             # 이 거리까지 후진 (0 = trigger_mm: 녹화 시작 거리로 돌아가 녹화 그대로 재생)
     backup_speed: float = 0.12
     backup_max: float = 0.60            # 한 번에 최대 후진 거리 (m)
     backup_k_e: float = 8.0             # 후진 중 차로 가운데 맞추기 게인 (카메라로 고친 옆 위치·방향 기준)
     backup_k_psi: float = 4.0
+    exec_from_here: bool = True         # 11/18: 녹화 시작 거리(trigger_mm)보다 가까우면 녹화 경로를 '지금 위치'에 붙여 재생
+                                        #   (예전: 장애물 - trigger_mm 지점에 붙임 -> 차가 이미 지나 있어 '경로가 물체에 닿음'으로 섬)
+    backup_when_blocked: bool = True    # 11/18: trigger 안인데 지금 자세로 굴려 본 경로가 닿아 막히면 backup_to_mm까지 후진해서 다시
+    backup_lane_center: bool = True     # 11/18: 후진 중 차로 가운데 맞추기를 차선 노드 offset/heading으로 (위치 추정 대신)
+    backup_lane_fresh_s: float = 0.3
     m2_mirror: bool = True              # 파일이 없으면 좌우 대칭 파일을 뒤집어 씀 (1-A <-> 3-B, 1-B <-> 3-A, 2-A <-> 2-B)
     accel_reverse: bool = True          # 11/17: 조종기(RC) 후진도 거리에서 빼기 (출발 가속도 방향, motion_dir.py)
     accel_sign: int = 0                 #   0 = 가속도계 축을 우리 명령 출발로 배움 / 1 / -1 고정
@@ -558,14 +565,25 @@ class M7Replay:
         segs = self.change[d]
         return max(max(g.x) for g in segs) - min(min(g.x) for g in segs)
 
+    def _x0(self, xo: Optional[float]) -> float:
+        """녹화 경로 시작 x: 장애물 앞면 - 라이다 - trigger_mm. 차가 이미 지나 있으면(exec_from_here) 지금 위치."""
+        p = self.p
+        x, _, _ = self.pose()
+        if xo is None:
+            return x
+        x0 = xo - p.lidar_x - p.trigger_mm / 1000.0
+        return max(x0, x) if p.exec_from_here else x0
+
     def choose(self, cur: int, xo: Optional[float]) -> Tuple[Optional[int], str]:
         """옮길 옆 차로 (+1 왼쪽 / -1 오른쪽 방향) 고르기. xo = 지금 차로 장애물 앞면 x (없으면 출구 변경)."""
         p = self.p
         x, _, _ = self.pose()
         n = p.num_side_lanes
         cands = []
-        x0 = (xo - p.lidar_x - p.trigger_mm / 1000.0) if xo is not None else x
+        x0 = self._x0(xo)
+        x0_rec = (xo - p.lidar_x - p.trigger_mm / 1000.0) if xo is not None else x
         why_no = []
+        self.pref_needs_backup = False   # 출구 쪽이 '지금 자리'에선 닿는데 녹화 시작 거리에선 됨 -> 물러나면 출구 쪽으로 갈 수 있음
         for d in (+1, -1):
             k = cur + d
             if abs(k) > n:
@@ -573,6 +591,9 @@ class M7Replay:
             hit = self.path_hit(d, x0)
             if hit is not None:
                 why_no.append(f'{k}차로: 녹화 경로가 {hit[0] - x:+.2f} m 지점 물체에 닿음')
+                if (self.exit_pref is not None and self.exit_pref != cur and d == (1 if self.exit_pref > cur else -1)
+                        and x0 > x0_rec + 0.01 and self.path_hit(d, x0_rec + (x0 - x)) is None):
+                    self.pref_needs_backup = True
                 continue
             o = self.obs.get(k)
             cands.append((d, o if o is not None else math.inf))
@@ -704,7 +725,7 @@ class M7Replay:
     def _begin_exec(self, d: int, xo: Optional[float], t, why: str):
         p = self.p
         x, y, psi = self.pose()
-        x0 = (xo - p.lidar_x - p.trigger_mm / 1000.0) if xo is not None else x
+        x0 = self._x0(xo)
         segs = self._anchored(d, x0)
         if not p.replay_reverse:
             segs = [g for g in segs if g.dir > 0] or segs           # 녹화 안 후진 구간 빼기 (전진만)
@@ -929,6 +950,12 @@ class M7Replay:
             lead = v_now * p.latency_s + (0.0 if ok else p.brake_k * v_now)
             if g <= p.trigger_mm / 1000.0 + lead:
                 d, why = self.choose(self.lane, self.obs[self.lane])
+                to_b = (p.backup_to_mm or p.trigger_mm) / 1000.0
+                if d is None and p.backup_when_blocked and p.backup_if_mm > 0 and g < to_b - 0.02:
+                    # 46~50 cm인데 지금 자세로는 경로가 닿음 -> 50 cm까지 물러나 가운데 맞추고 다시
+                    self.events.append(f'[x={x:.2f}] 앞 {1000 * g:.0f} mm, 지금 자세로는 막힘 ({why}) -> 후진')
+                    self._begin_backup(x, g)
+                    return 0.0, 0.0
                 if d is None:
                     if self.blocked_since is None:
                         self.blocked_since = t
@@ -944,6 +971,13 @@ class M7Replay:
                     self.why = why + (' (물러나 봐도 막힘: 정지 유지)' if self.backed_off
                                       else ' (서서 다시 봄)' if p.no_reverse else '')
                     return 0.0, 0.0
+                if (getattr(self, 'pref_needs_backup', False) and p.backup_when_blocked and p.backup_if_mm > 0
+                        and g < to_b - 0.02 and not getattr(self, 'backed_for_pref', False)):
+                    self.backed_for_pref = True
+                    self.events.append(f'[x={x:.2f}] 출구 {self._exit_name()} 쪽은 지금 자리에선 닿음 -> 후진해서 출구 쪽으로')
+                    self._begin_backup(x, g)
+                    return 0.0, 0.0
+                self.backed_for_pref = False
                 self.blocked_since = None
                 self.backed_off = False
                 self.why = why
@@ -998,11 +1032,35 @@ class M7Replay:
             b['stopping'] = True
             if still:
                 self.events.append(f'[x={x:.2f}] 후진 끝: 앞 {"없음" if g is None else f"{1000 * g:.0f} mm"}, '
-                                   f'옆 {100 * (y - self.center(self.lane)):+.1f} cm, 방향 {math.degrees(psi):+.1f}° -> 다시 판단')
+                                   f'옆 {100 * (y - self.center(self.lane)):+.1f} cm, 방향 {math.degrees(psi):+.1f}°, 카메라로 맞춘 틱 {b.get("cam", 0)} -> 다시 판단')
                 self.backup = None
                 self.state = 'CRUISE'
             return 0.0, 0.0
-        return b['track'].step(x, y, psi, t, still)
+        v, k = b['track'].step(x, y, psi, t, still)
+        kc = self._backup_lane_kappa(t) if v < 0 else None
+        if kc is not None:
+            b['cam'] = b.get('cam', 0) + 1
+            return v, kc
+        return v, k
+
+    def _backup_lane_kappa(self, t) -> Optional[float]:
+        """후진 중 차선 노드 offset/heading으로 차로 가운데 맞추기 곡률 (Track 후진과 같은 식). 못 쓰면 None."""
+        p = self.p
+        ln = self.lane_msg
+        if (not p.backup_lane_center or not ln or self.lane_t is None or t - self.lane_t > p.backup_lane_fresh_s
+                or ln.get('status') != 'BOTH' or ln.get('low_conf')
+                or ln.get('offset_mm') is None or ln.get('heading_rad') is None):
+            return None
+        h = float(ln['heading_rad'])
+        if abs(math.degrees(h)) > p.cam_max_deg:
+            return None
+        offm = float(ln['offset_mm']) / 1000.0
+        e = -offm * math.cos(h) + p.cam_row * math.sin(h)      # 차 기준 왼쪽 + 옆 오차 (on_lane의 y_meas와 같은 식)
+        epsi = -h
+        if abs(e) > p.cam_gate + 0.05:
+            return None
+        curv = -p.backup_k_e * e + p.backup_k_psi * math.sin(epsi)   # Track 후진(d = -1): -k_e e + k_psi sin(epsi)
+        return max(-MAX_CURV, min(MAX_CURV, curv))
 
     def _align_step(self, t, x, y, psi, still):
         p = self.p
