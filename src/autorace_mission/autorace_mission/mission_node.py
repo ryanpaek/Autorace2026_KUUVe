@@ -48,6 +48,7 @@ from autorace_mission.fsm import DEFAULT_PARAMS, SEQUENCE, Inputs, MissionFSM
 from autorace_mission.route import (CornerAnchor, MapPose, RouteMap, RouteTracker, line_fix_allowed,
                                     motion_sign, _wrap)
 from autorace_mission.motion_dir import AccelDirection
+from autorace_mission.speed_smooth import SpeedSmoother
 from autorace_mission.stage import stage_info
 
 # /mission/set_state로 점프할 때 차를 놓는 곳 (도면 경로 지점 + 오프셋 mm)
@@ -86,6 +87,12 @@ class MissionNode(Node):
         self.declare_parameter('max_speed', 0.45)          # m/s 상한 (안전)
         self.declare_parameter('max_yaw_rate', 2.0)        # rad/s 상한
         self.declare_parameter('source_timeout_sec', 0.3)  # 행동 노드 명령이 이보다 오래되면 정지
+        # 11/19: 속도 S자 가감속 (speed_smooth.py). 정지(0)·비상 정지·회피 노드 안전 정지·M7 구간은 바로 그대로
+        self.declare_parameter('speed_smooth', True)
+        self.declare_parameter('speed_smooth_acc', 0.8)     # m/s^2 가속 상한
+        self.declare_parameter('speed_smooth_dec', 1.0)     # m/s^2 감속 상한
+        self.declare_parameter('speed_smooth_jerk', 3.0)    # m/s^3 가속도 변화율 상한 (S자 모양)
+        self.declare_parameter('speed_smooth_tau', 0.5)     # s, 작은 흔들림(6 cm/s 안)은 이 시간 상수로
         self.declare_parameter('route_file', '')            # track_route.yaml. 비우면 거리 기준
         self.declare_parameter('route_gate_mm', 250.0)
         self.declare_parameter('route_gain', 0.6)
@@ -188,6 +195,8 @@ class MissionNode(Node):
         self.parking = {}
         self.start_flag = False
         self.estop = False
+        self.smoother = SpeedSmoother()
+        self._smooth_t = None
         self.twists = {s: (None, 0.0) for s in SOURCES}   # (Twist, 받은 시각)
         self._last_lane_cfg = None
         self._last_cfg_pub = 0.0
@@ -384,6 +393,23 @@ class MissionNode(Node):
         av = msg.angular_velocity          # 앞뒤·좌우 기울기 속도 최대값 (방지턱 감지, 틱마다 0으로)
         self.tilt_peak = max(self.tilt_peak, math.hypot(av.x, av.y))
 
+    def _smooth(self, out: Twist) -> None:
+        """11/19: 속도 S자 가감속. 곡률이 그대로 되게 angular.z도 같은 비율로. 0·비상 정지·M7은 바로"""
+        now = time.monotonic()
+        dt = 0.05 if self._smooth_t is None else max(0.0, min(0.2, now - self._smooth_t))
+        self._smooth_t = now
+        g = self.get_parameter
+        sm = self.smoother
+        sm.a_acc, sm.a_dec = g('speed_smooth_acc').value, g('speed_smooth_dec').value
+        sm.jerk, sm.tau = g('speed_smooth_jerk').value, g('speed_smooth_tau').value
+        v_in = out.linear.x
+        bypass = (not g('speed_smooth').value or self.estop or self.fsm.state == 'M7_OBSTACLE')
+        v = sm.step(v_in, dt, bypass=bypass)
+        if abs(v_in) > 1e-6 and v != v_in:
+            wmax = g('max_yaw_rate').value
+            out.angular.z = max(-wmax, min(wmax, out.angular.z * v / v_in))
+        out.linear.x = v
+
     def _on_start(self, _msg):
         self.start_flag = True
         if self.fsm.state == 'WAIT_START':
@@ -544,6 +570,7 @@ class MissionNode(Node):
                 out.linear.x = max(-vmax, min(vmax, tw.linear.x))
                 out.angular.z = max(-wmax, min(wmax, tw.angular.z))
         if not self.manual:
+            self._smooth(out)
             self.cmd_pub.publish(out)
         rs = self.route_s_map if self.route_active else None
         # 11/12 밤: M7 직전 코너는 IMU로 지킨 코너 곡률을 도면 곡률 대신 넣는다 (도면 위치를 잃어도)
