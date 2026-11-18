@@ -162,6 +162,8 @@ DEFAULT_PARAMS = {
     #   원인 2) 미리보기가 켜진 동안 코너 앞(미리보기 곡률 0)에서도 차선과 0을 80% 섞어 차선 조향이 20%로 줄었음
     'm2x_corner_axis': True,         # 기준 방향 = 3차선 직선 방향(없으면 M2 시작 방향), 코너 쪽으로 돈 각만 셈
     'm2x_corner_gate_mm': 200.0,     #   코너 시작(거리) - 이만큼 전에는 각도로 코너 시작이라 보지 않음 (합류 비스듬은 거리로만)
+    'm2x_corner_weight': 0.4,        # 11/18 (1118_03): M2_EXIT 코너 중 선이 보일 때 도면 곡률 섞는 비율 (차선 노드 기본 0.8).
+                                     #   도면 위치 s가 1 m씩 틀어지는 구간이라 차선을 더 믿음. 0이면 차선 노드 값 그대로
     'm2x_zero_lane': True,           # 코너 앞(미리보기 곡률 0)은 차선 조향 그대로 (차선 노드 route_corner_zero_lane)
     'm2_merge_speed': 0.0,           # 합류 S자 속도 상한 (0 = approach_speed 그대로). params.yaml에서 정함
     'm2x_speed': 0.0,                # M2_EXIT(합류 끝 ~ 라바콘 시작선) 속도 상한 (0 = 그대로)
@@ -1074,9 +1076,12 @@ class MissionFSM:
 
     def _m2x_kw(self) -> dict:
         """11/18: M2_EXIT 동안만 차선 노드에 '코너 앞(미리보기 0)은 차선 그대로' (m2x_zero_lane)"""
+        kw = {}
         if self.state == 'M2_EXIT' and self.p.get('m2x_zero_lane', True):
-            return {'route_corner_zero_lane': True}
-        return {}
+            kw['route_corner_zero_lane'] = True
+        if self.state == 'M2_EXIT' and self.p.get('m2x_corner_weight', 0.0) > 0.0:
+            kw['route_corner_weight'] = float(self.p['m2x_corner_weight'])
+        return kw
 
     def _m2x_speed(self, speed: float) -> float:
         """11/18: 합류 S자(M2 끝 ~ M2_EXIT) 속도 상한 m2_merge_speed (0 = 그대로)"""

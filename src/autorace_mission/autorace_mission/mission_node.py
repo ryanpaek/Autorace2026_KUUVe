@@ -45,7 +45,7 @@ from std_msgs.msg import Bool, Empty, Float32, String
 
 from autorace_mission.command_inbox import CommandInbox
 from autorace_mission.fsm import DEFAULT_PARAMS, SEQUENCE, Inputs, MissionFSM
-from autorace_mission.route import (CornerAnchor, MapPose, RouteMap, RouteTracker, line_fix_allowed,
+from autorace_mission.route import (CornerAnchor, MapPose, RouteMap, RouteTracker, line_fix_allowed, m2_end_anchor_s,
                                     motion_sign, _wrap)
 from autorace_mission.motion_dir import AccelDirection
 from autorace_mission.stage import stage_info
@@ -118,6 +118,10 @@ class MissionNode(Node):
         self.declare_parameter('route_fix_max_dpsi_deg', 15.0)
         # 11/15: 도면 90° 코너를 IMU로 다 돈 순간 s를 코너 끝으로 (M7·M2 뒤 1~2 m 뒤처짐 바로잡기)
         self.declare_parameter('route_corner_anchor', True)
+        # 11/18 (1118_03): M2 갈림길 녹화 재생이 끝난 순간 s를 회피 노드 위치(섬 앞 꼭짓점 기준 x)로 다시 맞춤.
+        #   M7 들어갈 때 시작선 오검출로 s가 514 mm 뒤로 맞춰져 M2 끝 -519 mm, M2 출구 코너 약 -1 m -> 코너 직진·정지
+        self.declare_parameter('route_m2_end_anchor', True)
+        self.declare_parameter('route_m2_end_max_mm', 1500.0)   # 이보다 크게 다르면 안 맞춤 (회피 노드 위치가 이상)
         # 11/15: 차선 노드에 주는 도면 코너 곡률 배율 (M6 앞 코너 등. 실차가 명령보다 덜 돌아서 크게 돎)
         self.declare_parameter('route_corner_k_gain', 1.0)
         self.declare_parameter('route_corner_window_mm', 3000.0)
@@ -212,6 +216,8 @@ class MissionNode(Node):
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
                              reliability=ReliabilityPolicy.RELIABLE)
         self.create_subscription(String, '/m7/exit_lane', self._on_m7_exit, latched)
+        self.create_subscription(String, '/avoid/state', self._on_avoid_state, 10)
+        self._m2_anchor_done = False
         self.create_subscription(String, '/parking/state', self._json_cb('parking'), 10)
         self.create_subscription(Odometry, self.get_parameter('odom_topic').value,
                                  self._on_odom, qos_profile_sensor_data)
@@ -251,6 +257,33 @@ class MissionNode(Node):
             except json.JSONDecodeError:
                 pass
         return cb
+
+    def _on_avoid_state(self, msg):
+        """M2 녹화 재생이 끝난 순간(DONE, m2.run 있음) 한 번: s = 섬 앞 꼭짓점 + (x - section) (route_m2_end_anchor)."""
+        if (self._m2_anchor_done or not self.get_parameter('route_m2_end_anchor').value or self.tracker is None
+                or not self.route_active or self.fsm.state not in ('M7_OBSTACLE', 'M2_FORK')
+                or getattr(self, 'practice_m2', False)):
+            return
+        try:
+            st = json.loads(msg.data)
+        except json.JSONDecodeError:
+            return
+        m2 = st.get('m2') or {}
+        x, sec = st.get('x'), st.get('section_m')
+        if st.get('phase') != 'DONE' or not m2.get('run') or x is None or sec is None:
+            return
+        tip = self.route.points.get('m7_island_tip')
+        s_now = getattr(self, 'route_s_map', None)
+        if tip is None or s_now is None:
+            return
+        self._m2_anchor_done = True
+        s_new = m2_end_anchor_s(tip, x, sec, s_now, float(self.get_parameter('route_m2_end_max_mm').value))
+        d = tip + 1000.0 * (float(x) - float(sec)) - s_now
+        if s_new is None:
+            self.get_logger().warning(f'M2 끝 위치 맞추기 안 함: 회피 노드 기준 {d:+.0f} mm (너무 큼)')
+            return
+        self._route_reset(s_new, f'M2 replay end (avoid x {float(x):.2f}/{float(sec):.2f} m, {d:+.0f}mm)', keep_corners=True)
+        self.route_s_map = s_new
 
     def _on_m7_exit(self, msg):
         try:
@@ -609,6 +642,7 @@ class MissionNode(Node):
                 self.practice_m2 = False
             if self.fsm.state == 'M7_OBSTACLE' and (self._last_state or (None,))[0] != 'M7_OBSTACLE':
                 self.m7_exit_lane = None             # 지난 주행의 latched 값은 버림
+                self._m2_anchor_done = False
             if self.fsm.state == 'M2_FORK' and (self._last_state or (None,))[0] != 'M2_FORK':
                 ex = self.m7_exit_lane or {}
                 self.get_logger().info(f'[M2] 시작 차로: {ex.get("lane", "?")}차선 (fork {ex.get("fork")}, '
