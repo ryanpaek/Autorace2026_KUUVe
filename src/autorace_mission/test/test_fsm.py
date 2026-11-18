@@ -143,7 +143,7 @@ def test_stop_route_gate_skips_crosswalk_end_line():
     assert 300.0 - dist == pytest.approx(0.0, abs=10.0)
 
 
-def test_fork_choice_remembered_from_obstacle_zone():
+def test_fork_choice_remembered_from_obstacle_zone(old_m2):
     fsm = MissionFSM({'start_state': 'M7_OBSTACLE', 'm7_len_mm': 300.0,
                       'fork_len_mm': 300.0})
     sim = Sim(fsm)
@@ -500,7 +500,7 @@ def test_m8_one_line_safety_distance_and_manual():
     assert manual.step(Inputs(t=0.1, dist_mm=10.0, yaw=0.0, lane={'status': 'L'})).lane['mode'] == 'normal'
 
 
-def test_fork_lane_cfg_keeps_away_from_island_and_searches():
+def test_fork_lane_cfg_keeps_away_from_island_and_searches(old_m2):
     """11/12 밤: M2 한쪽 선 모드는 폭 460(바깥선에서 230 mm, 섬 쪽 선에서 멀리) + 선 놓치면 찾기 + 직선 방향(M7 진입 방향 - 90°)"""
     import math as _m
     fsm = MissionFSM({'start_state': 'M3_PEDESTRIAN'})
@@ -883,7 +883,7 @@ def _merge_sim(choice, axis_err_deg=0.0, delay_ticks=2, y0_err=0.0):
     return fsm, x - S_e, y, _m.degrees(yaw), worst_edge, worst_island
 
 
-def test_m2_merge_forced_s_curve_a_and_b():
+def test_m2_merge_forced_s_curve_a_and_b(old_m2):
     """A(왼쪽 차로)면 오른쪽으로, B면 왼쪽으로 강제 S자. 합류 차로 안(바깥 선·섬 안 밟음), 코너(합류 끝 + 609 mm) 전에 끝."""
     for ch in ('A', 'B'):
         for ax_err, y_err in ((0.0, 0.0), (3.0, 0.0), (-3.0, 0.0), (0.0, 30.0), (0.0, -30.0)):
@@ -900,7 +900,7 @@ def test_m2_merge_forced_s_curve_a_and_b():
         assert ('오른쪽' in st) == (ch == 'A')
 
 
-def test_m2_merge_off_keeps_lane_mode():
+def test_m2_merge_off_keeps_lane_mode(old_m2):
     fsm = MissionFSM({'start_state': 'M2_FORK', 'm2_merge': False,
                       'route_points': {'m2_island_end': 20000.0, 'm2_merge_end': 20554.0}})
     fsm.fork_choice = 'A'
@@ -909,7 +909,7 @@ def test_m2_merge_off_keeps_lane_mode():
     assert cmd.lane['mode'] == 'left_only'
 
 
-def test_m2_merge_starts_from_camera_offset():
+def test_m2_merge_starts_from_camera_offset(old_m2):
     """시작할 때 차선 노드 offset(차로 중심이 차 왼쪽 +)으로 옆 위치를 잡음."""
     fsm = MissionFSM({'start_state': 'M2_FORK', 'route_points': {'m2_island_end': 20000.0, 'm2_merge_end': 20554.0}})
     fsm.fork_choice, fsm.axis_yaw = 'A', 0.0
@@ -918,7 +918,7 @@ def test_m2_merge_starts_from_camera_offset():
     assert fsm.m2m is not None and fsm.m2m['y'] == 480.0
 
 
-def test_floor_letter_decides_fork_over_sign_and_m7_exit():
+def test_floor_letter_decides_fork_over_sign_and_m7_exit(old_m2):
     """11/15 실차: 표지를 못 보거나 잘못 보고 B로 들어감 -> 바닥 글자로 실제 갈림길을 알고 그쪽 모드·합류 방향."""
     fsm = MissionFSM({'start_state': 'M2_FORK', 'route_points': {'m2_island_end': 20000.0, 'm2_merge_end': 20554.0},
                       'floor_need_exit_agree': False})                  # 11/15 기본은 회피 차로와 같을 때만 (아래 시험)
@@ -997,7 +997,7 @@ def test_m1_forced_corner_off_uses_old_corner_help():
     assert cmd.lane['mode'] != 'heading'
 
 
-def test_floor_letter_ignored_when_it_disagrees_with_m7_lane():
+def test_floor_letter_ignored_when_it_disagrees_with_m7_lane(old_m2):
     """11/15 실차: 1차선(A)으로 섬을 지났는데 B로 가서 합류에서 탈선. 바닥 글자(구멍 수)를 잘못 읽어도 차가 실제로 있는
     차로(회피가 끝난 차로)를 따름. 회피 차로를 모르면 바닥 글자를 씀"""
     fsm = MissionFSM({'start_state': 'M2_FORK'})
@@ -1058,3 +1058,10 @@ def test_cones_start_by_camera_line_even_if_route_off():
         assert 'camera' in fsm.m2x_how
     _, old, line_at = _m2_exit_camera_line({'cones_line_camera_first': False}, -90.0)
     assert old is None or old > line_at + 400            # 예전: 카메라 선 버리고 도면/거리로 늦게
+
+
+@pytest.fixture
+def old_m2(monkeypatch):
+    """11/18 이전 M2 동작(한쪽 선 모드·폭 460·합류 S자) 테스트: m2_plain_lane 끔."""
+    from autorace_mission import fsm as fsm_mod
+    monkeypatch.setitem(fsm_mod.DEFAULT_PARAMS, 'm2_plain_lane', False)

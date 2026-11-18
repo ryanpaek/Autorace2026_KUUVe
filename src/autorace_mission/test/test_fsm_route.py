@@ -175,7 +175,7 @@ def _m2_fsm(**kw):
                        **kw})
 
 
-def test_m2_old_option_sign_wins_and_logs_conflict():
+def test_m2_old_option_sign_wins_and_logs_conflict(old_m2):
     """fork_follow_m7_exit false(예전): 표지 A인데 B 차로에서 끝남 -> 표지 쪽 left_only."""
     fsm = _m2_fsm(fork_follow_m7_exit=False)
     fsm.fork_choice = 'A'
@@ -184,7 +184,7 @@ def test_m2_old_option_sign_wins_and_logs_conflict():
     assert any('fork conflict' in l and 'follow sign' in l for l in fsm.log)
 
 
-def test_m2_default_follows_lane_on_conflict():
+def test_m2_default_follows_lane_on_conflict(old_m2):
     """기본(11/11): 표지 A인데 회피가 B 차로에서 끝남 -> 이미 섬 옆이라 B 차로 바깥선(right_only)을 따름."""
     fsm = _m2_fsm()
     fsm.fork_choice = 'A'
@@ -193,7 +193,7 @@ def test_m2_default_follows_lane_on_conflict():
     assert any('fork conflict' in l and 'follow lane B' in l for l in fsm.log)
 
 
-def test_m2_agreeing_sign_and_lane_unchanged():
+def test_m2_agreeing_sign_and_lane_unchanged(old_m2):
     fsm = _m2_fsm()
     fsm.fork_choice = 'A'
     cmd = fsm.step(Inputs(t=0.0, dist_mm=0.0, route_s=18100.0, obstacle={'m7_exit': 'A'}))
@@ -201,7 +201,7 @@ def test_m2_agreeing_sign_and_lane_unchanged():
     assert not any('fork conflict' in l for l in fsm.log)
 
 
-def test_m2_normal_mode_inside_branch():
+def test_m2_normal_mode_inside_branch(old_m2):
     """11/16: 섬 앞 끝 + 300 mm를 지나면 갈래 안은 양쪽 선 보통 차선 모드 (한쪽 선 모드는 선을 자주 놓침)."""
     fsm = _m2_fsm()
     fsm.fork_choice = 'A'
@@ -234,3 +234,28 @@ def test_m2_end_distance_follows_island_tip_without_route():
     assert _m2_end_dist(1000.0) == pytest.approx(3300.0, abs=20)
     assert _m2_end_dist(-400.0) == pytest.approx(1900.0, abs=20)
     assert _m2_end_dist(5000.0) == pytest.approx(3800.0, abs=20)      # 최대 1.5 m
+
+
+@pytest.fixture
+def old_m2(monkeypatch):
+    """11/18 이전 M2 동작(한쪽 선 모드·폭 460·합류 S자) 테스트: m2_plain_lane 끔."""
+    from autorace_mission import fsm as fsm_mod
+    monkeypatch.setitem(fsm_mod.DEFAULT_PARAMS, 'm2_plain_lane', False)
+
+
+def test_m2_plain_lane_after_replay_is_normal_lane():
+    """11/18: CSV 재생 뒤 M2는 일반 차선만 (한쪽 선 모드·폭 460·직선 방향 붙잡기·합류 S자 없음), 끝 판정은 그대로."""
+    fsm = _m2_fsm()
+    fsm.fork_choice = 'B'
+    for i, s in enumerate((18100.0, 18400.0, 19500.0)):
+        cmd = fsm.step(Inputs(t=float(i), dist_mm=s - 18100.0, route_s=s, yaw=0.0, obstacle={'m7_exit': 'B'}))
+        assert cmd.lane.get('mode') == 'normal'
+        assert 'lane_width_mm' not in cmd.lane and 'hold_axis_deg' not in cmd.lane
+    assert getattr(fsm, 'm2m', None) is None
+    d = 0.0
+    while fsm.state == 'M2_FORK' and d < 6000.0:
+        fsm.step(Inputs(t=d / 200.0, dist_mm=d, yaw=0.0, obstacle={'m7_exit': 'B'}))
+        d += 10.0
+    assert fsm.state == 'M2_EXIT'
+    cmd = fsm.step(Inputs(t=99.0, dist_mm=d, yaw=0.0, obstacle={'m7_exit': 'B'}))
+    assert cmd.lane.get('mode') == 'normal' and getattr(fsm, 'm2m', None) is None

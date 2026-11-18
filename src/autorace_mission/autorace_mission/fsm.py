@@ -138,6 +138,9 @@ DEFAULT_PARAMS = {
     'm1_force_tol_mm': 70.0,
     'lane_first': True,              # 11/16: 강제 경로(합류 S자·라바콘 뒤 원호)는 선을 놓쳤을 때만, 선이 보이면 차선 주행
     'lane_first_lost_frames': 5,     #   이만큼 연속으로 선을 놓쳐야 강제 경로로
+    # 11/18: M2 CSV 재생이 끝나면 그냥 일반 차선 주행. 한쪽 선 모드(left/right_only)·좁은 폭(460)·직선 방향 붙잡기·
+    #   합류 강제 S자(m2_merge)를 전부 건너뜀. M2_EXIT의 좌하단 코너 미리보기는 그대로. false면 예전 동작
+    'm2_plain_lane': True,
     'fork_normal': True,             # 11/16: 갈래 안(섬 앞 끝 + fork_normal_after_mm)부터 양쪽 선 보통 차선 모드
     'fork_normal_after_mm': 300.0,
     'fork_normal_after_dist_mm': 700.0,   #   도면 위치가 없으면 갈림길 시작부터 이 거리 뒤
@@ -955,8 +958,18 @@ class MissionFSM:
             tip = inp.obstacle.get('m7_to_tip_mm')
             self.fork_adj_mm = (max(-self.p['fork_adj_max_mm'], min(self.p['fork_adj_max_mm'], float(tip)))
                                 if isinstance(tip, (int, float)) else 0.0)
-        mode = 'left_only' if self.fork_choice == 'A' else 'right_only'
         _, db = self._since(inp, sub=True)
+        if self.p.get('m2_plain_lane', True):
+            # 11/18: CSV 재생 뒤 = 일반 차선 (한쪽 선 모드·폭 460·합류 S자 없음). 끝 판정은 그대로
+            end = self._past(inp, 'm2_island_end', self.p.get('m2_exit_after_island_mm', 200.0)) \
+                if self.p.get('m2_exit', True) else None
+            if end is None:
+                end = self._past(inp, 'm2_merge_end')
+            if (db >= self.p['fork_len_mm'] + self.fork_adj_mm) if end is None else end:
+                self._next(inp, f'fork {self.fork_choice} done')
+                return Command('lane', self._lane(self.p['base_speed']))
+            return Command('lane', self._lane(self.p['approach_speed']))
+        mode = 'left_only' if self.fork_choice == 'A' else 'right_only'
         if self.p.get('fork_normal', True):
             # 11/16: 섬 앞 끝을 지나 갈래 안에 들어오면 양쪽 선(바깥선 + 섬 선)을 다 보는 보통 차선 모드.
             #   1116_01 리플레이: 한쪽 선 모드는 갈래 48%·합류 굽은 곳 76% 선 없음 -> normal은 13%·14%
@@ -996,6 +1009,8 @@ class MissionFSM:
     def _m2_merge(self, inp, db: Optional[float] = None) -> Optional[Command]:
         """A/B 뒤 합류: 도면 규격으로 강제 S자 (m2_merge 설명). 하는 중이면 명령, 아니면 None."""
         p = self.p
+        if p.get('m2_plain_lane', True):
+            return None                                  # 11/18: 일반 차선만 (합류 강제 S자 안 씀)
         if not p.get('m2_merge', True) or inp.yaw is None or self.fork_choice not in ('A', 'B'):
             return None
         m = getattr(self, 'm2m', None)
