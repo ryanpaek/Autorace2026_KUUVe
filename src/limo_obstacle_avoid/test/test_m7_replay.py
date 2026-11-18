@@ -271,9 +271,8 @@ def test_no_reverse_starts_replay_without_align_even_off_center():
 
 
 def test_no_reverse_never_backs_off_when_blocked():
-    """앞도 옆도 막혀 오래 서 있어도 (가운데 맞추기로) 물러나지 않고 서서 다시 봄 (막힘 후진 blocked_backup 끔)"""
+    """앞도 옆도 막혀 오래 서 있어도 물러나지 않고 서서 다시 봄"""
     m = _cruising()
-    m.p.blocked_backup = False
     pts = []
     for yc in (0.0, 0.52, -0.52):
         pts += [(0.10 + 0.80 + 0.01 * i, yc - 0.10 + 0.02 * j) for i in range(3) for j in range(11)]
@@ -285,38 +284,6 @@ def test_no_reverse_never_backs_off_when_blocked():
 
 
 # ── 11/17 밤: 피한 뒤 또 장애물이면 무작정 멈춤 / 3차선 옆 차로 선 쌍 ──
-def _wall(m, gap, lanes=(0, 0.52, -0.52)):
-    pts = []
-    for yc in lanes:
-        pts += [(0.10 + gap + 0.01 * i, yc - 0.10 + 0.02 * j) for i in range(3) for j in range(11)]
-    m.on_scan_points(0.0, pts)
-
-
-def test_blocked_closer_than_trigger_backs_up_then_gives_up():
-    """막힘 + 앞 장애물이 녹화 시작 거리보다 가까움 -> 1초 뒤 후진해서 다시 판단 (최대 2번). 녹화 거리보다 멀면 후진 안 함"""
-    m = _cruising()
-    _wall(m, 0.70)                                          # trigger 900보다 가까움 (backup_if 350보다는 멂)
-    m.step(1.0)
-    assert m.state == 'CRUISE' and '서서 다시 봄' in m.why
-    m.step(2.1)
-    assert m.state == 'BACKUP' and m.n_blocked_backup == 1
-    far = _cruising()
-    _wall(far, 0.92)                                        # trigger + lead 안이지만 trigger보다 멂 -> 후진해도 소용없음
-    for i in range(40):
-        far.step(1.0 + 0.1 * i)
-    assert far.state == 'CRUISE' and far.n_blocked_backup == 0
-
-
-def test_path_hit_ignores_points_behind_car():
-    """늦게 판단해 녹화 시작점이 차 뒤일 때, 이미 지나온 (뒤쪽) 장애물 점으로 '막힘' 판단하지 않음"""
-    m = _cruising(lane=1)
-    x, _, _ = m.pose()
-    m.pts = [(x - 0.34 + 0.01 * i, 0.48, 0.0, 0.0) for i in range(5)]  # 차 뒤 26~34 cm, 녹화 경로 첫 부분 위 (지나온 곳)
-    assert m.path_hit(-1, x - 0.5) is None
-    m.pts = [(x + 0.62, 0.02, 0.0, 0.0)]                    # 앞쪽 경로 위 -> 그대로 막힘
-    assert m.path_hit(-1, x - 0.5) is not None
-
-
 def test_stop_does_not_wait_forever_for_still_odom():
     """STOP: odom이 조금씩 흔들려 '완전히 섰다'가 안 떠도 still_max_s 뒤 다음 단계로"""
     m = _cruising()
@@ -326,24 +293,6 @@ def test_stop_does_not_wait_forever_for_still_odom():
     assert m.state == 'STOP'
     m.step(2.1)
     assert m.state == 'CRUISE'
-
-
-def test_cruise_ignores_lane_pair_of_other_lane():
-    """차로를 바꾼 직후 선 위에 걸쳐 차선 노드가 옆 차로 선 쌍을 잡으면 그 곡률 대신 위치 추정으로 지금 차로. 2초 넘게면 카메라를 믿음"""
-    m = _cruising(lane=1)
-    m._shift(ddy=0.30)                                      # 1차선 중심에서 왼쪽 30 cm (선을 물고 있음)
-    lane = {'status': 'BOTH', 'kappa': 0.5, 'source': 'lane', 'offset_mm': 220.0}   # 옆 차로 중심이 왼쪽 22 cm
-    m.on_lane(lane, 1.0)
-    v, k = m._cruise_cmd(1.0)
-    assert m.steer_src == 'pose' and k < 0                  # 오른쪽으로 (지금 차로 쪽)
-    m.on_lane({**lane, 'offset_mm': -300.0}, 1.2)           # 지금 차로 쌍 (중심이 오른쪽 30 cm) -> 차선 곡률
-    m._cruise_cmd(1.2)
-    assert m.steer_src == 'lane'
-    m.on_lane(lane, 2.0)
-    m._cruise_cmd(2.0)
-    m.on_lane(lane, 4.1)
-    m._cruise_cmd(4.1)
-    assert m.steer_src == 'lane' and m.lane == 1            # 2초 넘게 계속 -> 카메라를 믿고 위치 고침 (차로 번호는 가까운 쪽)
 
 
 # ---------------- M2 갈림길 녹화 재생 (11/17) ----------------

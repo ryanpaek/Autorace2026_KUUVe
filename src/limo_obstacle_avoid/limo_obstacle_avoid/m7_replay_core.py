@@ -136,12 +136,6 @@ class ReplayParams:
     plan_period_s: float = 0.3
     # 11/17 밤: '장애물 피하고 또 장애물이면 무작정 멈춤' 대책
     still_max_s: float = 1.0            # '완전히 섰나'(odom 정지)를 이만큼만 기다림. odom이 조금씩 흔들려도 그 뒤엔 다음 단계로
-    blocked_backup: bool = True         # 옆 차로 막힘으로 서 있고 앞 장애물이 녹화 시작 거리(trigger)보다 가까우면 trigger까지 후진 뒤 다시 판단
-    blocked_backup_s: float = 1.0       #   막힌 채 이만큼 서 있으면
-    blocked_backup_max: int = 2         #   한 장애물 앞에서 최대 횟수 (그래도 막히면 서서 계속 봄)
-    # 11/17 밤: 3차선에서 차선 노드가 옆 차로 선 쌍을 잡았을 때(차로 바꾼 직후 등) 그 곡률을 쓰지 않기
-    cruise_lane_gate: float = 0.20      # 카메라 옆 오차와 위치 추정(지금 차로 중심 기준) 옆 오차가 이보다 다르면 옆 차로 선 -> 위치 추정으로 지금 차로 따라감 (0 = 끔)
-    cruise_gate_adopt_s: float = 2.0    #   그래도 이만큼 계속 다르면 카메라가 맞다고 보고 위치 추정을 카메라 차로로 고침
     cam_id_need: int = 5                # 차선 노드 lane_id가 최근 7번 중 이만큼 같으면 차로 번호를 그걸로 (CRUISE 때만)
     cam_id_window: int = 7
 
@@ -361,8 +355,6 @@ class M7Replay:
         self.plan: dict = {}                      # 미리 계산한 회피 계획
         self.plan_t = -1e9
         self.stop_since = None                    # STOP 들어간 시각 (still_max_s)
-        self.n_blocked_backup = 0                 # 막혀서 후진한 횟수 (재생 시작하면 0)
-        self.gate_since = None                    # 카메라 선 쌍이 옆 차로로 보인 시각
 
     # ---------- 위치 ----------
     def reset_pose(self):
@@ -599,12 +591,9 @@ class M7Replay:
         m = p.hit_margin
         pts = [(lx, ly) for lx, ly, _, _ in self.pts]
         isl_half = p.island_half_width
-        x_car, _, _ = self.pose()
-        for j, g in enumerate(segs):
+        for g in segs:
             for i in range(0, len(g), 3):
                 cx, cy, h = g.x[i], g.y[i], g.h[i]
-                if j == 0 and g.dir > 0 and cx < x_car - 0.02:
-                    continue            # 이미 지나온 부분 (늦게 판단해 시작점이 차 뒤) -> 지나온 장애물로 '막힘' 오판하지 않게
                 c, s_ = math.cos(h), math.sin(h)
                 # 섬은 바닥 선(라이다에 안 보임) -> 도면 위치로: 섬 앞 끝(section_length)부터 가운데 차로 폭
                 for a_, b_ in ((p.robot_front, p.robot_half_width), (p.robot_front, -p.robot_half_width),
@@ -691,8 +680,7 @@ class M7Replay:
         ln = self.lane_msg
         if (p.cruise_lane and ln and self.lane_t is not None and t - self.lane_t <= p.cruise_lane_fresh_s
                 and ln.get('status') in ('BOTH', 'L', 'R') and not ln.get('low_conf')
-                and ln.get('kappa') is not None and ln.get('source') in (None, 'lane', 'memory')
-                and not self._lane_pair_other(ln, t)):
+                and ln.get('kappa') is not None and ln.get('source') in (None, 'lane', 'memory')):
             # 11/17: 카메라 차로 번호가 내부 추정과 달라도 차선 곡률을 그대로 씀 (차선 주행 100% 신뢰)
             self.steer_src = 'lane'                       # 차선 기반: 차선 노드 곡률 그대로
             return p.speed, max(-MAX_CURV, min(MAX_CURV, float(ln['kappa'])))
@@ -700,33 +688,6 @@ class M7Replay:
         x, y, psi = self.pose()
         tr = Track([_straight(self.center(self.lane), x - 0.5, x + 3.0)], self.p, self.p.speed, self.p.speed)
         return tr.step(x, y, psi, t, True)
-
-    def _lane_pair_other(self, ln: dict, t: float) -> bool:
-        """차선 노드가 잡은 선 쌍이 지금 차로가 아니라 옆 차로 것인가 (카메라 옆 오차 vs 위치 추정 옆 오차가 cruise_lane_gate 넘게 다름).
-        그동안은 위치 추정으로 지금 차로 중심을 따라감. cruise_gate_adopt_s 넘게 계속이면 카메라를 믿고 위치 추정을 고침."""
-        p = self.p
-        off = ln.get('offset_mm')
-        if p.cruise_lane_gate <= 0 or off is None or ln.get('status') != 'BOTH':
-            self.gate_since = None
-            return False
-        _, y, _ = self.pose()
-        e_pose = y - self.center(self.lane)
-        e_cam = -float(off) / 1000.0
-        if abs(e_cam - e_pose) <= p.cruise_lane_gate:
-            self.gate_since = None
-            return False
-        if self.gate_since is None:
-            self.gate_since = t
-            self.events.append(f'카메라 선 쌍이 옆 차로로 보임 (카메라 옆 {100 * e_cam:+.0f} cm / 위치 {100 * e_pose:+.0f} cm) '
-                               f'-> 위치 추정으로 차로 {M2_LANE_NO.get(self.lane)} 유지')
-        elif t - self.gate_since >= p.cruise_gate_adopt_s:
-            k = self.nearest_lane(y - e_cam)              # 카메라가 보는 차로 (그 중심 = 지금 위치 - 카메라 옆 오차)
-            self._shift(ddy=self.center(k) + e_cam - y)
-            self.events.append(f'{p.cruise_gate_adopt_s:.0f}초 넘게 다름 -> 카메라를 믿고 위치 추정 고침 (차로 {M2_LANE_NO.get(k)})')
-            self.lane = self.target = k
-            self.gate_since = None
-            return False
-        return True
 
     def _begin_exec(self, d: int, xo: Optional[float], t, why: str):
         p = self.p
@@ -740,7 +701,6 @@ class M7Replay:
         self.cam_ids.clear()
         self.state = 'EXEC'
         self.n_exec += 1
-        self.n_blocked_backup = 0
         self.why = why
         self.events.append(f'[x={x:.2f}] 차로 {self.lane} -> {self.target} 재생 시작 ({why}, '
                            f'옆 오차 {100 * (y - self.center(self.lane)):+.1f} cm, 방향 {math.degrees(psi):+.1f}°)')
@@ -898,15 +858,6 @@ class M7Replay:
                     if self.blocked_since is None:
                         self.blocked_since = t
                         self.events.append(f'[x={x:.2f}] 앞 막힘 ({why}) -> 정지하고 기다림')
-                    if (p.blocked_backup and p.backup_if_mm > 0 and t - self.blocked_since >= p.blocked_backup_s
-                            and self.n_blocked_backup < p.blocked_backup_max
-                            and g < p.trigger_mm / 1000.0 - 0.03):
-                        # 장애물을 피한 뒤 바로 또 장애물: 녹화 시작 거리보다 가까워 옆으로 못 빠짐 -> 그 거리까지 후진하고 다시 판단
-                        self.n_blocked_backup += 1
-                        self.events.append(f'[x={x:.2f}] 막힘 {p.blocked_backup_s:.0f}초 + 앞 {1000 * g:.0f} mm < 녹화 시작 '
-                                           f'{p.trigger_mm:.0f} -> 후진해서 다시 판단 ({self.n_blocked_backup}/{p.blocked_backup_max})')
-                        self._begin_backup(x, g)
-                        return 0.0, 0.0
                     if t - self.blocked_since >= p.blocked_wait_s and not self.backed_off and not p.no_reverse:
                         # 오래 막힘: 한 번만 align_back만큼 물러나서 다시 봄 (가려졌던 것이 보이거나 시작점이 바뀜)
                         self.backed_off = True
@@ -969,7 +920,7 @@ class M7Replay:
         done = (g is None or g >= to - p.brake_k * p.backup_speed or b['track'].done
                 or b['x0'] - x >= p.backup_max)
         if done or b['stopping']:
-            if not b['stopping']:
+            if b['stopping'] is False:
                 b['stopping'] = t
             if still or t - b['stopping'] >= p.still_max_s:
                 self.events.append(f'[x={x:.2f}] 후진 끝: 앞 {"없음" if g is None else f"{1000 * g:.0f} mm"}, '
