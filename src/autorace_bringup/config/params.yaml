@@ -198,8 +198,8 @@ obstacle_node:
 detector_node:
   ros__parameters:
     image_topic: /camera/color/image_raw
-    model_path: '/home/wego/autorace_ws/models/autorace_yolo_v45.onnx'
-    class_names: [red, yellow, green, fork_a, fork_b, pedestrian, bump, slow, parking]   # v4.5 모델 ID 순서 (기존과 동일)
+    model_path: '/home/wego/autorace_ws/models/autorace_yolo_v5.onnx'
+    class_names: [red, yellow, green, fork_a, fork_b, pedestrian, bump, slow, parking]   # v5 모델 ID 순서 (기존과 동일)
     input_size: 640                       # ONNX 고정 입력. 320 사용 시 모델 경로와 함께 변경·재시작
     conf_threshold: 0.7
     # 11/09: 스레드 제한 없이 10Hz로 돌리면 실제 1.8Hz + 차선 노드 절반 속도. 2스레드·5Hz로 제한
