@@ -782,6 +782,8 @@ class ParkingV2:
         if self.t_phase is None:
             self._enter('WAIT_LINE', inp)
         self._update_pose(inp)
+        if p.get('turn_ref') == 'fixed':
+            return self._step_fixed(inp)
         moved = inp['dist_mm'] - self.d_phase
 
         if self.phase == 'WAIT_LINE':       # ① 흰 선 기다림 (차선 노드 명령 넘김)
@@ -1251,6 +1253,190 @@ class ParkingV2:
 
         return self._out(0.0, 0.0)          # ⑥ DONE
 
+    # ------------------------------------------------------------------
+    # 11/16 캡틴 '고정 거리' 방식 (turn_ref: fixed). 라이다 판단 없이 선 + 오도메트리 + IMU만 씀.
+    # ① F_LINE   차선 따라가며 주차선(흰 가로선, 처음엔 25cm보다 먼 것만)을 찾고, 앞바퀴가 선 fixed_line_target_mm 앞에 오면 정지
+    #            (선이 카메라 아래로 사라지면 마지막으로 본 거리 - 오도메트리로 셈. fsm.StopApproach와 같은 원리)
+    # ② F_PAUSE  fixed_pause_sec 정지 (= 주차 모드로 바뀜)
+    # ③ F_MOVE   멈춘 자리부터 오도메트리 fixed_move_mm 직진 (멈출 때 방향 유지)
+    # ④ F_TPAUSE fixed_turn_pause_sec 정지 + 끝 presteer_sec 동안 오른쪽 최대 조향 미리 꺾기
+    # ⑤ F_TURN   오른쪽 최대 조향 전진. fixed_turn_deg(IMU) 돌거나 fixed_turn_mm(>0이면) 가면 끝
+    # ⑥ DONE     PARKED_FIXED (11/18 공지: 2행 주차 없음 -> 돌고 바로 끝). ③·⑤ 중 앞범퍼 front_stop_mm 안에 물체 -> ③은 기다림, ⑤는 그 자리 정지(PARKED_FIXED_BLOCKED)
+    # ------------------------------------------------------------------
+    def _step_fixed(self, inp):
+        p = self.p
+        if self.phase == 'WAIT_LINE':
+            self.trigger = 'fixed'
+            self.turn_ref_used = 'fixed'
+            self.lane_cfg = {'target_offset_mm': p['target_offset_mm']}   # (publish_lane_cfg일 때만 보냄. 보통 미션 노드가 50 보냄)
+            self._enter('F_LINE', inp)
+        moved = inp['dist_mm'] - self.d_phase
+
+        if self.phase == 'F_LINE':
+            lines = [d for d in inp['stoplines_mm'] if d >= p['line_min_mm']]
+            if lines:
+                if self.end_d is None:
+                    # 처음 잡는 선은 fixed_first_min_mm보다 멀리서 보인 것만 (11/16 런 가이드):
+                    #   통주행 M4 시작 때 횡단보도 끝 선이 약 12cm 앞이라 버리고, 연습(주차 앞 선 30cm 앞에 놓고
+                    #   set_state)은 선이 약 35cm 앞이라 잡는다. (예전 ignore_mm 300은 연습 때 선을 버려 지나쳤음)
+                    far = [d for d in lines if d >= p['fixed_first_min_mm']]
+                    cand = far[0] if far else None
+                else:                                     # 이미 잡은 선과 가까운 것만 (다른 선으로 안 갈아탐)
+                    pred = self.end_d - (inp['dist_mm'] - self.end_at)
+                    near = [d for d in lines if abs(d - pred) < 150.0]
+                    cand = min(near, key=lambda d: abs(d - pred)) if near else None
+                if cand is not None:
+                    self.end_d, self.end_at = cand, inp['dist_mm']
+            if self.end_d is None:
+                if moved >= p['fixed_line_max_mm']:
+                    return self._done('FAIL_NO_LINE', inp)
+                return self._out(inp['lane_v'], None)
+            remain = self.end_d - (inp['dist_mm'] - self.end_at)
+            if remain <= p['fixed_line_target_mm'] + p['fixed_brake_mm']:
+                self.turn_at = {'line_mm': round(remain)}
+                self._enter('F_PAUSE', inp)
+                return self._out(0.0, 0.0)
+            v = inp['lane_v']
+            if remain < p['fixed_line_target_mm'] + 250.0:
+                v = min(v, p['fixed_slow_speed'])          # 선 25cm 앞부터 천천히 (밀림 줄임)
+            return self._out(v, None)
+
+        if self.phase == 'F_PAUSE':
+            # 11/17 빈 칸 찾기: 서 있는 동안 라이다 점을 앞줄 1·2·3번 칸 상자마다 세어 가장 빈 칸을 고른다
+            if p['fixed_detect']:
+                if not hasattr(self, 'cell_cnt') or self.cell_cnt is None:
+                    self.cell_cnt, self.cell_frames, self.cell_occ = [0, 0, 0], 0, [0, 0, 0]
+                    self.detect_extra = False
+                pts = inp.get('points_far', [])
+                for x, y in pts:                            # B. 칸마다 점 개수
+                    c = self._cell_of(x, y)
+                    if c is not None:
+                        self.cell_cnt[c] += 1
+                occ = set()                                 # A. 캡틴 방식: 덩어리 중심이 어느 칸 범위에 있나
+                for cx, cy, n in self._blobs(pts):
+                    c = self._cell_of(cx, cy)
+                    if c is not None and n >= p['fixed_blob_min_pts']:
+                        occ.add(c)
+                for c in occ:
+                    self.cell_occ[c] += 1
+                self.cell_frames += 1
+            wait = max(p['fixed_pause_sec'], p['fixed_detect_sec'] if p['fixed_detect'] else 0.0)
+            if getattr(self, 'detect_extra', False):
+                wait += p['fixed_detect_sec']
+            if inp['t'] - self.t_phase >= wait:
+                cell = self._pick_cell()
+                if cell is None:                            # A·B 불일치 첫 번째 -> 1초 더 모음
+                    self.detect_extra = True
+                    return self._out(0.0, 0.0)
+                self.fixed_cell = cell
+                self.yaw_phase0 = inp['yaw']
+                self._enter('F_MOVE', inp)
+            else:
+                return self._out(0.0, 0.0)
+            moved = 0.0
+
+        if self.phase == 'F_MOVE':
+            if moved >= self._fixed_move() - p['fixed_brake_mm']:
+                self.q_s = round(moved)
+                self._enter('F_TPAUSE', inp)
+                return self._out(0.0, 0.0)
+            if inp['blocked']:
+                return self._out(0.0, 0.0)                 # 앞에 뭐가 있으면 서서 기다림
+            k = 0.0
+            if inp['yaw'] is not None and getattr(self, 'yaw_phase0', None) is not None:
+                k = -p['fixed_heading_gain'] * wrap(inp['yaw'] - self.yaw_phase0)   # 멈출 때 방향 유지
+                k = max(-1.0, min(1.0, k))
+            return self._out(p['fixed_move_speed'], k)
+
+        if self.phase == 'F_TPAUSE':
+            if inp['t'] - self.t_phase >= p['fixed_turn_pause_sec']:
+                self.yaw_turn0 = inp['yaw']
+                self._enter('F_TURN', inp)
+                moved = 0.0
+            elif self._presteer_due(p['fixed_turn_pause_sec'], inp) and not inp['blocked']:
+                return self._out(p['presteer_speed'], KAPPA_FULL_RIGHT)
+            else:
+                return self._out(0.0, 0.0)
+
+        if self.phase == 'F_TURN':
+            deg = self._turned_deg(inp)
+            by_deg = p['fixed_turn_deg'] > 0 and deg >= p['fixed_turn_deg']
+            by_mm = p['fixed_turn_mm'] > 0 and moved >= p['fixed_turn_mm']
+            if by_deg or by_mm:
+                self.stop_how = 'deg' if by_deg else 'mm'
+                self.err = ('turned', round(deg, 1), round(moved))
+                return self._done('PARKED_FIXED', inp)     # 11/18 공지: 2행 주차 없음 -> 돌고 바로 끝
+            if inp['blocked']:
+                self.err = ('blocked', round(deg, 1), round(moved))
+                return self._done('PARKED_FIXED_BLOCKED', inp)
+            return self._out(p['fixed_turn_speed'], KAPPA_FULL_RIGHT)
+
+        return self._out(0.0, 0.0)                         # DONE
+
+    def _cell_box(self, c):
+        """앞줄 c번째 칸(0=1번)의 라이다 검사 상자 (앞바퀴 기준 mm, 앞 +, 왼쪽 +). 앞범퍼가 선에 닿아 선 자리 기준."""
+        p = self.p
+        r = list(p['fixed_cell_ranges_mm'])                 # 11/18 캡틴: 라이다 앞 거리 1번 500~1020 / 2번 1030~1530 / 3번 1540~2040
+        lx = -p['front_axle_from_lidar_mm']                 # 앞바퀴 -> 라이다 (앞 +). 점은 앞바퀴 기준이라 라이다 거리 + lx
+        return (r[2 * c] + lx, r[2 * c + 1] + lx, -p['fixed_cell_y_far_mm'], -p['fixed_cell_y_near_mm'])
+
+    def _cell_of(self, x, y):
+        """앞바퀴 기준 점(x, y)이 앞줄 몇 번째 칸 상자(0~2)에 드나. 없으면 None."""
+        for c in range(3):
+            x0, x1, y0, y1 = self._cell_box(c)
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                return c
+        return None
+
+    def _blobs(self, pts):
+        """각도 순서 점들 -> 덩어리 [(중심 x, 중심 y, 점 수)]. 이웃 점이 gap보다 멀면 나눔 (scan_clusters와 같은 원리)."""
+        out, cur = [], []
+        gap = self.p['fixed_blob_gap_mm']
+        for q in pts:
+            if cur and math.hypot(q[0] - cur[-1][0], q[1] - cur[-1][1]) > gap:
+                out.append(cur)
+                cur = []
+            cur.append(q)
+        if cur:
+            out.append(cur)
+        return [(sum(a for a, _ in c) / len(c), sum(b for _, b in c) / len(c), len(c)) for c in out]
+
+    def _pick_cell(self):
+        """빈 칸 (1~3). A(캡틴: 덩어리 없는 칸)와 B(점이 가장 적은 칸)를 같이 본다.
+        같음 -> 그 칸 / A가 0개·2개 이상 -> B / 다름 -> 처음엔 None(1초 더), 두 번째면 B.
+        강제(fixed_force_cell>0)면 그 칸, 감지 꺼짐이면 fixed_default_cell."""
+        p = self.p
+        if int(p['fixed_force_cell']) in (1, 2, 3):
+            self.cell_src = 'force'
+            return int(p['fixed_force_cell'])
+        frames = getattr(self, 'cell_frames', 0)
+        if not p['fixed_detect'] or not frames:
+            self.cell_src = 'default'
+            return int(p['fixed_default_cell'])
+        avg = [n / float(frames) for n in self.cell_cnt]
+        self.cell_avg = [round(a, 1) for a in avg]
+        b = min(range(3), key=lambda c: avg[c]) + 1
+        free = [c + 1 for c in range(3) if self.cell_occ[c] * 2 < frames]    # 절반 넘는 장면에서 덩어리가 없던 칸
+        a = free[0] if len(free) == 1 else None
+        self.cell_a, self.cell_b = a, b
+        if a == b:
+            self.cell_src = 'agree'
+            return b
+        if a is None:
+            self.cell_src = 'a_fail_b'
+            return b
+        if not getattr(self, 'detect_extra', False):
+            return None
+        self.cell_src = 'mismatch_b'
+        return b
+
+    def _fixed_move(self):
+        p, c = self.p, getattr(self, 'fixed_cell', None)
+        cells = list(p['fixed_cells_move_mm'])
+        if c in (1, 2, 3) and len(cells) >= 3:
+            return float(cells[c - 1])
+        return p['fixed_move_mm']
+
     def _look(self):
         """선 따라가기 앞보기 거리. 가운데 다시 맞출 때는 짧게(옆으로 더 빨리 붙음)."""
         if self.center_tries and self.p.get('center_look_mm', 0.0) > 0.0:
@@ -1368,7 +1554,7 @@ class ParkingV2:
         """/parking/state에 실을 내용."""
         return {'phase': self.phase, 'done': self.phase == 'DONE', 'result': self.result,
                 'backs': self.backs, 'realigns': self.realigns, 'last_err': self.err,
-                'row': self.row, 'stop_how': self.stop_how, 'trigger': self.trigger, 'turn_ref': self.turn_ref_used, 'corner_s': None if self.corner_s is None else round(self.corner_s), 'corner_n': self.corner_n, 'turn_at': self.turn_at, 'target_s': None if self.target_s is None else round(self.target_s), 'target_src': self.target_src, 'n_c5': len(self.tgt_c5), 'n_pm': len(self.tgt_pm), 'q_s': self.q_s, 'r_meas': None if self.r_meas is None else round(self.r_meas), 'fix_n': self.fix_n, 'fix_pred': self.fix_pred,
+                'cell': getattr(self, 'fixed_cell', None), 'cell_src': getattr(self, 'cell_src', None), 'cell_a': getattr(self, 'cell_a', None), 'cell_b': getattr(self, 'cell_b', None), 'cell_avg': getattr(self, 'cell_avg', None), 'row': self.row, 'stop_how': self.stop_how, 'trigger': self.trigger, 'turn_ref': self.turn_ref_used, 'corner_s': None if self.corner_s is None else round(self.corner_s), 'corner_n': self.corner_n, 'turn_at': self.turn_at, 'target_s': None if self.target_s is None else round(self.target_s), 'target_src': self.target_src, 'n_c5': len(self.tgt_c5), 'n_pm': len(self.tgt_pm), 'q_s': self.q_s, 'r_meas': None if self.r_meas is None else round(self.r_meas), 'fix_n': self.fix_n, 'fix_pred': self.fix_pred,
                 'end_mm': None if self.end_d is None else round(self.end_d)}
 
 
@@ -1388,6 +1574,32 @@ DEFAULTS = {
     'follow_max_direct_mm': 3500.0,  # 바로 시작했을 때 짝 없이 이만큼 가면 멈춤. 도면: M4 시작 약 3.8m -> 꺾는 곳 6.56m, 차선 끝 8.13m
     'wait_blocked_before_pair': True,  # 짝 찾기 전 앞이 막히면 BLOCKED로 끝내지 말고 서서 기다림
     'turn_ref': 'pair',        # 꺾는 기준: 'pair'(짝 중점) | 'corner'(1번 모서리, 리모 폭 가정) | 'center1'(1번 앞면 가운데) | 'target'(꼭짓점 기준 꺾기) | 'path'(캡틴 경로: 정지·Q로 이동·원호, 11/13)
+    # 11/16 캡틴 '고정 거리' 방식 (turn_ref: fixed): 주차선 정지 -> 0.3초 -> 104cm 직진 -> 오른쪽 최대 조향 -> (직진) -> 정지
+    # 11/17 공지: 빈 칸 위치가 랜덤 (한 칸만 비움) -> 주차선에서 서 있는 동안 라이다로 앞줄 1·2·3번 중 빈 칸을 찾아 직진 거리만 바꿈
+    'fixed_detect': True,
+    'fixed_detect_sec': 1.0,       # 선에서 서서 라이다를 모으는 시간 (fixed_pause_sec보다 길면 이 시간)
+    'fixed_cells_move_mm': [384.0, 870.0, 1378.0],   # 1·2·3번 칸 직진 거리 (11/17 선배 기록 끝 위치 - 59.6cm, 2번 870 실차)
+    'fixed_cell_ranges_mm': [500.0, 1020.0, 1030.0, 1530.0, 1540.0, 2040.0],   # 11/18 캡틴: 칸별 라이다 앞 거리 범위 (실차 확인 필요)
+    'fixed_cell_y_near_mm': 330.0, # 칸 상자 옆 범위 (오른쪽, 차 중심에서) 가까운 쪽
+    'fixed_cell_y_far_mm': 750.0,  #   먼 쪽 (리모 앞면은 약 400~500)
+    'fixed_detect_range_mm': 2500.0,
+    'fixed_blob_gap_mm': 80.0,     # A(캡틴 방식) 덩어리 나누는 점 간격
+    'fixed_blob_min_pts': 2,       # A: 이만큼 점이 있는 덩어리만 물체로 봄
+    'fixed_default_cell': 2,       # 감지 꺼짐일 때
+    'fixed_force_cell': 0,         # 1~3이면 감지 무시하고 그 칸 (시험용)
+    'fixed_line_target_mm': 56.0,   # 앞바퀴가 주차선 이만큼 앞에서 정지 (11/16 캡틴: 앞범퍼가 선에 닿게 = front_bumper_from_axle_mm)
+    'fixed_first_min_mm': 250.0,   # 처음 잡는 주차선은 앞바퀴에서 이보다 멀리 보인 것만 (횡단보도 끝 선 무시)
+    'fixed_brake_mm': 0.0,     #   정지 명령 뒤 밀리는 거리 (미측정 -> 0). 실차에서 지나치면 그만큼 넣기
+    'fixed_slow_speed': 0.10,  #   선 25cm 앞부터 이 속도 이하
+    'fixed_line_max_mm': 4000.0,   # 주차 모드 시작 뒤 이만큼 가도 선을 못 보면 FAIL_NO_LINE (정지)
+    'fixed_pause_sec': 0.3,    # 선에서 멈추는 시간
+    'fixed_move_mm': 870.0,    # 멈춘 자리부터 직진 거리 (11/16 캡틴 실차 확정)
+    'fixed_move_speed': 0.10,
+    'fixed_heading_gain': 2.0,     # 직진 중 멈출 때 방향 유지 (1/m per rad)
+    'fixed_turn_pause_sec': 0.3,   # 104cm 뒤 멈춤 (끝 presteer_sec 동안 조향 미리 꺾기). 0이면 멈추지 않고 바로 꺾음
+    'fixed_turn_deg': 87.0,    # 오른쪽 최대 조향을 이만큼(IMU) 돌면 끝. 실차는 펴라 한 뒤 2~4도 더 돎 -> 약 90도
+    'fixed_turn_mm': 0.0,      # >0이면 최대 조향으로 이만큼 가면 끝 (각도와 먼저 닿는 쪽). 11/16 캡틴 실차 확정: 0 (87도로 끝)
+    'fixed_turn_speed': 0.12,
     'turn_from_corner_mm': 140.0,  # corner: 라이다가 1번 모서리 선을 이만큼 지나면 꺾기.
                                #   = turn_lead 320 을 바꾼 값: 2번 가운데 = 모서리 + 410 (칸 52 - 리모 반폭 11), 앞바퀴 = 가운데 - 320,
                                #   라이다 = 앞바퀴 + 47 -> 모서리 + 137. 실차로 맞출 것
@@ -1614,6 +1826,7 @@ def main(args=None):
                 if self.logic is None:
                     self.logic = ParkingV2({k: g(k) for k in DEFAULTS})
                 clusters, blocked, points, clusters_pair, clusters_box, clusters_single = [], False, [], [], [], []
+                points_far = []
                 if self.scan is not None:
                     s = self.scan
                     clusters = scan_clusters(s.ranges, s.angle_min, s.angle_increment, s.range_min,
@@ -1624,6 +1837,9 @@ def main(args=None):
                                             g('front_bumper_from_axle_mm'), g('front_stop_mm'), 120.0)
                     points = scan_points(s.ranges, s.angle_min, s.angle_increment, s.range_min, s.range_max,
                                          g('front_axle_from_lidar_mm'), g('laser_yaw'))
+                    points_far = scan_points(s.ranges, s.angle_min, s.angle_increment, s.range_min, s.range_max,
+                                             g('front_axle_from_lidar_mm'), g('laser_yaw'),
+                                             max_dist_mm=g('fixed_detect_range_mm')) if g('turn_ref') == 'fixed' else []
                     clusters_pair = scan_clusters(s.ranges, s.angle_min, s.angle_increment, s.range_min,
                                                   s.range_max, g('front_axle_from_lidar_mm'), g('laser_yaw'),
                                                   max_dist_mm=max(1500.0, g('side_far_mm') + 200.0), x_mode='extent',
@@ -1639,7 +1855,7 @@ def main(args=None):
                     't': time.monotonic(), 'dist_mm': self.dist_mm, 'yaw': self.yaw,
                     'lane_v': self.lane_v, 'lane_w': self.lane_w, 'stoplines_mm': self.stoplines,
                     'end_lines_mm': self.end_lines, 'armed': bool(self.mstate.get('parking_armed', True)),
-                    'clusters': clusters, 'blocked': blocked, 'points': points, 'clusters_pair': clusters_pair, 'clusters_single': clusters_single,
+                    'clusters': clusters, 'blocked': blocked, 'points': points, 'points_far': points_far, 'clusters_pair': clusters_pair, 'clusters_single': clusters_single,
                     'clusters_box': clusters_box})
                 tw.linear.x = float(v)
                 tw.angular.z = float(self.lane_w if k is None else v * k)

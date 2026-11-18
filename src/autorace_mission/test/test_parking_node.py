@@ -116,6 +116,8 @@ def drive(parked, target, overrides=None, y0=240.0, fov_deg=360.0, camera=False,
                                  'stoplines_mm': lines, 'clusters': cl, 'blocked': bl,
                                  'end_lines_mm': camera_lines(fx, fy, th) if camera else [],
                                  'points': pn.scan_points(rng, amin, ainc, 0.05, 8.0, p['front_axle_from_lidar_mm']),
+                                 'points_far': pn.scan_points(rng, amin, ainc, 0.05, 8.0, p['front_axle_from_lidar_mm'],
+                                                              max_dist_mm=p['fixed_detect_range_mm']),
                                  'clusters_pair': pn.scan_clusters(rng, amin, ainc, 0.05, 8.0, p['front_axle_from_lidar_mm'], 0.0,
                                                                    max_dist_mm=max(1500.0, p['side_far_mm'] + 200.0),
                                                                    x_mode='extent', min_size_mm=p['car_min_size_mm']),
@@ -571,11 +573,15 @@ def test_path_done_logs_once_flag():
 
 # --- 11/13 실차: 양옆 정중앙, 앞 15cm, 후진 15cm, 전진<->후진 0.5초, 옆 감시에 걸리면 후진 뒤 다시 -----------------
 
-def _yaml_parking():
+def _yaml_parking(path_mode=True):
+    """params.yaml 주차 값. path_mode: 11/16부터 기본이 fixed라, 예전 경로 방식 시험은 turn_ref만 path로 둔다."""
     import yaml
     path = os.path.join(os.path.dirname(__file__), '..', '..', 'autorace_bringup', 'config', 'params.yaml')
     d = yaml.safe_load(open(path, encoding='utf-8'))['parking_node']['ros__parameters']
-    return {k: v for k, v in d.items() if k in pn.DEFAULTS}
+    out = {k: v for k, v in d.items() if k in pn.DEFAULTS}
+    if path_mode:
+        out['turn_ref'] = 'path'
+    return out
 
 
 def test_corridor_mid_between_inner_faces():
@@ -591,6 +597,8 @@ def test_params_yaml_values_from_captain():
     assert p['front_stop_mm'] == 150.0 and p['back_mm'] == 150.0 and p['switch_pause_sec'] == 0.5
     assert p['guard_back'] and p['center_on_sides'] is False and p['follow_col5'] is False   # 11/13 캡틴: 원을 접선까지
     assert p['center_check'] is True       # 11/14 캡틴: 다시 켬 (끝에서 선 밟음). 11/13 15:49엔 끔
+    q = _yaml_parking(path_mode=False)
+    assert q['turn_ref'] == 'fixed' and q['fixed_move_mm'] == 870.0 and q['fixed_turn_mm'] == 0.0   # 11/16 캡틴 실차 확정
 
 
 def _step_inp(t, dist, blocked=False, yaw=0.0):
@@ -733,3 +741,112 @@ def test_center_check_margin_and_short_pullout():
     assert pulls                                          # 120 mm 넘게 벗어나 한 번은 다시 함
     errs = [i['last_err'] for i in log if i.get('last_err') and i['last_err'][0] == 'center']
     assert all(abs(e[1]) > 50 for e in errs)              # 50 안이면 다시 안 함
+
+
+# ---- 11/16 캡틴 고정 거리 방식 (turn_ref: fixed) ----
+# 시험 트랙(흰 선 -> 주차 구역 500mm)은 실제 트랙과 달라 직진 거리를 940으로 맞춰 논리만 시험한다.
+# 실제 값 1040은 캡틴이 실제 트랙에서 앞범퍼를 선에 대고 잰 값 (11/16).
+FIXED = {'turn_ref': 'fixed', 'front_stop_mm': 150.0, 'fixed_move_mm': 940.0, 'fixed_turn_mm': 0.0,   # 시험 트랙은 87도로 끝
+         'fixed_cells_move_mm': [420.0, 940.0, 1460.0]}                       # 시험 트랙 칸 간격 520
+
+
+@pytest.mark.parametrize('r_min', [560.0, 590.0, 620.0, 650.0])
+@pytest.mark.parametrize('lag', [0.0, 120.0])
+def test_fixed_parks_in_cell2(r_min, lag):
+    """주차선 정지 -> 104cm -> 최대 조향 87도: 실제 반경 560~650mm, 서보 지연 0~120mm 모두 2번 칸 안, 충돌 없음."""
+    n_in, hit, res = drive([1, 3, 5], 2, FIXED, y0=290.0, r_min=r_min, steer_lag_mm=lag)
+    assert n_in == 4 and not hit and res == 'PARKED_FIXED'
+
+
+def test_fixed_stops_at_line_then_moves_1040():
+    out, log = {}, []
+    drive([1, 3, 5], 2, FIXED, y0=290.0, r_min=590.0, out=out, log=log)
+    lg = out['logic']
+    assert abs(lg.turn_at["line_mm"] - 56.0) <= 10.0       # 앞범퍼가 선에 닿게 (앞바퀴 5.6cm 앞)
+    assert lg.q_s == pytest.approx(940.0, abs=15.0)
+    phases = [i['phase'] for i in log]
+    assert phases.index('F_PAUSE') < phases.index('F_MOVE') < phases.index('F_TURN')
+
+
+def test_fixed_turn_mm_ends_turn_early():
+    """fixed_turn_mm 400 (각도 끔): 반경 590이면 약 39도에서 끝 -> 칸에 덜 들어감 (캡틴 '40cm' 값 확인용)."""
+    out = {}
+    drive([1, 3, 5], 2, dict(FIXED, fixed_turn_mm=400.0, fixed_turn_deg=0.0), y0=290.0, r_min=590.0, out=out)
+    assert 30.0 <= -math.degrees(out['pose'][2]) <= 45.0
+
+
+def test_fixed_defaults_captain_values():
+    assert pn.DEFAULTS['fixed_move_mm'] == 870.0 and pn.DEFAULTS['fixed_turn_mm'] == 0.0 and pn.DEFAULTS['fixed_line_target_mm'] == 56.0
+    assert pn.DEFAULTS['fixed_line_target_mm'] == pn.DEFAULTS['front_bumper_from_axle_mm']
+
+
+def test_fixed_no_line_fails_and_stops():
+    lg = pn.ParkingV2(dict(pn.DEFAULTS, **FIXED))
+    v, d, info = 0.18, 0.0, None
+    for i in range(2000):
+        v, k, info = lg.step({'t': i * 0.05, 'dist_mm': d, 'yaw': 0.0, 'lane_v': 0.18, 'lane_w': 0.0,
+                              'stoplines_mm': [], 'clusters': [], 'blocked': False})
+        d += v * 50.0
+        if info['done']:
+            break
+    assert info['result'] == 'FAIL_NO_LINE' and v == 0.0
+    assert d == pytest.approx(pn.DEFAULTS['fixed_line_max_mm'], abs=20.0)
+
+
+def _fixed_lines(first_lines, line_at):
+    """앞바퀴 기준 선 거리를 직접 주는 1차원 시험: first_lines = 시작 때 보이는 다른 선들(mm), line_at = 주차선 거리."""
+    lg = pn.ParkingV2(dict(pn.DEFAULTS, **FIXED))
+    d, info, stop_d = 0.0, None, None
+    for i in range(3000):
+        ls = sorted([x - d for x in first_lines + [line_at] if 60.0 <= x - d <= 700.0])
+        v, k, info = lg.step({'t': i * 0.05, 'dist_mm': d, 'yaw': 0.0, 'lane_v': 0.18, 'lane_w': 0.0,
+                              'stoplines_mm': ls, 'clusters': [], 'blocked': False})
+        if lg.phase == 'F_PAUSE' and stop_d is None:
+            stop_d = d
+        d += v * 50.0
+        if info['done']:
+            break
+    return lg, stop_d
+
+
+def test_fixed_practice_line_30cm_ahead_is_caught():
+    """런 가이드: 주차 앞 선 30cm 앞(앞범퍼)에 놓고 set_state -> 앞바퀴 기준 약 356mm. 예전 ignore 300이면 지나침."""
+    lg, stop_d = _fixed_lines([], 356.0)
+    assert stop_d == pytest.approx(356.0 - 56.0, abs=15.0)
+
+
+def test_fixed_full_run_skips_crosswalk_end_line():
+    """통주행 M4 시작: 횡단보도 끝 선 약 120mm 앞, 주차선 약 1950mm 앞 -> 횡단보도 선에서 서지 않음."""
+    lg, stop_d = _fixed_lines([120.0], 1950.0)
+    assert stop_d == pytest.approx(1950.0 - 56.0, abs=15.0)
+
+
+# ---- 11/17 공지: 빈 칸 랜덤 (한 칸만 비움) -> 선에서 라이다로 빈 칸 찾기 ----
+@pytest.mark.parametrize('empty', [1, 2, 3])
+@pytest.mark.parametrize('r_min', [590.0, 620.0])
+def test_fixed_finds_empty_cell_and_parks(empty, r_min):
+    parked = [i for i in range(1, 7) if i != empty]          # 나머지 다섯 칸은 모두 막음
+    out, log = {}, []
+    n_in, hit, res = drive(parked, empty, FIXED, y0=290.0, r_min=r_min, steer_lag_mm=60.0, out=out, log=log)
+    lg = out['logic']
+    assert lg.fixed_cell == empty and lg.cell_src == 'agree' and lg.cell_a == empty and lg.cell_b == empty
+    assert n_in == 4 and not hit and res == 'PARKED_FIXED'
+
+
+def test_fixed_force_cell_overrides_detection():
+    out = {}
+    drive([1, 3, 4, 5, 6], 2, dict(FIXED, fixed_force_cell=2), y0=290.0, r_min=590.0, out=out)
+    assert out['logic'].fixed_cell == 2 and out['logic'].cell_src == 'force'
+
+
+def test_pick_cell_a_b_rules():
+    lg = pn.ParkingV2(dict(pn.DEFAULTS, **FIXED))
+    lg.cell_frames, lg.detect_extra = 10, False
+    lg.cell_cnt, lg.cell_occ = [100, 0, 80], [10, 0, 10]        # 둘 다 2번
+    assert lg._pick_cell() == 2 and lg.cell_src == 'agree'
+    lg.cell_cnt, lg.cell_occ = [100, 0, 80], [10, 0, 0]         # A: 2·3번 둘 다 빔 -> B
+    assert lg._pick_cell() == 2 and lg.cell_src == 'a_fail_b'
+    lg.cell_cnt, lg.cell_occ = [100, 5, 0], [10, 0, 10]         # A 2번, B 3번 -> 처음엔 더 봄
+    assert lg._pick_cell() is None
+    lg.detect_extra = True
+    assert lg._pick_cell() == 3 and lg.cell_src == 'mismatch_b'
