@@ -598,7 +598,7 @@ def test_params_yaml_values_from_captain():
     assert p['guard_back'] and p['center_on_sides'] is False and p['follow_col5'] is False   # 11/13 캡틴: 원을 접선까지
     assert p['center_check'] is True       # 11/14 캡틴: 다시 켬 (끝에서 선 밟음). 11/13 15:49엔 끔
     q = _yaml_parking(path_mode=False)
-    assert q['turn_ref'] == 'fixed' and q['fixed_move_mm'] == 870.0 and q['fixed_turn_mm'] == 0.0   # 11/16 캡틴 실차 확정
+    assert q['turn_ref'] == 'fixed' and q['fixed_move_mm'] == 820.0 and q['fixed_turn_mm'] == 0.0 and q['fixed_back_mm'] == 50.0   # 11/16 실차 870, 11/18 현장 -50, 11/18 캡틴 5cm 후진
 
 
 def _step_inp(t, dist, blocked=False, yaw=0.0):
@@ -850,3 +850,20 @@ def test_pick_cell_a_b_rules():
     assert lg._pick_cell() is None
     lg.detect_extra = True
     assert lg._pick_cell() == 3 and lg.cell_src == 'mismatch_b'
+
+
+def test_fixed_backs_up_5cm_straight_after_turn():
+    """11/18 캡틴: 다 돈 뒤 바퀴 펴고 5cm 똑바로 후진 -> PARKED_FIXED. 후진 중 조향 0."""
+    out, log = {}, []
+    n_in, hit, res = drive([1, 3, 4, 5, 6], 2, FIXED, y0=290.0, r_min=590.0, out=out, log=log)
+    lg = out['logic']
+    assert res == 'PARKED_FIXED' and n_in == 4 and not hit
+    assert lg.back_done_mm == pytest.approx(50.0, abs=8.0)
+    ph = [i['phase'] for i in log]
+    assert ph.index('F_TURN') < ph.index('F_BPAUSE') < ph.index('F_BACK')
+
+
+def test_fixed_back_zero_skips():
+    out, log = {}, []
+    drive([1, 3, 4, 5, 6], 2, dict(FIXED, fixed_back_mm=0.0), y0=290.0, r_min=590.0, out=out, log=log)
+    assert 'F_BACK' not in [i['phase'] for i in log]
