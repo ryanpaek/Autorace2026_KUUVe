@@ -446,3 +446,42 @@ def test_stopline_tilted_up_to_15deg():
     draw_polyline_mm(img, cfg, np.array([-400.0, 400.0]), 720.0 + math.tan(math.radians(15)) * np.array([-400.0, 400.0]),
                      thick_mm=40.0)
     assert detect_stoplines(img, cfg.vehicle_col, cfg, old) == []      # 끄면 예전과 같음
+
+
+def test_corner_speed_cap_only_in_curves(cfg):
+    """11/19: 모든 커브 속도 상한 corner_speed. 직선은 그대로, 도면 앞 곡률(코너)이면 상한, 지그재그처럼 lookahead를 줄인 구간은 안 걸림"""
+    p = LaneParams(corner_speed=0.15, lookahead_mm=650.0)
+    f = LaneFollower(cfg, p)
+    bev = synth.straight_lane(cfg)
+    out = run(f, bev, frames=10, yaw=0.0, speed=0.5)
+    assert out.speed_scale * 0.5 > 0.3                      # 직선: 상한 없음
+    f.route_k = [0.0, 0.0, 0.0, -1.5625] + [-1.5625] * 10   # 300 mm 앞부터 R640 코너 (도면)
+    f.route_step_mm = 100.0
+    out = run(f, bev, frames=3, yaw=0.0, speed=0.5)
+    assert out.speed_scale * 0.5 == pytest.approx(0.15, abs=0.005)
+    f.route_k = [0.0] * 14                                  # 코너 끝 (조향도 작아지면 풀림)
+    out = run(f, bev, frames=15, yaw=0.0, speed=0.5)
+    assert out.speed_scale * 0.5 > 0.3
+    z = LaneFollower(cfg, LaneParams(corner_speed=0.15, lookahead_mm=260.0))   # 지그재그처럼 줄인 lookahead
+    z.route_k = [-1.5625] * 14
+    z.route_step_mm = 100.0
+    out = run(z, bev, frames=3, yaw=0.0, speed=0.2)
+    assert out.speed_scale * 0.2 > 0.16
+    m = LaneFollower(cfg, LaneParams(corner_speed=0.15, lookahead_mm=400.0))   # 미션 코너 미리보기면 줄인 구간도
+    m.route_k = [-1.5625] * 14
+    m.route_step_mm = 100.0
+    m.route_corner = True
+    out = run(m, bev, frames=3, yaw=0.0, speed=0.2)
+    assert out.speed_scale * 0.2 == pytest.approx(0.15, abs=0.005)
+
+
+def test_curve_kappa_gain_only_in_detected_curves(cfg):
+    """11/19: curve_kappa_gain은 커브 판단(일반 주행 lookahead·코너 미리보기)일 때만. 지그재그처럼 줄인 lookahead는 corner_kappa_gain 그대로"""
+    bev = synth.arc_lane(cfg, 640.0, turn='right')
+    ks = {}
+    for la, gain in ((650.0, 1.2), (650.0, 0.0), (260.0, 1.2)):
+        f = LaneFollower(cfg, LaneParams(lookahead_mm=la, curve_kappa_gain=gain, corner_kappa_gain=1.1))
+        ks[(la, gain)] = run(f, bev, frames=25, yaw=0.0, speed=0.15).kappa
+    assert ks[(650.0, 1.2)] < ks[(650.0, 0.0)] - 0.05        # 커브: 더 크게 (오른쪽 = 음수)
+    z = LaneFollower(cfg, LaneParams(lookahead_mm=260.0, curve_kappa_gain=0.0, corner_kappa_gain=1.1))
+    assert ks[(260.0, 1.2)] == pytest.approx(run(z, bev, frames=25, yaw=0.0, speed=0.15).kappa, abs=1e-6)

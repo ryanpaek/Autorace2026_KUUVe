@@ -163,6 +163,10 @@ DEFAULT_PARAMS = {
     'm2x_corner_axis': True,         # 기준 방향 = 3차선 직선 방향(없으면 M2 시작 방향), 코너 쪽으로 돈 각만 셈
     'm2x_corner_gate_mm': 200.0,     #   코너 시작(거리) - 이만큼 전에는 각도로 코너 시작이라 보지 않음 (합류 비스듬은 거리로만)
     'm2x_zero_lane': True,           # 코너 앞(미리보기 곡률 0)은 차선 조향 그대로 (차선 노드 route_corner_zero_lane)
+    # 11/19 실차 '코너를 아직 크게 돎', 라바콘 첫 짝에 부딪힘: 코너 미리보기 구간(M7 직전·라바콘 직전 코너)만 lookahead를 줄여
+    #   선에 바로 반응 (차선 노드 corner_lookahead 700은 꺼짐). 실제 도면 모양(안쪽 R600·바깥 R670) 시뮬레이션:
+    #   지금 시작선 옆 평균 49 mm·방향 5.3°(최악 9.9°) -> 500 + 미리보기 x1.1: 38 mm·1.2°(최악 6.0°), 선 닿음 0/12
+    'corner_preview_lookahead_mm': 0.0,   # 0 = 그대로. params.yaml에서 정함
     'm2_merge_speed': 0.0,           # 합류 S자 속도 상한 (0 = approach_speed 그대로). params.yaml에서 정함
     'm2x_speed': 0.0,                # M2_EXIT(합류 끝 ~ 라바콘 시작선) 속도 상한 (0 = 그대로)
     'm8_keep_fork_mm': 2500.0,       # 11/12 밤 실차: M2 끝(합류 테이퍼)에서 normal로 바꾸자마자 선을 놓쳐 차선 무시하고 감.
@@ -891,6 +895,7 @@ class MissionFSM:
             # 11/12 밤 실차: 횡단보도 끝 코너는 아직 1차로인데 3차선 설정(흰 선도 차선, 폭 520)으로 바꾸자마자 차선 노드가
             #   직선(흰 선)을 따라 코너를 직진했다(IMU 3°만 돎). 코너를 IMU로 다 돌 때까지는 보통 차선 설정 그대로
             kw = {'lost_search': True} if self.p.get('fork_lost_search', False) else {}
+            kw.update(self._corner_look())
             return Command('lane', self._lane(self.p['m7_speed'], **kw), note='M7_OBSTACLE/corner (plain lane)')
         kw = {'lookahead_mm': float(self.p['m7_lookahead_mm'])} if self.p.get('m7_lookahead_mm', 0.0) > 0.0 else {}
         return Command(src, self._lane(self.p['m7_speed'],
@@ -1072,11 +1077,19 @@ class MissionFSM:
                                           **self._m2x_kw()),
                        note=f'M2 merge {u:.0f}/{L:.0f}mm y {m["y"]:+.0f}mm')
 
+    def _corner_look(self) -> dict:
+        """11/19: 코너 미리보기 동안 차선 lookahead (corner_preview_lookahead_mm, 0 = 그대로)"""
+        la = self.p.get('corner_preview_lookahead_mm', 0.0)
+        return {'lookahead_mm': float(la)} if la > 0 else {}
+
     def _m2x_kw(self) -> dict:
-        """11/18: M2_EXIT 동안만 차선 노드에 '코너 앞(미리보기 0)은 차선 그대로' (m2x_zero_lane)"""
-        if self.state == 'M2_EXIT' and self.p.get('m2x_zero_lane', True):
-            return {'route_corner_zero_lane': True}
-        return {}
+        """M2_EXIT 동안만: 코너 앞(미리보기 0)은 차선 그대로 (m2x_zero_lane), 코너 lookahead (corner_preview_lookahead_mm)"""
+        kw = {}
+        if self.state == 'M2_EXIT':
+            if self.p.get('m2x_zero_lane', True):
+                kw['route_corner_zero_lane'] = True
+            kw.update(self._corner_look())          # 11/19: 합류 끝 ~ 라바콘 시작선 (코너 뒤 짧은 직선까지 같은 값)
+        return kw
 
     def _m2x_speed(self, speed: float) -> float:
         """11/18: 합류 S자(M2 끝 ~ M2_EXIT) 속도 상한 m2_merge_speed (0 = 그대로)"""
