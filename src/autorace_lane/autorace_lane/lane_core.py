@@ -218,6 +218,7 @@ class LaneParams:
     jump_max_mm: float = 120.0        # 목표점 횡위치가 한 프레임에 이보다 튀면 버린다
     jump_max_frames: int = 6          # 이만큼 연속으로 튀면 새 값을 받아들인다
     lost_hold_frames: int = 30        # 차선을 놓친 뒤 버티는 프레임 수 (30fps면 1초)
+    lost_corner_window: bool = True   # 11/18: 그때 바로 앞 도면 곡률이 0이어도(위치 s 뒤처짐) 앞 창 안의 코너 곡률로 돎
     lost_corner_frames: int = 120     # 11/12 밤: M7 직전 코너 미리보기가 있을 때 선을 놓쳐도 코너 곡률로 버티는 프레임 수
     # 11/18: 코너 미리보기가 켜져 있어도 아직 코너 앞(미리보기 곡률 0)이면 섞지 않고 차선 그대로.
     #   예전엔 0과 80% 섞여 차선 조향이 20%로 줄었다 -> M2 합류(B 왼쪽 비스듬)를 못 따라 직진, A는 비스듬한 채 코너 안쪽으로
@@ -1723,6 +1724,12 @@ class LaneFollower:
             self.lost_frames += 1
             k_corner = (self._route_kappa(p.route_ff_preview_mm + speed * p.latency_comp_sec * 1000.0)
                         if self.route_corner and self.route_k else None)
+            if k_corner is not None and p.lost_corner_window and abs(k_corner) < p.corner_ld_on:
+                # 11/18 1118_03 M2 출구 코너: 도면 위치 s가 약 1 m 뒤처져 '아직 코너 전'이라 선을 놓친 1.5초 동안 직진 -> 트랙 밖 -> 정지.
+                #   코너 미리보기가 켜져 있는 동안(미션 노드가 IMU로 '아직 코너 중')은 앞 창(route_k, 약 1.4 m) 안의 코너 곡률을 씀
+                kmax = max(self.route_k, key=abs)
+                if abs(kmax) >= p.corner_ld_on:
+                    k_corner = float(kmax)
             if k_corner is not None and self.lost_frames <= p.lost_corner_frames:
                 # 11/12 밤: M7 직전 코너(미션 노드가 IMU로 '아직 코너 중'이라고 보냄)에서 선을 놓치면
                 #   방향 유지(직진) 대신 코너 곡률로 계속 돈다
