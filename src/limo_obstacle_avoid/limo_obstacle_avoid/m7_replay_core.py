@@ -44,6 +44,16 @@ class ReplayParams:
     m2_start_gap: float = 1.00          # ★ M2 녹화 시작 자세: 앞범퍼 ~ 섬 앞 꼭짓점 거리 (m). 녹화한 거리와 같게
     m2_fork_default: str = 'A'          # 그때까지 A/B 표지를 못 보면
     m2_late_max: float = 0.40           # 장애물 때문에 늦어지면 M2 시작 지점 + 이만큼까지는 그 자리에서 시작, 넘으면 예전 방식
+    # 11/18 시험주행: 갈림길 표지판(섬 앞 꼭짓점의 막대)을 라이다가 '가운데 차로 장애물'로 봐서 표지판 앞에 가까이 서서 멈춤.
+    #   1) 섬 앞 꼭짓점 근처의 작은 덩어리(표지판 막대·원판)는 장애물·경로 검사에서 뺌 (닿기 직전 안전 정지에는 그대로 씀)
+    #   2) M2 녹화 길이 지금 자리에선 닿는데 녹화 시작 자리(m2_x)에선 안 닿으면, 거기까지 후진해서 녹화대로 돎
+    sign_ignore: bool = True
+    sign_zone_before: float = 0.40      # 섬 앞 꼭짓점(section_length) 이만큼 앞부터 (위치 추정 앞뒤 오차 포함)
+    sign_zone_after: float = 0.30       #   꼭짓점 이만큼 뒤까지
+    sign_zone_half: float = 0.30        #   가운데(섬 중심선) ± 이만큼
+    sign_max_size: float = 0.12         # 덩어리 앞뒤·옆 크기가 둘 다 이 안이면 표지판 (정차 LIMO는 폭 약 0.23)
+    m2_backup: bool = True
+    m2_backup_max: float = 0.80         # M2 시작 자리까지 이만큼 넘게 지나 있으면 후진 안 함
     m2_test_start: bool = False         # 시험용: 켜지는 자리를 곧바로 M2 시작 지점으로 (M7 건너뛰고 갈림길만 연습)
     start_lane_no: int = 0              # 시험용: 켤 때 차로 번호 1/2/3 (0 = start_lane 그대로, 기본 2차선)
     # 11/17 저녁: 차로 변경을 못 하고 장애물이 너무 가까워지면 후진해서 다시 시도
@@ -358,6 +368,8 @@ class M7Replay:
         self.pending = None           # 정렬 뒤 실행할 동작 (방향, 장애물 x)
         self.obs: Dict[int, Optional[float]] = {}
         self.pts: List[Tuple[float, float]] = []
+        self.sign_pts: list = []          # 표지판으로 보고 뺀 점 (안전 정지에만 씀)
+        self.m2_backed = False
         self.scan_t = None
         self.cam_ids: List[Optional[int]] = []
         self.blocked_since = None
@@ -462,8 +474,43 @@ class M7Replay:
             lx, ly = x + c * px - s * py, y + s * px + c * py
             if abs(ly) <= self.p.track_half:
                 loc.append((lx, ly, px, py))
+        loc, self.sign_pts = self._split_sign(loc)
+        if self.sign_pts and not getattr(self, '_sign_logged', False):
+            self._sign_logged = True
+            sx = sum(q[0] for q in self.sign_pts) / len(self.sign_pts)
+            self.events.append(f'[x={x:.2f}] 섬 앞 표지판으로 보고 장애물에서 뺌 ({len(self.sign_pts)}점, 꼭짓점 기준 '
+                               f'{100 * (sx - self.p.section_length):+.0f} cm)')
         self.pts = loc
         self.obs = self._lane_obstacles(loc, x + self.p.lidar_x - 0.05)           # 앞 (라이다 앞)
+
+    def _split_sign(self, loc):
+        """섬 앞 꼭짓점 근처의 작은 덩어리 = 갈림길 표지판 -> (나머지 점, 표지판 점)"""
+        p = self.p
+        if not p.sign_ignore:
+            return loc, []
+        x_tip = p.section_length
+        zone = [q for q in loc if x_tip - p.sign_zone_before <= q[0] <= x_tip + p.sign_zone_after
+                and abs(q[1]) <= p.sign_zone_half]
+        if not zone:
+            return loc, []
+        # 점끼리 6 cm 안이면 같은 덩어리
+        groups: List[list] = []
+        for q in sorted(zone, key=lambda r: (r[0], r[1])):
+            for g in groups:
+                if any(math.hypot(q[0] - r[0], q[1] - r[1]) <= 0.06 for r in g):
+                    g.append(q)
+                    break
+            else:
+                groups.append([q])
+        sign = []
+        for g in groups:
+            xs, ys = [r[0] for r in g], [r[1] for r in g]
+            if max(xs) - min(xs) <= p.sign_max_size and max(ys) - min(ys) <= p.sign_max_size:
+                sign.extend(g)
+        if not sign:
+            return loc, []
+        ids = set(map(id, sign))
+        return [q for q in loc if id(q) not in ids], sign
 
     def _lane_obstacles(self, loc, x_min) -> Dict[int, Optional[float]]:
         p = self.p
@@ -546,6 +593,8 @@ class M7Replay:
         self.m2_run = None
         self._m2_missing_logged = False
         self._m2_hit_logged = False
+        self.m2_backed = False
+        self._sign_logged = False
         self.cam_ids.clear()
         self.events.append(f'시작: 차로 {self.lane}, 섬까지 {p.section_length:.2f} m, 출구 {self._exit_name()}')
 
@@ -700,7 +749,7 @@ class M7Replay:
             return v, k
         m = p.exec_stop_margin if self.state == 'EXEC' else p.stop_margin
         hw = p.robot_half_width + m
-        for _, _, px, py in self.pts:
+        for _, _, px, py in list(self.pts) + list(self.sign_pts):     # 표지판도 닿기 직전엔 섬
             if abs(py) > hw:
                 continue
             if v > 0 and -0.02 <= px - p.robot_front <= m + p.brake_k * abs(v):
@@ -900,6 +949,10 @@ class M7Replay:
             if x >= x_m2 - p.speed * p.latency_s:
                 key0 = (self.lane, fork or p.m2_fork_default)
                 hit = self.m2_hit(key0, max(x_m2, x)) if key0 in self.m2 else None
+                if (hit is not None and p.m2_backup and not self.m2_backed and key0 in self.m2
+                        and x > x_m2 + 0.03 and x - x_m2 <= p.m2_backup_max
+                        and self.m2_hit(key0, x_m2) is None):
+                    return self._begin_m2_backup(x, x_m2, f'M2 녹화 길이 지금 자리에선 물체에 닿음 ({hit[0] - x:+.2f} m)')
                 if hit is not None and not getattr(self, '_m2_hit_logged', False):
                     self._m2_hit_logged = True
                     self.events.append(f'[x={x:.2f}] M2 녹화 길에 물체 ({hit[0] - x:+.2f} m) -> 장애물 먼저 (늦어도 '
@@ -929,6 +982,9 @@ class M7Replay:
             if d is not None:
                 self._begin_exec(d, None, t, '섬 앞: ' + why)
                 return 0.0, 0.0
+            r = self._try_m2_backup(x, '섬 앞 가운데 차로에서 옮길 곳 없음')
+            if r is not None:
+                return r
             self.why = '섬 앞 가운데 차로: 옮길 곳 없음 -> 정지'
             return 0.0, 0.0
         v_now = p.speed
@@ -963,6 +1019,9 @@ class M7Replay:
                     self._begin_backup(x, g)
                     return 0.0, 0.0
                 if d is None:
+                    r = self._try_m2_backup(x, f'섬 앞에서 막힘 ({why})')
+                    if r is not None:
+                        return r
                     if self.blocked_since is None:
                         self.blocked_since = t
                         self.events.append(f'[x={x:.2f}] 앞 막힘 ({why}) -> 정지하고 기다림')
@@ -1014,15 +1073,38 @@ class M7Replay:
                 return self.track.step(x, y, psi, t, still)
         return self._cruise_cmd(t)
 
-    def _begin_backup(self, x, g):
+    def _try_m2_backup(self, x, why):
+        """섬 앞(M2 시작 자리를 지나침)에서 막혔을 때: M2 녹화 시작 자리까지 후진해서 녹화대로 돌 수 있으면 후진."""
         p = self.p
-        xb = x - p.backup_max
+        if not (p.m2_backup and self.m2_on() and not self.m2_backed):
+            return None
+        x_m2 = self.m2_x()
+        fork = 'A' if self.exit_pref == 1 else ('B' if self.exit_pref == -1 else p.m2_fork_default)
+        key = (self.lane, fork)
+        if key not in self.m2 or not (x_m2 + 0.03 < x <= x_m2 + p.m2_late_max + p.m2_backup_max):
+            return None
+        if self.m2_hit(key, x_m2) is not None:
+            return None
+        return self._begin_m2_backup(x, x_m2, why)
+
+    def _begin_m2_backup(self, x, x_m2, why):
+        p = self.p
+        self.m2_backed = True
+        self._begin_backup(x, None, to_x=x_m2, max_m=p.m2_backup_max + p.m2_late_max)
+        self.events.append(f'[x={x:.2f}] {why} -> M2 녹화 시작 자리까지 {x - x_m2:.2f} m 후진해서 갈림길 녹화대로')
+        return 0.0, 0.0
+
+    def _begin_backup(self, x, g, to_x=None, max_m=None):
+        p = self.p
+        xb = x - (p.backup_max if max_m is None else max_m)
         n = 31
         line = Path([x - (x - xb) * i / (n - 1) for i in range(n)], [self.center(self.lane)] * n, [0.0] * n, -1)
         self.backup = {'x0': x, 'track': Track([line], p, p.backup_speed, p.backup_speed, p.backup_k_e, p.backup_k_psi),
-                       'stopping': False}
+                       'stopping': False, 'to_x': to_x, 'max': (p.backup_max if max_m is None else max_m)}
         self.state = 'BACKUP'
         self.blocked_since = None
+        if to_x is not None:
+            return
         to = (p.backup_to_mm or p.trigger_mm)
         self.events.append(f'[x={x:.2f}] 장애물 {1000 * g:.0f} mm (< {p.backup_if_mm:.0f}) -> {to:.0f} mm까지 후진 '
                            f'(차로 {M2_LANE_NO.get(self.lane)} 가운데 맞추며)')
@@ -1032,8 +1114,11 @@ class M7Replay:
         b = self.backup
         g = self.gap(self.lane)
         to = (p.backup_to_mm or p.trigger_mm) / 1000.0
-        done = (g is None or g >= to - p.brake_k * p.backup_speed or b['track'].done
-                or b['x0'] - x >= p.backup_max)
+        if b.get('to_x') is not None:          # M2 시작 자리까지 (앞 장애물 거리 대신 위치)
+            done = x <= b['to_x'] + p.brake_k * p.backup_speed or b['track'].done or b['x0'] - x >= b['max']
+        else:
+            done = (g is None or g >= to - p.brake_k * p.backup_speed or b['track'].done
+                    or b['x0'] - x >= p.backup_max)
         if done or b['stopping']:
             if b['stopping'] is False:
                 b['stopping'] = t
