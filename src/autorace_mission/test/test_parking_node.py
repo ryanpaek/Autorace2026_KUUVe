@@ -598,7 +598,7 @@ def test_params_yaml_values_from_captain():
     assert p['guard_back'] and p['center_on_sides'] is False and p['follow_col5'] is False   # 11/13 캡틴: 원을 접선까지
     assert p['center_check'] is True       # 11/14 캡틴: 다시 켬 (끝에서 선 밟음). 11/13 15:49엔 끔
     q = _yaml_parking(path_mode=False)
-    assert q['turn_ref'] == 'fixed' and q['fixed_move_mm'] == 870.0 and q['fixed_turn_mm'] == 0.0   # 11/16 캡틴 실차 확정
+    assert q['turn_ref'] == 'fixed' and q['fixed_move_mm'] == 820.0 and list(q['fixed_cells_move_mm']) == [334.0, 820.0, 1328.0] and q['fixed_turn_mm'] == 0.0   # 11/16 캡틴 실차 확정
 
 
 def _step_inp(t, dist, blocked=False, yaw=0.0):
@@ -776,7 +776,7 @@ def test_fixed_turn_mm_ends_turn_early():
 
 
 def test_fixed_defaults_captain_values():
-    assert pn.DEFAULTS['fixed_move_mm'] == 870.0 and pn.DEFAULTS['fixed_turn_mm'] == 0.0 and pn.DEFAULTS['fixed_line_target_mm'] == 56.0
+    assert pn.DEFAULTS['fixed_move_mm'] == 820.0 and pn.DEFAULTS['fixed_turn_mm'] == 0.0 and pn.DEFAULTS['fixed_line_target_mm'] == 56.0
     assert pn.DEFAULTS['fixed_line_target_mm'] == pn.DEFAULTS['front_bumper_from_axle_mm']
 
 

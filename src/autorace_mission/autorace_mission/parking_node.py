@@ -1578,7 +1578,7 @@ DEFAULTS = {
     # 11/17 공지: 빈 칸 위치가 랜덤 (한 칸만 비움) -> 주차선에서 서 있는 동안 라이다로 앞줄 1·2·3번 중 빈 칸을 찾아 직진 거리만 바꿈
     'fixed_detect': True,
     'fixed_detect_sec': 1.0,       # 선에서 서서 라이다를 모으는 시간 (fixed_pause_sec보다 길면 이 시간)
-    'fixed_cells_move_mm': [384.0, 870.0, 1378.0],   # 1·2·3번 칸 직진 거리 (11/17 선배 기록 끝 위치 - 59.6cm, 2번 870 실차)
+    'fixed_cells_move_mm': [334.0, 820.0, 1328.0],   # 1·2·3번 칸 직진 거리 (11/18 실차 -5cm. 선배 기록 기준 384/870/1378)
     'fixed_cell_ranges_mm': [500.0, 1020.0, 1030.0, 1530.0, 1540.0, 2040.0],   # 11/18 캡틴: 칸별 라이다 앞 거리 범위 (실차 확인 필요)
     'fixed_cell_y_near_mm': 330.0, # 칸 상자 옆 범위 (오른쪽, 차 중심에서) 가까운 쪽
     'fixed_cell_y_far_mm': 750.0,  #   먼 쪽 (리모 앞면은 약 400~500)
@@ -1593,7 +1593,7 @@ DEFAULTS = {
     'fixed_slow_speed': 0.10,  #   선 25cm 앞부터 이 속도 이하
     'fixed_line_max_mm': 4000.0,   # 주차 모드 시작 뒤 이만큼 가도 선을 못 보면 FAIL_NO_LINE (정지)
     'fixed_pause_sec': 0.3,    # 선에서 멈추는 시간
-    'fixed_move_mm': 870.0,    # 멈춘 자리부터 직진 거리 (11/16 캡틴 실차 확정)
+    'fixed_move_mm': 820.0,    # 칸 감지 꺼짐일 때 직진 거리 (11/18 실차 -5cm, 11/16 870)
     'fixed_move_speed': 0.10,
     'fixed_heading_gain': 2.0,     # 직진 중 멈출 때 방향 유지 (1/m per rad)
     'fixed_turn_pause_sec': 0.3,   # 104cm 뒤 멈춤 (끝 presteer_sec 동안 조향 미리 꺾기). 0이면 멈추지 않고 바로 꺾음
