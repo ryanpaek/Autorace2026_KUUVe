@@ -22,10 +22,18 @@
     m2_replay: true            # 11/17: M7 끝 지점에서 (지금 차로, A/B) 녹화 m2_{1|2|3}-{A|B}.csv 하나 재생 -> 갈래 안에서 끝
     m2_start_gap: 1.00         # ★ M2 녹화 시작 자세: 앞범퍼 ~ 섬 앞 꼭짓점 (m). 녹화할 때 잰 거리와 같게
     m2_fork_default: 'A'       #   A/B 표지를 그때까지 못 봤을 때
+    sign_ignore: true          # 11/18: 섬 앞 꼭짓점 근처 작은 덩어리(갈림길 표지판)는 장애물로 안 봄 (닿기 직전 안전 정지엔 씀)
+    sign_zone_before: 0.40     #   꼭짓점 앞 이만큼 ~ 뒤 sign_zone_after, 가운데 ± sign_zone_half 안에서
+    sign_max_size: 0.12        #   앞뒤·옆 크기 둘 다 12 cm 안이면 표지판 (LIMO 폭 23 cm)
+    m2_backup: true            # 11/18: M2 녹화 길이 지금 자리에선 막히고 녹화 시작 자리에선 되면 거기까지 후진 후 녹화대로
+    m2_backup_max: 0.80        #   M2 시작 자리를 이만큼(+m2_late_max) 넘게 지났으면 안 함
     m2_test_start: false       # 시험용: 켜지는 자리를 곧바로 M2 시작 지점으로 (M7 건너뛰고 갈림길만)
     start_lane_no: 0           # 시험용: 켤 때 차로 번호 1/2/3 (0 = 2차선 가정, 카메라 차로 번호로 고쳐짐)
-    backup_if_mm: 350.0        # 11/17: 앞 장애물이 이보다 가까우면(차로 변경 못 함) 차로 가운데 맞추며 후진 (0 = 끔)
-    backup_to_mm: 0.0          #   이 거리까지 후진 (0 = trigger_mm = 녹화 시작 거리 -> 녹화 그대로 재생). 350이면 350까지만
+    backup_if_mm: 460.0        # 11/18 시험: 앞 장애물이 46 cm보다 가까우면 후진 (녹화 경로가 여유 3 cm로 통과하는 최소 거리). 11/17 350
+    backup_to_mm: 500.0        #   50 cm까지 후진 (차선 노드로 가운데 맞추며) -> 그 자리에서 바로 재생
+    exec_from_here: true       # 11/18 시험: 54~46 cm 사이면 녹화 경로를 지금 위치에 붙여 바로 재생
+    backup_when_blocked: true  #   46~50 cm인데 지금 자세로 경로가 닿으면 50 cm까지 후진
+    backup_lane_center: true   #   후진 중 가운데 맞추기를 차선 노드 offset/heading으로 (안 보이면 위치 추정)
     backup_speed: 0.12
     m2_mirror: true            #   없는 파일은 좌우 대칭 파일 뒤집어 씀 (1-A<->3-B, 1-B<->3-A, 2-A<->2-B)
     accel_reverse: true        # 11/17: 조종기(RC) 후진도 거리에서 빼기 (출발 가속도 방향으로 판단, 축은 자동으로 배움)
@@ -36,3 +44,9 @@
     plan_ahead: true           # 11/17: 트리거 전에도 장애물 위치·빠질 차로를 미리 계산 (/avoid/state plan, 조향엔 안 씀)
     path_left: ''              # 비우면 share/limo_obstacle_avoid/paths/m7_left.csv
     path_right: ''             #        .../m7_right.csv (한쪽만 있으면 거울상, 둘 다 없으면 기본 S자)
+    # 11/18 시험 브랜치: 재생 중 노란선 안전장치 (끄기: ros2 param set /avoid_node exec_yellow_guard false)
+    exec_yellow_guard: true
+    eyg_clear_mm: 50.0         #   바퀴~노란선 여유가 이 밑으로 떨어질 때만 (최대 조향·지연·앞 모서리 고려한 예측값)
+    eyg_psi_deg: 2.0           #   노란선 쪽으로 이만큼 이상 틀어져 있을 때만
+    eyg_arm_frac: 0.30         #   재생 진행률 30% 지나야 켬
+    eyg_frames: 2              #   연속 2프레임
