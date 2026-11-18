@@ -626,3 +626,9 @@ class MapPose:
             right = dx * sn - dy * c
             out.append((round(right, 1), round(fwd + self.front_axle_mm, 1)))
         return out
+
+
+def m2_end_anchor_s(tip_s, x_m, section_m, s_now, max_mm):
+    """M2 녹화 재생 끝: 섬 앞 꼭짓점 s + (회피 노드 x - 섬까지 거리). 지금 s와 max_mm 넘게 다르면 None."""
+    s_new = tip_s + 1000.0 * (float(x_m) - float(section_m))
+    return None if abs(s_new - s_now) > max_mm else s_new

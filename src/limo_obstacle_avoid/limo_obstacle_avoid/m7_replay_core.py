@@ -1217,7 +1217,7 @@ class M7Replay:
         return {'state': 'RUN' if self.state not in ('IDLE', 'DONE') else self.state,
                 'phase': self.state, 'x': round(x, 3), 'y': round(y, 3), 'psi_deg': round(math.degrees(psi), 1),
                 'now_lane': self.lane, 'now_lane_no': M2_LANE_NO.get(self.lane), 'target': self.target,
-                'exit_pref': self.exit_pref,
+                'exit_pref': self.exit_pref, 'section_m': round(self.p.section_length, 3),
                 'm2': (None if not self.m2_on() else
                        {'run': None if self.m2_run is None else m2_name(*self.m2_run),
                         'start_in_m': round(self.m2_x() - x, 2), 'files': len(self.m2)}),
