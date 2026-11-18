@@ -7,7 +7,7 @@ lane_node + mission_node(LANE_ONLY)만 띄운다. mission_node가 /lane/cmd_vel�
 11/06 고도화 (기본 전부 꺼짐):
   memory_mm:=600.0        차선 기억 (놓쳐도 최근 본 중앙선으로)
   arc_mm:=1000.0          사라진 안쪽 선 원 이어 쓰기 (코너에서 바깥 선만 보일 때 늦게 꺾는 문제)
-  steer_gain:=1.3         작은 조향 보정 (브리지)
+  steer_gain:=1.3         작은 조향 보정 (브리지, 11/18부터 기본 1.3. 끄려면 1.0)
   route:=true             도면 경로 지도 켜기. 차를 START 체커(앞바퀴)에 두고 켜면 s=0으로 시작.
                           다른 곳에서 출발하면 ros2 topic pub --once /route/set_s std_msgs/msg/Float32 "{data: <s>}"
   ff:=0.3                 도면 곡률 미리 넣기 비율 (route:=true일 때만). 선이 약할 때(한쪽만·짧음)만 섞고,
@@ -49,7 +49,7 @@ def generate_launch_description():
         DeclareLaunchArgument('mask', default_value='hsv', description='hsv | model'),
         DeclareLaunchArgument('memory_mm', default_value='0.0'),
         DeclareLaunchArgument('arc_mm', default_value='0.0'),
-        DeclareLaunchArgument('steer_gain', default_value='1.0'),
+        DeclareLaunchArgument('steer_gain', default_value='1.3'),
         DeclareLaunchArgument('route', default_value='false'),
         DeclareLaunchArgument('ff', default_value='0.0'),
         DeclareLaunchArgument('preview_slow', default_value='0.0'),

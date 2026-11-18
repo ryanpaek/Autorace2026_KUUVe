@@ -32,7 +32,7 @@ from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 from rcl_interfaces.msg import ParameterDescriptor, SetParametersResult
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from sensor_msgs.msg import CompressedImage, Image, Imu
 from std_msgs.msg import String
 
@@ -83,6 +83,10 @@ class LaneNode(Node):
         self.declare_parameter('lane_mask_source', 'hsv')   # 'hsv' | 'model'
         self.declare_parameter('seg_model_path', '')        # lane_seg.onnx
         self.declare_parameter('seg_threshold', 0.5)
+        # 11/18: 이미지 구독 큐 깊이. 예전엔 sensor_data(깊이 5)라 처리(약 95 ms)가 밀리면 지난 프레임이
+        #   쌓여 차례로 처리됨 -> 1118_04 bag: 카메라 찍힘 -> /lane/status 중앙값 340 ms, 10 Hz.
+        #   1 = 항상 가장 최근 프레임만 (처리 중 들어온 프레임은 버려짐)
+        self.declare_parameter('image_qos_depth', 1)
         # --- LaneParams 전부를 ROS 파라미터로 ---
         # dynamic_typing: `ros2 param set ... lookahead_mm 600`처럼 정수를 줘도 거부하지 않게
         defaults = LaneParams()
@@ -107,11 +111,13 @@ class LaneNode(Node):
         self._last_warn = 0.0
 
         topic = self.get_parameter('image_topic').value
+        img_qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
+                             history=HistoryPolicy.KEEP_LAST,
+                             depth=max(1, int(self.get_parameter('image_qos_depth').value)))
         if topic.endswith('/compressed'):
-            self.create_subscription(CompressedImage, topic, self._on_compressed,
-                                     qos_profile_sensor_data)
+            self.create_subscription(CompressedImage, topic, self._on_compressed, img_qos)
         else:
-            self.create_subscription(Image, topic, self._on_image, qos_profile_sensor_data)
+            self.create_subscription(Image, topic, self._on_image, img_qos)
         self.create_subscription(Imu, self.get_parameter('imu_topic').value,
                                  self._on_imu, qos_profile_sensor_data)
         self.create_subscription(String, '/lane/config', self._on_config, 10)
@@ -220,6 +226,10 @@ class LaneNode(Node):
 
     def _process(self, bgr, header):
         self.last_image_time = time.monotonic()
+        t_start = self.last_image_time
+        # 11/18: 이 프레임이 찍힌 뒤 처리 시작까지 걸린 시간 (큐에 밀렸는지 bag에서 보기)
+        now = self.get_clock().now().nanoseconds * 1e-9
+        img_age_ms = (now - (header.stamp.sec + header.stamp.nanosec * 1e-9)) * 1e3
         if not self.cfg.calibrated and self.get_parameter('require_calibration').value:
             self._publish_cmd(0.0, 0.0)
             self._warn('BEV 미캘리브레이션: 정지 명령만 발행 중')
@@ -246,6 +256,8 @@ class LaneNode(Node):
         st['mode'] = self.follower.mode
         st['speed_cmd'] = v
         st['stamp'] = header.stamp.sec + header.stamp.nanosec * 1e-9
+        st['img_age_ms'] = round(img_age_ms, 1)                            # 찍힘 -> 처리 시작
+        st['proc_ms'] = round((time.monotonic() - t_start) * 1e3, 1)       # 처리 시간
         self.status_pub.publish(String(data=json.dumps(st)))
 
         self.frame_count += 1

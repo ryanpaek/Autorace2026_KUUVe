@@ -104,3 +104,14 @@ def test_steer_gain():
     assert abs(d2 - 1.2 * d1) < 1e-9
     v, d3 = twist_to_ackermann(0.2, 0.2 * 3.0, steer_gain=1.2)
     assert d3 == 0.40                                # 최대 조향은 그대로
+
+
+def test_steer_trim_1118():
+    v, d0 = twist_to_ackermann(0.2, 0.0, steer_trim=0.015)
+    assert abs(d0 - 0.015) < 1e-9                    # 직진 명령에 0점 보정만
+    v, ds = twist_to_ackermann(0.0, 0.0, steer_trim=0.015)
+    assert ds == 0.0                                 # 정지 중엔 조향 0
+    v, dm = twist_to_ackermann(0.2, 0.2 * 3.0, steer_trim=0.015)
+    assert dm == 0.40                                # 최대 조향은 넘지 않음
+    v, dn = twist_to_ackermann(0.2, -0.2 * 3.0, steer_trim=0.015)
+    assert dn == -0.40
