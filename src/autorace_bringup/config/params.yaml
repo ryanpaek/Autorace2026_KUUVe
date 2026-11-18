@@ -7,7 +7,7 @@ lane_node:
     image_topic: /camera/color/image_raw   # TODO 첫날 ros2 topic list로 확인
     imu_topic: /imu
     require_calibration: true              # BEV yaml이 calibrated:false면 정지 명령만
-    base_speed: 0.30
+    base_speed: 0.50                       # 11/18 0.30 -> 0.50 (미션 노드가 덮어씀)
     min_speed: 0.08                        # TODO 실측: 이보다 느리면 차가 안 움직이는 속도
     publish_debug: true
     debug_every: 3
@@ -47,8 +47,8 @@ mission_node:
     odom_topic: /odom                      # TODO 드라이버에 따라 /wheel/odom
     imu_topic: /imu
     tick_hz: 20.0
-    max_speed: 0.45
-    base_speed: 0.30
+    max_speed: 0.55                        # 11/18 0.45 -> 0.55 (평상시 0.50 + 여유)
+    base_speed: 0.50                       # 11/18 0.30 -> 0.50 평상시 속도 (서행·M7·정지 접근 속도는 그대로)
     slow_speed: 0.20                       # 서행 (규정 최대 0.2, 11/09 팀 결정)
     approach_speed: 0.18
     m7_speed: 0.20                         # 11/12 밤: M7 전체(코너 차선 주행 + 회피 노드 avoid_params.yaml) 0.20
@@ -343,6 +343,7 @@ ackermann_bridge:
     #   0.2로 계산하면 명령보다 약 11% 덜 꺾임 (docs/CHANGES_20261106_M7.md에 적혀 있었으나 안 고쳐져 있었음)
     wheelbase: 0.222
     max_steer: 0.40
+    max_speed: 0.60                        # 11/18: 최종 안전 상한 (기본 0.5면 평상시 0.50이 딱 걸림)
     # 11/15 (1114 bag, 축거 0.2로 돈 판): R640 코너 실제 곡률(IMU)이 명령의 약 80% -> 필요 배율 약 1.25.
     #   축거 0.222(약 1.11배) x 차선 코너 배율 corner_kappa_gain 1.1 = 코너에서 약 1.22배라 여기는 1.0 (겹치면 1.34배로 안쪽 침범).
     #   실차에서 아직 바깥으로 밀리면 1.05~1.1
