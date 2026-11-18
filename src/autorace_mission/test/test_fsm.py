@@ -626,6 +626,31 @@ def test_m2_exit_lane_mode_only_with_corner_preview():
         assert fsm.m7_corner_k(7020.0, _m.radians(-90.0)) is None
 
 
+def test_m2_exit_corner_reference_is_lane_axis_not_taper_heading():
+    """11/18 실차: M2_EXIT는 합류 테이퍼 비스듬한 중에 시작. 기준 방향을 그때 방향으로 잡으면 곧게 펴는 것만으로 '코너 시작'이 되어
+    코너 앞에서 코너 곡률 전부 (A: 일찍 꺾어 안쪽, B: 왼쪽 비스듬을 오른쪽 코너가 덮음). 직선 방향 기준 + 코너 시작 전은 거리로만."""
+    import math as _m
+    for choice, taper_deg in (('A', -25.0), ('B', 25.0)):
+        fsm = MissionFSM({'start_state': 'M2_FORK', 'cones_source_ready': True, 'odom_jump_mm': 1e9})
+        fsm.fork_choice = choice
+        fsm.axis_yaw = 0.0                                         # 3차선 직선 방향
+        fsm._next(Inputs(t=0.0, dist_mm=5000.0, yaw=_m.radians(taper_deg)), f'fork {choice} done')
+        assert fsm.state == 'M2_EXIT'
+        start = fsm.m7c[3]
+        k = fsm.m7_corner_k(5100.0, 0.0)                         # 테이퍼 끝나 곧게 폄 (코너는 아직 멂)
+        assert k is not None and k[0] == 0.0                       # 예전: 25° '돎' -> 처음부터 코너 곡률
+        cmd = fsm.step(Inputs(t=0.1, dist_mm=5100.0, yaw=0.0, lane={'status': 'BOTH'}))
+        assert cmd.lane.get('route_corner_zero_lane') is True      # 코너 앞은 차선 그대로
+        k = fsm.m7_corner_k(5000.0 + start, _m.radians(-10.0))   # 코너 시작에서 오른쪽으로 10° -> 코너 곡률 전부
+        assert min(k) < -1.0 and k[0] < -1.0
+        fsm.m7_corner_k(5000.0 + start + 900, _m.radians(-86.0))  # 직선 기준 86° -> 끝
+        assert fsm.m7c is None
+    old = MissionFSM({'start_state': 'M2_FORK', 'cones_source_ready': True, 'odom_jump_mm': 1e9, 'm2x_corner_axis': False})
+    old.fork_choice, old.axis_yaw = 'A', 0.0
+    old._next(Inputs(t=0.0, dist_mm=5000.0, yaw=_m.radians(-25.0)), 'fork A done')
+    assert old.m7_corner_k(5100.0, 0.0)[0] < -1.0                  # 끄면 예전 (기준 = 들어올 때 방향)
+
+
 def test_m2_exit_off_keeps_old_m8_approach():
     fsm = MissionFSM({'start_state': 'M2_FORK', 'm2_exit': False})
     fsm.fork_choice = 'A'

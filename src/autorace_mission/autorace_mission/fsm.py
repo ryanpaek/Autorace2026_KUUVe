@@ -153,6 +153,15 @@ DEFAULT_PARAMS = {
     'm2_exit_after_island_mm': 200.0,  # M2_EXIT 시작 = 섬 왼쪽 끝(m2_island_end) + 이만큼 (도면 위치). 도면에 없으면 예전처럼 합류 끝
     #   1114_01 리플레이(차선 노드에 실제 영상): 섬 끝부터 normal이면 M2 뒤쪽 선 없음 128 -> 104프레임, 코너 161 -> 0프레임
     'm8_corner_preview': True,       # 11/12 밤: M2 끝 뒤 좌하단 코너도 같은 IMU 코너 미리보기
+    # 11/18 실차: A는 합류 뒤 코너에서 크게 꺾어 안쪽 선을 밟고, B는 합류 왼쪽 비스듬한 곳을 못 따라 직진.
+    #   원인 1) M2_EXIT는 합류 테이퍼 한가운데(섬 끝 + 200)에서 시작 -> 코너 미리보기 기준 방향을 그때의 '비스듬한' 방향으로 잡아
+    #           곧게 펴는 것만으로 '코너를 5° 돌았다'가 되어 코너 앞에서 바로 코너 곡률 전부 (A 일찍 꺾음, B 왼쪽을 오른쪽 코너가 덮음)
+    #   원인 2) 미리보기가 켜진 동안 코너 앞(미리보기 곡률 0)에서도 차선과 0을 80% 섞어 차선 조향이 20%로 줄었음
+    'm2x_corner_axis': True,         # 기준 방향 = 3차선 직선 방향(없으면 M2 시작 방향), 코너 쪽으로 돈 각만 셈
+    'm2x_corner_gate_mm': 200.0,     #   코너 시작(거리) - 이만큼 전에는 각도로 코너 시작이라 보지 않음 (합류 비스듬은 거리로만)
+    'm2x_zero_lane': True,           # 코너 앞(미리보기 곡률 0)은 차선 조향 그대로 (차선 노드 route_corner_zero_lane)
+    'm2_merge_speed': 0.0,           # 합류 S자 속도 상한 (0 = approach_speed 그대로). params.yaml에서 정함
+    'm2x_speed': 0.0,                # M2_EXIT(합류 끝 ~ 라바콘 시작선) 속도 상한 (0 = 그대로)
     'm8_keep_fork_mm': 2500.0,       # 11/12 밤 실차: M2 끝(합류 테이퍼)에서 normal로 바꾸자마자 선을 놓쳐 차선 무시하고 감.
                                      #   M2에서 넘어오면 한쪽 선 모드를 코너를 다 돌 때까지 유지 (이 거리는 안전 상한, 0이면 끔):
                                      #   합류 ~ 코너 앞: 갈림길에서 따라가던 바깥선(A=왼쪽, B=오른쪽)
@@ -432,7 +441,13 @@ class MissionFSM:
             me = self._rp('m2_merge_end')
             self.m2x_extra = (max(0.0, me - inp.route_s) if me is not None and inp.route_s is not None
                               else max(0.0, 554.0 - self.p.get('m2_exit_after_island_mm', 200.0)))
-            self.m7c = (inp.yaw, inp.dist_mm, 'M2_EXIT', self.p['m8_corner_start_mm'] + self.m2x_extra) if use else None
+            yaw0 = inp.yaw
+            if self.p.get('m2x_corner_axis', True):
+                ax = getattr(self, 'axis_yaw', None)
+                if ax is None:
+                    ax = getattr(self, 'm2_yaw', None)
+                yaw0 = ax if ax is not None else inp.yaw
+            self.m7c = (yaw0, inp.dist_mm, 'M2_EXIT', self.p['m8_corner_start_mm'] + self.m2x_extra) if use else None
             use = self.p.get('m8_corner_turn_deg', 75.0) > 0 and why not in ('manual', 'init')
             self.m8_corner.start(inp.yaw if use else None, inp.dist_mm)
             self.m8_fork_hold = False
@@ -517,6 +532,11 @@ class MissionFSM:
         r = p['m7_corner_r_mm']
         turned = abs(math.atan2(math.sin(yaw - yaw0), math.cos(yaw - yaw0)))
         since = dist_mm - d0
+        if self.state == 'M2_EXIT' and p.get('m2x_corner_axis', True):
+            # 11/18: 직선 방향 기준, 코너 쪽으로 돈 각만. 코너 시작 전(합류 비스듬)은 거리로만
+            turned = max(0.0, p['m7_corner_dir'] * math.atan2(math.sin(yaw - yaw0), math.cos(yaw - yaw0)))
+            if since < start_mm - p.get('m2x_corner_gate_mm', 200.0):
+                turned = min(turned, math.radians(4.9))
         arc = r * math.pi / 2.0
         if turned >= math.radians(p['m7_corner_done_deg']) or since > start_mm + arc + p['m7_corner_give_up_mm']:
             self.m7c = None                              # 다 돎 (또는 너무 지나 IMU를 못 믿음) -> 끝
@@ -1031,10 +1051,22 @@ class MissionFSM:
         yaw_ref = math.atan2(math.sin(yaw_ref), math.cos(yaw_ref))
         if self._lane_first(inp):
             # 선이 보이면 S자 위치 계산은 계속(선을 놓치면 이어서 씀)하고 조향은 차선으로
-            return Command('lane', self._lane(p['approach_speed']),
+            return Command('lane', self._lane(self._m2x_speed(p['approach_speed']), **self._m2x_kw()),
                            note=f'M2 merge {u:.0f}/{L:.0f}mm by lane (y {m["y"]:+.0f}mm)')
-        return Command('lane', self._lane(p['approach_speed'], 'heading', yaw_ref=round(yaw_ref, 4)),
+        return Command('lane', self._lane(self._m2x_speed(p['approach_speed']), 'heading', yaw_ref=round(yaw_ref, 4),
+                                          **self._m2x_kw()),
                        note=f'M2 merge {u:.0f}/{L:.0f}mm y {m["y"]:+.0f}mm')
+
+    def _m2x_kw(self) -> dict:
+        """11/18: M2_EXIT 동안만 차선 노드에 '코너 앞(미리보기 0)은 차선 그대로' (m2x_zero_lane)"""
+        if self.state == 'M2_EXIT' and self.p.get('m2x_zero_lane', True):
+            return {'route_corner_zero_lane': True}
+        return {}
+
+    def _m2x_speed(self, speed: float) -> float:
+        """11/18: 합류 S자(M2 끝 ~ M2_EXIT) 속도 상한 m2_merge_speed (0 = 그대로)"""
+        cap = self.p.get('m2_merge_speed', 0.0)
+        return min(speed, cap) if cap > 0 else speed
 
     def _cones_entry(self, inp, who: str) -> Optional[str]:
         """라바콘 시작선에 왔나 (들어갈 이유 문자열) / 아직이면 None. M2_EXIT와 (연습) M8 접근이 같이 씀.
@@ -1105,7 +1137,10 @@ class MissionFSM:
         c = getattr(self, 'm7c', None)
         corner_on = c is not None and c[2] == 'M2_EXIT'
         speed = min(p['slow_speed'], p.get('m8_hold_speed', p['slow_speed'])) if corner_on else p['slow_speed']
-        return Command('lane', self._lane(speed))
+        cap = p.get('m2x_speed', 0.0)
+        if cap > 0:
+            speed = min(speed, cap)                     # 11/18: 합류 끝 ~ 코너 (선을 쉽게 놓쳐 천천히)
+        return Command('lane', self._lane(speed, **self._m2x_kw()))
 
     def _s_M8_CONES(self, inp):
         """라바콘: 접근(차선) -> cones(obstacle 노드가 콘 사이 경로 추종) -> handover -> M1.
