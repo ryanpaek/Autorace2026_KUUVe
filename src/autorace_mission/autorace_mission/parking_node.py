@@ -1257,7 +1257,7 @@ class ParkingV2:
     # 11/16 캡틴 '고정 거리' 방식 (turn_ref: fixed). 라이다 판단 없이 선 + 오도메트리 + IMU만 씀.
     # ① F_LINE   차선 따라가며 주차선(흰 가로선, 처음엔 25cm보다 먼 것만)을 찾고, 앞바퀴가 선 fixed_line_target_mm 앞에 오면 정지
     #            (선이 카메라 아래로 사라지면 마지막으로 본 거리 - 오도메트리로 셈. fsm.StopApproach와 같은 원리)
-    # ② F_PAUSE  fixed_pause_sec 정지 (= 주차 모드로 바뀜)
+    # ② F_PAUSE  fixed_pause_sec 정지 (= 주차 모드로 바뀜). 11/19: 막힌 칸 2개 안 보이면 가짜 선 -> ①로
     # ③ F_MOVE   멈춘 자리부터 오도메트리 fixed_move_mm 직진 (멈출 때 방향 유지)
     # ④ F_TPAUSE fixed_turn_pause_sec 정지 + 끝 presteer_sec 동안 오른쪽 최대 조향 미리 꺾기
     # ⑤ F_TURN   오른쪽 최대 조향 전진. fixed_turn_deg(IMU) 돌거나 fixed_turn_mm(>0이면) 가면 끝
@@ -1325,6 +1325,14 @@ class ParkingV2:
             if getattr(self, 'detect_extra', False):
                 wait += p['fixed_detect_sec']
             if inp['t'] - self.t_phase >= wait:
+                # 11/19 캡틴: 진짜 주차선인지 확인. 1·2·3번 중 2칸은 항상 막혀 있으므로 막힌 칸이 fixed_need_occ(2)개 밑이면
+                # 가짜 선(횡단보도 끝 선 등. 신호등에서 일찍 출발 판정 -> 주차 모드가 일찍 켜졌을 때) -> 그 선 버리고 다시 찾기
+                if self._fake_line():
+                    self.rejects = getattr(self, 'rejects', 0) + 1
+                    self.reject_log = getattr(self, 'reject_log', []) + [{'occ': self.occ_n, 'avg': self.cell_avg}]
+                    self.end_d, self.end_at, self.cell_cnt, self.detect_extra = None, None, None, False
+                    self._enter('F_LINE', inp)
+                    return self._out(inp['lane_v'], None)
                 cell = self._pick_cell()
                 if cell is None:                            # A·B 불일치 첫 번째 -> 1초 더 모음
                     self.detect_extra = True
@@ -1452,6 +1460,20 @@ class ParkingV2:
         self.cell_src = 'mismatch_b'
         return b
 
+    def _fake_line(self):
+        """막힌 칸(A 덩어리 또는 B 점 fixed_occ_min_pts 이상)이 fixed_need_occ 밑이면 True (= 가짜 선).
+        감지 꺼짐·강제 칸·버린 횟수 fixed_max_rejects 넘음이면 False (그대로 주차)."""
+        p = self.p
+        frames = getattr(self, 'cell_frames', 0)
+        if (not p['fixed_detect'] or p['fixed_need_occ'] <= 0 or int(p['fixed_force_cell']) in (1, 2, 3)
+                or not frames or getattr(self, 'rejects', 0) >= p['fixed_max_rejects']):
+            return False
+        avg = [n / float(frames) for n in self.cell_cnt]
+        self.cell_avg = [round(a, 1) for a in avg]
+        occ = [self.cell_occ[c] * 2 >= frames or avg[c] >= p['fixed_occ_min_pts'] for c in range(3)]
+        self.occ_n = sum(occ)
+        return self.occ_n < p['fixed_need_occ']
+
     def _fixed_move(self):
         p, c = self.p, getattr(self, 'fixed_cell', None)
         cells = list(p['fixed_cells_move_mm'])
@@ -1576,7 +1598,7 @@ class ParkingV2:
         """/parking/state에 실을 내용."""
         return {'phase': self.phase, 'done': self.phase == 'DONE', 'result': self.result,
                 'backs': self.backs, 'realigns': self.realigns, 'last_err': self.err,
-                'back_mm': getattr(self, 'back_done_mm', None), 'cell': getattr(self, 'fixed_cell', None), 'cell_src': getattr(self, 'cell_src', None), 'cell_a': getattr(self, 'cell_a', None), 'cell_b': getattr(self, 'cell_b', None), 'cell_avg': getattr(self, 'cell_avg', None), 'row': self.row, 'stop_how': self.stop_how, 'trigger': self.trigger, 'turn_ref': self.turn_ref_used, 'corner_s': None if self.corner_s is None else round(self.corner_s), 'corner_n': self.corner_n, 'turn_at': self.turn_at, 'target_s': None if self.target_s is None else round(self.target_s), 'target_src': self.target_src, 'n_c5': len(self.tgt_c5), 'n_pm': len(self.tgt_pm), 'q_s': self.q_s, 'r_meas': None if self.r_meas is None else round(self.r_meas), 'fix_n': self.fix_n, 'fix_pred': self.fix_pred,
+                'back_mm': getattr(self, 'back_done_mm', None), 'rejects': getattr(self, 'rejects', 0), 'occ_n': getattr(self, 'occ_n', None), 'cell': getattr(self, 'fixed_cell', None), 'cell_src': getattr(self, 'cell_src', None), 'cell_a': getattr(self, 'cell_a', None), 'cell_b': getattr(self, 'cell_b', None), 'cell_avg': getattr(self, 'cell_avg', None), 'row': self.row, 'stop_how': self.stop_how, 'trigger': self.trigger, 'turn_ref': self.turn_ref_used, 'corner_s': None if self.corner_s is None else round(self.corner_s), 'corner_n': self.corner_n, 'turn_at': self.turn_at, 'target_s': None if self.target_s is None else round(self.target_s), 'target_src': self.target_src, 'n_c5': len(self.tgt_c5), 'n_pm': len(self.tgt_pm), 'q_s': self.q_s, 'r_meas': None if self.r_meas is None else round(self.r_meas), 'fix_n': self.fix_n, 'fix_pred': self.fix_pred,
                 'end_mm': None if self.end_d is None else round(self.end_d)}
 
 
@@ -1609,6 +1631,9 @@ DEFAULTS = {
     'fixed_blob_min_pts': 2,       # A: 이만큼 점이 있는 덩어리만 물체로 봄
     'fixed_default_cell': 2,       # 감지 꺼짐일 때
     'fixed_force_cell': 0,         # 1~3이면 감지 무시하고 그 칸 (시험용)
+    'fixed_need_occ': 2,           # 11/19: 선에서 막힌 칸이 이만큼 안 보이면 가짜 선 -> 다시 찾기 (0 = 확인 안 함)
+    'fixed_occ_min_pts': 2.0,      #   B: 장면당 점이 이만큼이면 막힌 칸 (A 덩어리와 둘 중 하나)
+    'fixed_max_rejects': 3,        #   가짜 선을 이만큼 버리면 그다음 선은 확인 없이 주차
     'fixed_line_target_mm': 56.0,   # 앞바퀴가 주차선 이만큼 앞에서 정지 (11/16 캡틴: 앞범퍼가 선에 닿게 = front_bumper_from_axle_mm)
     'fixed_first_min_mm': 250.0,   # 처음 잡는 주차선은 앞바퀴에서 이보다 멀리 보인 것만 (횡단보도 끝 선 무시)
     'fixed_brake_mm': 0.0,     #   정지 명령 뒤 밀리는 거리 (미측정 -> 0). 실차에서 지나치면 그만큼 넣기

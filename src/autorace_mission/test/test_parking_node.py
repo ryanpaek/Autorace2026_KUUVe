@@ -867,3 +867,39 @@ def test_fixed_back_zero_skips():
     out, log = {}, []
     drive([1, 3, 4, 5, 6], 2, dict(FIXED, fixed_back_mm=0.0), y0=290.0, r_min=590.0, out=out, log=log)
     assert 'F_BACK' not in [i['phase'] for i in log]
+
+
+# ---- 11/19 캡틴: 가짜 선(횡단보도 끝 선) 거르기 ----
+def _fixed_two_lines(fake_at, real_at, empty=2, need=2):
+    """1차원 시험: 앞바퀴 기준 선 두 개. 진짜 선 근처에서만 1·2·3번 중 빈 칸 빼고 점을 준다."""
+    lg = pn.ParkingV2(dict(pn.DEFAULTS, **dict(FIXED, fixed_need_occ=need)))
+    d, info, stops = 0.0, None, []
+    for i in range(4000):
+        ls = sorted([x - d for x in (fake_at, real_at) if 60.0 <= x - d <= 700.0])
+        pts = []
+        if abs((real_at - d) - 56.0) < 80.0:                     # 진짜 선에 서 있을 때만 리모가 보임
+            for c in range(3):
+                if c + 1 != empty:
+                    x0, x1, y0, y1 = lg._cell_box(c)
+                    pts += [((x0 + x1) / 2 + k * 15.0, -450.0) for k in range(-3, 4)]
+        prev = lg.phase
+        v, k, info = lg.step({'t': i * 0.05, 'dist_mm': d, 'yaw': 0.0, 'lane_v': 0.18, 'lane_w': 0.0,
+                              'stoplines_mm': ls, 'clusters': [], 'blocked': False, 'points_far': pts})
+        if lg.phase == 'F_PAUSE' and prev != 'F_PAUSE':
+            stops.append(round(d))
+        d += abs(v) * 50.0
+        if info['done'] or lg.phase == 'F_MOVE':
+            break
+    return lg, stops
+
+
+def test_fixed_rejects_crosswalk_line_then_parks_at_real_line():
+    lg, stops = _fixed_two_lines(fake_at=400.0, real_at=2300.0, empty=1)
+    assert len(stops) == 2 and lg.rejects == 1
+    assert stops[1] == pytest.approx(2300.0 - 56.0, abs=20.0)
+    assert lg.fixed_cell == 1
+
+
+def test_fixed_need_occ_zero_keeps_old_behavior():
+    lg, stops = _fixed_two_lines(fake_at=400.0, real_at=2300.0, need=0)
+    assert len(stops) == 1 and getattr(lg, 'rejects', 0) == 0
