@@ -32,11 +32,6 @@
     accel_sign: 0              #   0 = 배움 / 1 = 가속도 +x가 앞 / -1 = 뒤 (고정)
     hit_margin: 0.03
     still_max_s: 1.0           # 11/17 밤: '완전히 섰나'(odom) 최대 기다림. 예전엔 odom이 1~2 mm만 흔들려도 재생 중단 뒤 영원히 서 있었음
-    blocked_backup: true       #   옆 차로 막힘 + 앞 장애물이 trigger보다 가까우면 1초 뒤 trigger까지 후진해서 다시 판단 (최대 2번)
-    blocked_backup_s: 1.0
-    blocked_backup_max: 2
-    cruise_lane_gate: 0.20     #   카메라 옆 오차 vs 위치 추정이 20 cm 넘게 다르면 차선 노드가 옆 차로 선 쌍을 잡은 것 -> 위치 추정으로 지금 차로 (0 = 끔)
-    cruise_gate_adopt_s: 2.0   #   2초 넘게 계속 다르면 카메라를 믿고 위치 추정을 고침
     cruise_lane: true          # 11/17: 재생 전(직진)은 차선 기반 조향만 (/lane/status 곡률 그대로). 차선을 놓친 동안만 위치 추정
     plan_ahead: true           # 11/17: 트리거 전에도 장애물 위치·빠질 차로를 미리 계산 (/avoid/state plan, 조향엔 안 씀)
     path_left: ''              # 비우면 share/limo_obstacle_avoid/paths/m7_left.csv

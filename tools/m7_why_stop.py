@@ -174,7 +174,7 @@ class Why(Node):
                 if src == 'obstacle' and av:
                     # 11/17 밤: 출처가 회피(재생) 노드면 그 노드가 왜 0을 내는지 바로 (phase/why/stop)
                     out.append(f'   -> 재생 노드: phase={av.get("phase")} why={av.get("why") or "-"} '
-                               f'stop={av.get("stop") or "-"} 막힘후진={av.get("backup")} 차로 {av.get("lane_no")}'
+                               f'stop={av.get("stop") or "-"} 후진={av.get("backup")} 차로 {av.get("lane_no")}'
                                f' 카메라차로 {av.get("cam_lane_no")} 조향={av.get("steer")}')
         return out
 
