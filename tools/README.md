@@ -9,6 +9,7 @@ CSV는 **명령을 친 폴더**에 저장되므로 데이터 폴더(예: `~/auto
 | `path_follower.py` | 기록한 CSV 경로를 따라 주행 (옆 오차·방향 오차·기록 곡률로 조향) | `python3 path_follower.py line1.csv 0.2 0.023` |
 | `path_check.py` | 기록 CSV 점검: 끝 위치/방향, 최대 곡률, 뒤로 간 구간, odom·IMU 부호 (ROS 불필요) | `python3 path_check.py line1.csv --png` |
 | `path_common.py` | 위 셋이 같이 쓰는 위치 계산·경로 처리. **같은 폴더에 같이 복사** | — |
+| `stop_diag.py` | 직진 중 갑자기 멈춤 진단: 1초 요약 + 멈추면 STOP 스냅샷을 `/diag/stop_reason`으로 발행 ([RUN_GUIDE 14절](../docs/RUN_GUIDE.md)) | `python3 stop_diag.py` |
 
 > 11/17 변경: 위치를 odom **이동 거리**(위치 변화량) + IMU 자이로 **방향**으로 계산하고(기록·재생 같은 코드),
 > 재생 조향은 위치 목표점 하나(pure pursuit) 대신 **옆 오차 + 방향 오차 + 기록 곡률 미리 넣기**로 바꿨다.

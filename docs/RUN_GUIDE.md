@@ -80,6 +80,8 @@ ros2 topic echo /perception/commands   # YOLO 확인된 명령
 ```
 로그에 `FALLBACK:`이 보이면 표지·선을 못 보고 도면 위치나 거리로 넘어간 것.
 
+갑자기 서서 안 갈 때는 14절 `stop_diag.py`를 같이 켜 둔다.
+
 ## 5. bag을 노트북으로 (Claude 분석용)
 노트북 PowerShell:
 ```powershell
@@ -120,6 +122,7 @@ scp가 안 되면: 리모에서 `hostname -I`로 IP 확인 → 노트북에서 `
 | `xmlrpc ... !rclpy.ok()` | ROS 데몬 꼬임 → `ros2 daemon stop; ros2 daemon start` |
 | 출발 신호에 `Waiting for at least 1 matching subscription` | mission_node가 아직 안 뜸. launch 확인 후 다시 |
 | 라이다가 콘·컵을 못 봄 | 2D 라이다는 한 높이만 봄. 물체가 라이다 높이에 걸려야 함 |
+| 장애물·차선 문제 없는데 직진 중 갑자기 서서 안 감 (시험장 같은 자리) | 14절 `stop_diag.py` 켜고 다시 달려서 STOP 스냅샷 확인 |
 
 ## 8. 시뮬레이션 (노트북·서버, ROS 없이)
 ```bash
@@ -227,3 +230,33 @@ ros2 param set /chime_node device plughw:1,0    # 기본 장치가 아니면 지
 - 미션 노드가 '길 잃음'이면 도면 곡률을 안 섞는다 (틀린 위치에서 꺾지 않게)
 - 차선이 보일 때는 예전과 같다 (카메라 차선만)
 - 디버그 화면 '차선 영상'에 source가 `hold`일 때 꺾이는지 보면 된다. 엉뚱한 데서 꺾으면 위치 추정을 먼저 확인 (9절), 급하면 `ros2 param set /lane_node route_ff_weight_lost 0.0`
+
+## 14. 직진 중 갑자기 멈춤 진단 (`tools/stop_diag.py`, 11/18)
+시험장 같은 자리에서 장애물·차선 문제 없이 서서 안 가는 증상용. 빌드 필요 없음.
+
+**받기** (리모에서)
+```bash
+cd ~/autorace_ws && git fetch origin && git checkout main && git pull   # main에 합쳐진 뒤
+# 합치기 전이면 이 파일만 받기:
+git fetch origin claude/stop-diag && git checkout origin/claude/stop-diag -- tools/stop_diag.py
+```
+
+**실행** (launch 띄운 뒤, 터미널 2개)
+```bash
+python3 ~/autorace_ws/tools/stop_diag.py      # T1: 1초마다 한 줄 요약 + 멈추면 STOP 스냅샷
+ros2 topic echo /diag/stop_reason             # T2: 스냅샷만 보기 (선택)
+```
+bag 녹화 목록 끝에 `/diag/stop_reason`을 붙여 두면 나중에 분석할 때 같이 볼 수 있다.
+
+**스냅샷 읽는 법** (한 번 움직인 뒤 1초 넘게 서 있으면 찍힘)
+| 보이는 것 | 뜻 |
+|---|---|
+| `cmd_vel=0` | SW가 세움 → 같이 찍힌 `/mission/state` note, `/lane/status`, `/perception/commands`, `/obstacle/state`에서 누가 세웠는지 확인 |
+| `cmd_vel 끊김` | mission_node가 명령을 안 냄 (죽었거나 멈춤) |
+| `cmd_vel>0`인데 `ack_cmd=0` | ackermann_bridge 타임아웃·문제 |
+| `cmd_vel>0`, `ack_cmd>0`인데 속도 0 | 물리적으로 걸림 (매트 턱, 바퀴, 배터리, 차체 시리얼) |
+| `/cmd_vel 발행자 2개 이상` | 다른 노드(다른 팀 포함)가 명령을 섞음 → `export ROS_LOCALHOST_ONLY=1` 확인 |
+| 라이다 정면 `< 0.6 m` | 사람 눈엔 없어도 라이다가 뭔가 봄 (가벽 끝, 케이블, 관중) |
+| 카메라 `Hz` 낮음/끊김 | 카메라·USB 문제 |
+
+멈출 때마다 `/mission/state`의 `dist_mm`가 비슷하면 도면 거리 기반 규칙이 걸린 것 (시험장 매트에서 odom 거리 틀어짐).
