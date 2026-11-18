@@ -327,6 +327,13 @@ class LaneParams:
     realign_speed: float = 0.6         # 그동안 속도 비율
     corner_kappa_gain: float = 1.1     # 코너 시뮬레이션: 바깥 36 -> 26 mm, 안쪽 112 -> 120 mm (안쪽 선까지 17 mm). 1.2면 안쪽 여유 10 mm
     corner_gain_from: float = 0.6
+    # 11/18: 평상시 0.5 m/s로 올리며 커브에서만 lookahead를 늘림 (커브를 일찍 보고 일찍·안쪽으로 꺾게).
+    #   커브 판단 = 직전 조향 곡률 또는 도면 앞 곡률 |k| > corner_ld_on (꺼질 땐 corner_ld_off 밑).
+    #   기본 lookahead가 corner_ld_base_min 이상인 구간(일반 주행)에서만. 지그재그(260)·M7(400) 등 미션이 줄인 구간은 그대로. 0 = 끔
+    corner_lookahead_mm: float = 700.0   # 코너 시뮬레이션(R640, 0.3·0.5 m/s): 650 -> 700 안쪽 최악 112 -> 120 mm, 선 밟음 0. 750까지 0, 800부터 안쪽 선 밟음
+    corner_ld_on: float = 0.6
+    corner_ld_off: float = 0.3
+    corner_ld_base_min: float = 600.0
     yellow_guard_look_mm: float = 600.0   # 노란 실선까지 거리를 잴 때 이 앞까지만 (400으로 줄이면 M7 1차로 시뮬레이션 흔들림 37 -> 89 mm)
     yellow_guard_min_urg: float = 0.35    # 지킴이 걸리는 순간 최소 세기 (0이면 margin에서 0부터 hard까지 서서히)
 
@@ -1476,6 +1483,7 @@ class LaneFollower:
         self.reject_count = 0
         self.lost_frames = 0
         self.kappa_cmd = 0.0
+        self.in_corner_ld = False
         self.last_good_kappa = 0.0
         self.hold_yaw_ref = None
         self._last_offset = 0.0
@@ -1525,6 +1533,17 @@ class LaneFollower:
         if p.lookahead_per_mps:
             look = float(np.clip(p.lookahead_mm + p.lookahead_per_mps * (speed - 0.3),
                                  min(p.lookahead_mm, 450.0), p.lookahead_max_mm))
+        if p.corner_lookahead_mm > look and p.lookahead_mm >= p.corner_ld_base_min and self.mode == 'normal':
+            k_ahead = abs(self.kappa_cmd)
+            if self.route_k:
+                k_r = self._route_kappa(p.route_ff_preview_mm + speed * p.latency_comp_sec * 1000.0)
+                if k_r is not None:
+                    k_ahead = max(k_ahead, abs(k_r))
+            self.in_corner_ld = k_ahead > (p.corner_ld_off if self.in_corner_ld else p.corner_ld_on)
+            if self.in_corner_ld:
+                look = float(p.corner_lookahead_mm)
+        else:
+            self.in_corner_ld = False
         if p.dilate_px > 0:
             k = 2 * int(p.dilate_px) + 1
             bev_lane = cv2.dilate(bev_lane, np.ones((k, k), np.uint8))
