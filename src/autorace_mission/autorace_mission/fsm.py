@@ -101,6 +101,21 @@ DEFAULT_PARAMS = {
     'cones_enter_cone_mm': 150.0,    # 11/14 밤: 400 -> 150 원복 (d4d4c70 라바콘 변경 되돌림, 실차 '라바콘 인식 못 함')
     'cones_corner_close_mm': 0.0,    # 11/14 밤: 250 -> 0 = 끔 (d4d4c70 원복). >0이면 70° 넘게 돌았고 콘이 이 안이면 콘 모드
     'cones_corner_min_deg': 70.0,
+    # 11/19 실차 '라바콘 모드가 늦게(구간 2/5쯤) 켜짐': 시작선은 코너 안쪽 곡선 끝에서 2 cm 뒤라 카메라에 보일 때 아직 30~60° 기울어
+    #   있는데 차선 노드는 ±15°까지만 가로선으로 봐서 못 봄 -> 도면 위치(M2 뒤 약 1 m 뒤처짐)·거리 예비로 늦게 켜짐.
+    #   아래 셋 중 하나면 바로 라바콘 모드 (기준 방향 = 3차선 직선 방향, 오른쪽으로 돈 각):
+    #   1) 코너를 m8_line_min_turn_deg 넘게 돈 뒤 카메라가 시작선을 m8_line_frames번 봄 (그동안 가로선 기울기 m8_line_max_angle_deg까지 찾음)
+    #   2) m8_full_turn_deg 넘게 돌고 m8_after_turn_mm 더 감 (선을 놓쳐도)
+    #   3) m8_full_turn_deg - 10 넘게 돌았고 차로 안 콘이 cones_enter_cone_mm 안
+    #   코너 끝(m8_line_slow_deg 넘게 돎)부터 라바콘 모드까지 m8_line_speed (선이 잘 보이게)
+    'm8_line_trigger': True,
+    'm8_line_min_turn_deg': 30.0,
+    'm8_line_frames': 2,
+    'm8_line_max_angle_deg': 60.0,
+    'm8_full_turn_deg': 80.0,
+    'm8_after_turn_mm': 200.0,
+    'm8_line_slow_deg': 45.0,
+    'm8_line_speed': 0.12,
     'cones_approach_mm': 1550.0,     # 경로 지도 없을 때: M2 끝 -> 라바콘 모드 (도면 1854 - 300)
     # 11/11 코너 지킴: M2 끝 -> 좌하단 코너(90°) -> 시작선(코너 끝 + 240 mm). 도면 위치가 앞서거나 코너에서 콘이 보이면
     #   코너 안에서 라바콘 모드로 들어가 콘 쪽으로 곧장 감(지름길). 카메라로 시작선을 넘은 것 말고는 IMU로 코너를 다 돈 뒤에만
@@ -461,6 +476,7 @@ class MissionFSM:
             self.m8_inner_on = False
             self.m8_inner_mode = None
             self.m8_from_exit = False
+            self._m8_seen, self._m8_full_at, self._m8_line_fresh = None, None, False
         if state == 'M8_CONES' and from_exit:
             # M2_EXIT가 시작선까지 데려옴 -> 접근 단계 없이 바로 콘 따라가기 (코너 미리보기·한쪽 선 모드 없음)
             self.m7c = None
@@ -472,6 +488,7 @@ class MissionFSM:
             self.m8_from_exit = True
         elif state == 'M8_CONES':
             self.m8_from_exit = False
+            self._m8_seen, self._m8_full_at, self._m8_line_fresh = None, None, False
             # 11/12 밤 실차: M2 끝(합류) 뒤 좌하단 코너(R640 오른쪽 90°)에서도 차선을 놓치고(NONE->hold->stop) 멋대로 감
             #   -> M7 직전 코너와 같은 IMU 코너 미리보기 (M2에서 넘어올 때만)
             use = (self.p.get('m8_corner_preview', True) and self.p.get('m7_corner_done_deg', 85.0) > 0
@@ -1102,7 +1119,15 @@ class MissionFSM:
         1순위: 시작 흰 선을 앞바퀴가 지나는 순간 (서지 않음). 2순위: 도면 위치. 3순위: 거리.
         좌하단 코너를 IMU로 다 돌기 전에는 카메라로 시작선을 넘은 것만 받는다."""
         p = self.p
+        t = self._m8_turn_deg(inp) if p.get('m8_line_trigger', True) else None
+        if t is not None and t >= p['m8_line_min_turn_deg'] and not getattr(self, '_m8_line_fresh', False):
+            # 11/19: 코너를 돌기 시작한 뒤 본 선만 (그 전에 잡은 다른 흰 선 때문에 진짜 시작선을 '다른 선'으로 버리지 않게)
+            self._m8_line_fresh = True
+            self.line = None
         near = self._line_crossed(inp, 'm8_start_line')
+        early = self._m8_early(inp, who)
+        if early is not None:
+            return early
         cam_near = bool(near) and self.line is not None and self.line.seen_d is not None
         if near and self.line.seen_d is None:
             near = self._past(inp, 'm8_start_line', -p['cones_enter_before_mm'])
@@ -1142,6 +1167,52 @@ class MissionFSM:
             return f'start line ({self.line.how or "route/distance"})' if near else f'cone ahead {ahead:.0f}mm'
         return None
 
+    def _m8_turn_deg(self, inp) -> Optional[float]:
+        """11/19: 3차선 직선 방향 기준 코너 쪽(오른쪽)으로 돈 각 (도). 기준을 모르면 None"""
+        ax = getattr(self, 'axis_yaw', None)
+        if ax is None:
+            ax = getattr(self, 'm2_yaw', None)
+        if ax is None or inp.yaw is None:
+            return None
+        d = math.atan2(math.sin(inp.yaw - ax), math.cos(inp.yaw - ax))
+        return max(0.0, math.degrees(self.p['m7_corner_dir'] * d))
+
+    def _m8_early(self, inp, who: str) -> Optional[str]:
+        """11/19: 라바콘 모드 확실히 켜기 (m8_line_trigger 설명). 아니면 None"""
+        p = self.p
+        if not p.get('m8_line_trigger', True):
+            return None
+        t = self._m8_turn_deg(inp)
+        if t is None:
+            return None
+        ln = self.line
+        if ln is not None and ln.how == 'camera' and ln.seen_at is not None and t >= p['m8_line_min_turn_deg']:
+            last = getattr(self, '_m8_seen', None)
+            if ln.seen_at == inp.dist_mm and (last is None or last[1] != ln.seen_at):
+                n = (last[0] + 1) if (last is not None and inp.dist_mm - last[1] <= 250.0) else 1
+                self._m8_seen = (n, ln.seen_at)
+                if n >= p['m8_line_frames']:
+                    self.log.append(f'{who} start line seen {ln.seen_d:.0f}mm ahead at {t:.0f}deg -> cones')
+                    return f'start line seen by camera ({ln.seen_d:.0f}mm, {t:.0f}deg)'
+        if t >= p['m8_full_turn_deg']:
+            if getattr(self, '_m8_full_at', None) is None:
+                self._m8_full_at = inp.dist_mm
+            if inp.dist_mm - self._m8_full_at >= p['m8_after_turn_mm']:
+                self.log.append(f'{who} turned {t:.0f}deg + {p["m8_after_turn_mm"]:.0f}mm -> cones (line not seen)')
+                return f'corner done + {p["m8_after_turn_mm"]:.0f}mm'
+        ahead = inp.obstacle.get('cone_ahead_mm')
+        if t >= p['m8_full_turn_deg'] - 10.0 and ahead is not None and ahead <= p['cones_enter_cone_mm']:
+            self.log.append(f'{who} cone {ahead:.0f}mm ahead at {t:.0f}deg -> cones')
+            return f'cone ahead {ahead:.0f}mm ({t:.0f}deg)'
+        return None
+
+    def _m8_line_kw(self, inp) -> dict:
+        """11/19: 코너를 돌기 시작하면 가로선을 더 기울어진 것까지 찾음 (시작선이 기울어 보임)"""
+        t = self._m8_turn_deg(inp)
+        if not self.p.get('m8_line_trigger', True) or t is None or t < 20.0:
+            return {}
+        return {'stopline_max_angle_deg': float(self.p['m8_line_max_angle_deg'])}
+
     def _s_M2_EXIT(self, inp):
         """11/14: 갈림길 합류 끝 ~ 라바콘 시작선. 차선 인식 모드만 (양쪽 노란 선, 보통 차로 폭) + 좌하단 코너 도면 곡률 보조.
 
@@ -1168,7 +1239,10 @@ class MissionFSM:
         cap = p.get('m2x_speed', 0.0)
         if cap > 0:
             speed = min(speed, cap)                     # 11/18: 합류 끝 ~ 코너 (선을 쉽게 놓쳐 천천히)
-        return Command('lane', self._lane(speed, **self._m2x_kw()))
+        t = self._m8_turn_deg(inp)
+        if p.get('m8_line_trigger', True) and t is not None and t >= p['m8_line_slow_deg']:
+            speed = min(speed, p['m8_line_speed'])      # 11/19: 코너 끝 ~ 시작선 천천히 (시작선이 잘 보이게)
+        return Command('lane', self._lane(speed, **self._m2x_kw(), **self._m8_line_kw(inp)))
 
     def _s_M8_CONES(self, inp):
         """라바콘: 접근(차선) -> cones(obstacle 노드가 콘 사이 경로 추종) -> handover -> M1.
