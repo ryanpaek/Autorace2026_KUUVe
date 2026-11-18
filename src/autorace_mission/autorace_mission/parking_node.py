@@ -1261,7 +1261,8 @@ class ParkingV2:
     # ③ F_MOVE   멈춘 자리부터 오도메트리 fixed_move_mm 직진 (멈출 때 방향 유지)
     # ④ F_TPAUSE fixed_turn_pause_sec 정지 + 끝 presteer_sec 동안 오른쪽 최대 조향 미리 꺾기
     # ⑤ F_TURN   오른쪽 최대 조향 전진. fixed_turn_deg(IMU) 돌거나 fixed_turn_mm(>0이면) 가면 끝
-    # ⑥ DONE     PARKED_FIXED (11/18 공지: 2행 주차 없음 -> 돌고 바로 끝). ③·⑤ 중 앞범퍼 front_stop_mm 안에 물체 -> ③은 기다림, ⑤는 그 자리 정지(PARKED_FIXED_BLOCKED)
+    # ⑥ F_BPAUSE·F_BACK  멈추고 바퀴 펴서 fixed_back_mm(5cm) 똑바로 후진 (11/18 캡틴, 0이면 건너뜀)
+    # ⑦ DONE     PARKED_FIXED (11/18 공지: 2행 주차 없음). ③·⑤ 중 앞범퍼 front_stop_mm 안에 물체 -> ③은 기다림, ⑤는 그 자리 정지(PARKED_FIXED_BLOCKED)
     # ------------------------------------------------------------------
     def _step_fixed(self, inp):
         p = self.p
@@ -1365,11 +1366,32 @@ class ParkingV2:
             if by_deg or by_mm:
                 self.stop_how = 'deg' if by_deg else 'mm'
                 self.err = ('turned', round(deg, 1), round(moved))
+                if p['fixed_back_mm'] > 0:                 # 11/18 캡틴: 바퀴 펴고 5cm 후진 뒤 완료
+                    self.d_back0 = inp['dist_mm']
+                    self._enter('F_BPAUSE', inp)
+                    return self._out(0.0, 0.0)
                 return self._done('PARKED_FIXED', inp)     # 11/18 공지: 2행 주차 없음 -> 돌고 바로 끝
             if inp['blocked']:
                 self.err = ('blocked', round(deg, 1), round(moved))
                 return self._done('PARKED_FIXED_BLOCKED', inp)
             return self._out(p['fixed_turn_speed'], KAPPA_FULL_RIGHT)
+
+        if self.phase == 'F_BPAUSE':
+            # 11/18 캡틴: 돈 자리에서 멈춤 -> 끝 presteer_sec 동안 아주 천천히 뒤로 굴리며 바퀴를 똑바로 폄
+            # (브리지는 0.02 m/s 밑이면 조향을 안 보내 서서는 안 펴짐). 이 동안 움직인 것도 후진 거리에 넣음
+            if inp['t'] - self.t_phase >= p['fixed_back_pause_sec']:
+                self._enter('F_BACK', inp)
+            elif self._presteer_due(p['fixed_back_pause_sec'], inp):
+                return self._out(-p['presteer_speed'], 0.0)
+            else:
+                return self._out(0.0, 0.0)
+
+        if self.phase == 'F_BACK':                         # 바퀴 편 채 똑바로 후진 fixed_back_mm
+            back = inp['dist_mm'] - getattr(self, 'd_back0', inp['dist_mm'])
+            if back >= p['fixed_back_mm'] - p['fixed_back_brake_mm']:
+                self.back_done_mm = round(back)
+                return self._done('PARKED_FIXED', inp)
+            return self._out(-p['fixed_back_speed'], 0.0)
 
         return self._out(0.0, 0.0)                         # DONE
 
@@ -1554,7 +1576,7 @@ class ParkingV2:
         """/parking/state에 실을 내용."""
         return {'phase': self.phase, 'done': self.phase == 'DONE', 'result': self.result,
                 'backs': self.backs, 'realigns': self.realigns, 'last_err': self.err,
-                'cell': getattr(self, 'fixed_cell', None), 'cell_src': getattr(self, 'cell_src', None), 'cell_a': getattr(self, 'cell_a', None), 'cell_b': getattr(self, 'cell_b', None), 'cell_avg': getattr(self, 'cell_avg', None), 'row': self.row, 'stop_how': self.stop_how, 'trigger': self.trigger, 'turn_ref': self.turn_ref_used, 'corner_s': None if self.corner_s is None else round(self.corner_s), 'corner_n': self.corner_n, 'turn_at': self.turn_at, 'target_s': None if self.target_s is None else round(self.target_s), 'target_src': self.target_src, 'n_c5': len(self.tgt_c5), 'n_pm': len(self.tgt_pm), 'q_s': self.q_s, 'r_meas': None if self.r_meas is None else round(self.r_meas), 'fix_n': self.fix_n, 'fix_pred': self.fix_pred,
+                'back_mm': getattr(self, 'back_done_mm', None), 'cell': getattr(self, 'fixed_cell', None), 'cell_src': getattr(self, 'cell_src', None), 'cell_a': getattr(self, 'cell_a', None), 'cell_b': getattr(self, 'cell_b', None), 'cell_avg': getattr(self, 'cell_avg', None), 'row': self.row, 'stop_how': self.stop_how, 'trigger': self.trigger, 'turn_ref': self.turn_ref_used, 'corner_s': None if self.corner_s is None else round(self.corner_s), 'corner_n': self.corner_n, 'turn_at': self.turn_at, 'target_s': None if self.target_s is None else round(self.target_s), 'target_src': self.target_src, 'n_c5': len(self.tgt_c5), 'n_pm': len(self.tgt_pm), 'q_s': self.q_s, 'r_meas': None if self.r_meas is None else round(self.r_meas), 'fix_n': self.fix_n, 'fix_pred': self.fix_pred,
                 'end_mm': None if self.end_d is None else round(self.end_d)}
 
 
@@ -1600,6 +1622,10 @@ DEFAULTS = {
     'fixed_turn_deg': 87.0,    # 오른쪽 최대 조향을 이만큼(IMU) 돌면 끝. 실차는 펴라 한 뒤 2~4도 더 돎 -> 약 90도
     'fixed_turn_mm': 0.0,      # >0이면 최대 조향으로 이만큼 가면 끝 (각도와 먼저 닿는 쪽). 11/16 캡틴 실차 확정: 0 (87도로 끝)
     'fixed_turn_speed': 0.12,
+    'fixed_back_mm': 50.0,         # 11/18 캡틴: 다 돌고 바퀴 펴고 이만큼 똑바로 후진한 뒤 완료 (0 = 안 함)
+    'fixed_back_pause_sec': 0.5,   #   후진 전 멈춤 (끝 presteer_sec 동안 바퀴 펴기)
+    'fixed_back_speed': 0.06,
+    'fixed_back_brake_mm': 0.0,    #   정지 명령 뒤 밀림 (미측정)
     'turn_from_corner_mm': 140.0,  # corner: 라이다가 1번 모서리 선을 이만큼 지나면 꺾기.
                                #   = turn_lead 320 을 바꾼 값: 2번 가운데 = 모서리 + 410 (칸 52 - 리모 반폭 11), 앞바퀴 = 가운데 - 320,
                                #   라이다 = 앞바퀴 + 47 -> 모서리 + 137. 실차로 맞출 것
