@@ -54,6 +54,15 @@ mission_node:
     base_speed: 0.50                       # 11/18 0.30 -> 0.50 평상시 속도 (서행·M7·정지 접근 속도는 그대로)
     slow_speed: 0.20                       # 서행 (규정 최대 0.2, 11/09 팀 결정)
     approach_speed: 0.18
+    # 11/19: 속도 S자(시그모이드 모양) 가감속 (autorace_mission/speed_smooth.py). 예전엔 미션·차선 노드 속도가 계단처럼 바뀌어 툭툭 끊김.
+    #   정지(0)·비상 정지·회피 노드 안전 정지·M7 구간 전체는 바로 그대로 (S자 안 씀). 끄기: speed_smooth false
+    #   맞춘 값(20 Hz): 차선 커브 감속 흔들림 61 -> 21 mm/s, 0.50 -> 0.15 감속이 코너 417 mm 전에 끝, 0 -> 0.5 출발 0.8 s,
+    #   통주행 시뮬레이션 정지선 오차·완주 시간 변화 없음 (±15 mm, 112 -> 111 s)
+    speed_smooth: true
+    speed_smooth_acc: 0.8                  # m/s^2 가속 상한
+    speed_smooth_dec: 1.0                  # m/s^2 감속 상한
+    speed_smooth_jerk: 3.0                 # m/s^3 가속도 변화율 상한 (S자 모양을 만드는 값)
+    speed_smooth_tau: 0.5                  # s, 6 cm/s 안의 작은 흔들림은 이 시간 상수로 천천히
     m7_speed: 0.20                         # 11/12 밤: M7 전체(코너 차선 주행 + 회피 노드 avoid_params.yaml) 0.20
     m7_lookahead_mm: 400.0                 # 11/17 밤 450 -> 400: 차로 바꾼 뒤 지금 차로에 더 빨리 붙게 (시뮬레이션: 15 cm 벗어남 -> 3 cm 안 0.86 -> 0.78 m, 넘침 1.5 cm)
     det_conf: 0.5

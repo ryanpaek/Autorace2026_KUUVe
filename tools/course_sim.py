@@ -26,6 +26,9 @@ from autorace_mission.command_inbox import CommandInbox  # noqa: E402
 from autorace_mission.fsm import DEFAULT_PARAMS, Inputs, MissionFSM  # noqa: E402
 from autorace_mission.route import RouteMap, RouteTracker  # noqa: E402
 from autorace_perception.class_commands import ClassCommandRouter  # noqa: E402
+from autorace_mission.speed_smooth import SpeedSmoother  # noqa: E402
+
+SMOOTH = None   # --smooth 이면 미션 노드처럼 S자 가감속 (params.yaml speed_smooth_*)
 
 CFG = os.path.join(ROOT, 'src', 'autorace_bringup', 'config')
 DT = 0.05
@@ -150,6 +153,8 @@ def run(name, miss=(), odom_scale=1.0, jump_at=None, camera=True, seed=1, verbos
         v = 0.0 if cmd.source == 'stop' else (cmd.lane or {}).get('speed', fsm.p['base_speed'])
         if cmd.source == 'obstacle':
             v = fsm.p['base_speed']
+        if SMOOTH is not None:                     # 11/19: 미션 노드 S자 가감속 (정지·M7은 바로)
+            v = SMOOTH.step(v, DT, bypass=(fsm.state == 'M7_OBSTACLE'))
         s += v * 1000.0 * DT
         odo += v * 1000.0 * DT
         t += DT
@@ -187,7 +192,12 @@ SCENARIOS = {
 if __name__ == '__main__':
     ap = argparse.ArgumentParser()
     ap.add_argument('--scenario', default='all', choices=['all'] + list(SCENARIOS))
+    ap.add_argument('--smooth', action='store_true', help='미션 노드 S자 가감속 켜고 (params.yaml speed_smooth_*)')
     a = ap.parse_args()
+    if a.smooth:
+        _, mp_, _ = load_params()
+        SMOOTH = SpeedSmoother(mp_.get('speed_smooth_acc', 0.8), mp_.get('speed_smooth_dec', 1.0),
+                               mp_.get('speed_smooth_jerk', 3.0), mp_.get('speed_smooth_tau', 0.5))
     for n, kw in SCENARIOS.items():
         if a.scenario in ('all', n):
             run(n, **kw)
