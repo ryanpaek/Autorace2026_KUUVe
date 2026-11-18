@@ -335,6 +335,14 @@ class LaneParams:
     corner_ld_on: float = 0.6
     corner_ld_off: float = 0.3
     corner_ld_base_min: float = 600.0
+    # 11/19: 모든 커브 속도 상한 (m/s, 0 = 끔). 커브 판단 = 직전 조향 곡률 또는 도면 앞 corner_speed_look_mm 안 곡률 |k| > corner_ld_on
+    #   (꺼질 땐 corner_ld_off 밑). 일반 주행(lookahead >= corner_ld_base_min) 또는 미션 노드 코너 미리보기 중일 때만
+    #   (지그재그 260·M7 3차선 400처럼 미션이 lookahead를 줄인 구간의 큰 조향에는 안 걸림)
+    corner_speed: float = 0.0
+    corner_speed_look_mm: float = 600.0
+    # 11/19 실차 '코너를 아직 크게 돎': 위 커브 판단에 걸릴 때만 조향 배율 (0 = corner_kappa_gain 그대로).
+    #   실제 도면 코너 모양 시뮬레이션(0.15 m/s, 실제 회전 80~90%): 1.1 -> 1.2 바깥 여유 최소 23 -> 54 mm, 선 닿음 0
+    curve_kappa_gain: float = 0.0
     yellow_guard_look_mm: float = 600.0   # 노란 실선까지 거리를 잴 때 이 앞까지만 (400으로 줄이면 M7 1차로 시뮬레이션 흔들림 37 -> 89 mm)
     yellow_guard_min_urg: float = 0.35    # 지킴이 걸리는 순간 최소 세기 (0이면 margin에서 0부터 hard까지 서서히)
 
@@ -1491,6 +1499,7 @@ class LaneFollower:
         self.lost_frames = 0
         self.kappa_cmd = 0.0
         self.in_corner_ld = False
+        self.in_corner_spd = False
         self.last_good_kappa = 0.0
         self.hold_yaw_ref = None
         self._last_offset = 0.0
@@ -1551,6 +1560,7 @@ class LaneFollower:
                 look = float(p.corner_lookahead_mm)
         else:
             self.in_corner_ld = False
+        self._update_corner_flag()                # 11/19: 커브 속도 상한·커브 조향 배율용 (이전 프레임 조향 + 도면 앞 곡률)
         if p.dilate_px > 0:
             k = 2 * int(p.dilate_px) + 1
             bev_lane = cv2.dilate(bev_lane, np.ones((k, k), np.uint8))
@@ -1780,9 +1790,12 @@ class LaneFollower:
             kappa_raw = kappa_raw + w * (k_ff - kappa_raw)
         out.source = source
 
-        if (p.corner_kappa_gain != 1.0 and source in ('lane', 'memory') and kappa_raw is not None
+        gain = p.corner_kappa_gain
+        if self.in_corner_spd and p.curve_kappa_gain > 0.0:
+            gain = p.curve_kappa_gain                              # 11/19: 커브(일반 주행·코너 미리보기)에서만 더 크게. 지그재그 등은 그대로
+        if (gain != 1.0 and source in ('lane', 'memory') and kappa_raw is not None
                 and abs(kappa_raw) > p.corner_gain_from):
-            kappa_raw = kappa_raw * p.corner_kappa_gain           # 커브: 조금 더 크게 (위 corner_kappa_gain 설명)
+            kappa_raw = kappa_raw * gain                           # 커브: 조금 더 크게 (위 corner_kappa_gain 설명)
 
         # 11/14: 노란 실선 이탈 방지 강제 조향 (M7 3차선 바깥 노란 실선 및 일반 구간 노란 실선 경계 보호)
         hard_guard = False
@@ -1846,6 +1859,8 @@ class LaneFollower:
                     kp = max(kp, max(abs(k) for k in self.route_k[:n]))
                 out.speed_scale = min(out.speed_scale, 1.0 - p.preview_slowdown
                                       * min(1.0, kp / max(p.preview_kappa_ref, 1e-3)))
+            if p.corner_speed > 0.0 and speed > p.corner_speed and self.in_corner_spd:
+                out.speed_scale = min(out.speed_scale, p.corner_speed / speed)
 
         # 정지선 (흰색 마스크 기준, 차로 안쪽만)
         if bev_white is not None:
@@ -1865,6 +1880,19 @@ class LaneFollower:
             both = bev_white if raw_lane is None else cv2.bitwise_or(bev_white, raw_lane)
             out.end_lines_mm = [d for d, _ in detect_stoplines(both, cfg.vehicle_col, cfg, p, max_angle_deg=0.0)]
         return out
+
+    def _update_corner_flag(self) -> bool:
+        """11/19: 지금 커브인가 (corner_speed 속도 상한·curve_kappa_gain). 히스테리시스"""
+        p = self.p
+        if self.mode != 'normal' or not (p.lookahead_mm >= p.corner_ld_base_min or self.route_corner):
+            self.in_corner_spd = False
+            return False
+        k_ahead = abs(self.kappa_cmd)
+        if self.route_k:
+            n = max(1, int(p.corner_speed_look_mm / max(self.route_step_mm, 1.0)) + 1)
+            k_ahead = max(k_ahead, max(abs(k) for k in self.route_k[:n]))
+        self.in_corner_spd = k_ahead > (p.corner_ld_off if self.in_corner_spd else p.corner_ld_on)
+        return self.in_corner_spd
 
     # --- 선 동일성 (프레임 간) --------------------------------------------------
     @staticmethod

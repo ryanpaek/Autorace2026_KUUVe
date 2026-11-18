@@ -23,7 +23,9 @@ lane_node:
     yellow_v_min: 80
     lane_width_mm: 515.0                   # 모의 맵 실측(10/30): 바깥~바깥 535, 테이프 20 -> 중심 간 515
     lookahead_mm: 650.0
-    corner_lookahead_mm: 700.0             # 11/18: 커브에서만 lookahead (일찍·안쪽으로 꺾음). 시뮬레이션 750까지 선 안 밟음, 800부터 안쪽 선 밟음. 0 = 끔
+    corner_speed: 0.15                     # 11/19: 모든 커브 속도 상한 (m/s). 도면 앞 600 mm 안 또는 조향 곡률 |k| > 0.6이면. 0 = 끔
+    curve_kappa_gain: 1.2                  # 11/19: 위 커브 판단에 걸릴 때만 조향 배율 (지그재그·M7 3차선은 corner_kappa_gain 1.1 그대로). '코너 크게 돎'
+    corner_lookahead_mm: 600.0             # 11/19 700 -> 600 (0.15 m/s에서는 짧은 쪽이 덜 밀림: 실제 도면 코너 시뮬레이션 바깥 여유 23 -> 54 mm). 11/18: 커브에서만 lookahead. 0 = 끔
     kappa_max: 2.1                         # 최소 회전반경 약 0.46m(가상 바퀴 0.41rad) -> 1/0.46
     kappa_alpha: 0.5
     kappa_rate_max: 0.6
@@ -85,7 +87,8 @@ mission_node:
     m8_hold_speed: 0.15                    #   그동안 속도 (M7 직전 코너처럼 코너에서 직진하지 않게 천천히)
     fork_lane_width_mm: 460.0              # 11/12 밤: M2·합류 한쪽 선 모드 차로 폭 (바깥선에서 230 mm). 섬 쪽 선을 밟고 들어가던 것 -> 바깥선 쪽으로
     fork_lost_search: true                 #   M7 차선 구간·M2·합류에서 선을 놓치면 직선 방향으로 풀고 좌우 30° 찾기 (서서 끝내지 않음)
-    m8_corner_k_gain: 1.0                  # 11/14: 1.15 -> 1.0 (R557은 코너 안쪽 노란 선을 밟고 출구에서 차선 이탈 유발 -> R640 그대로)
+    m8_corner_k_gain: 1.1                  # 11/19 1.0 -> 1.1 (lookahead 500·0.15 m/s와 같이, 라바콘 시작선 옆 49 -> 29 mm·방향 5.3 -> 0.7°). 11/14: 1.15 -> 1.0
+    corner_preview_lookahead_mm: 500.0     # 11/19: 코너 미리보기 구간(M7 직전 코너, M2 뒤 ~ 라바콘 시작선) 차선 lookahead. 0 = 그대로
     cones_line_camera_first: true          # 11/16: 라바콘 시작선 = 카메라로 본 흰 가로선 통과 (도면과 달라도 같은 선 3프레임 연속이면)
     cones_enter_before_mm: 0.0             # 도면 예비: 시작선 이만큼 앞에서 라바콘 모드 (1순위는 카메라로 선 통과)
     cones_enter_cone_mm: 150.0             # 11/14 밤: 400 -> 150 원복 (d4d4c70 라바콘 변경 되돌림, 실차 '라바콘 인식 못 함')
@@ -119,7 +122,7 @@ mission_node:
     route_corner_anchor: true              # 90° 코너를 IMU로 다 돈 순간 s = 코너 끝 (M7·M2 뒤 1~2 m 뒤처짐 바로잡기)
     route_corner_window_mm: 3000.0         #   지금 s가 코너 끝에서 이 안일 때만
     route_corner_k_gain: 1.0               # 차선 노드에 주는 도면 코너 곡률 배율 (main의 축거 0.222·corner_kappa_gain 1.1과 겹쳐서 1.0. 필요하면 1.1)
-    m7_corner_k_gain: 1.0                  # M7 직전 코너 IMU 곡률 미리보기 배율 (같은 이유로 1.0)
+    m7_corner_k_gain: 1.1                  # 11/19 1.0 -> 1.1 (lookahead 500·0.15 m/s와 같이, '코너 크게 돎'). M7 직전 코너 IMU 곡률 미리보기 배율
     stop_pretrack: true                    # M6·M1 준비 전부터 횡단보도 정지선을 카메라로 따라감 (정지 1순위 = 카메라 선)
     stop_pretrack_mm: 1500.0               #   도면상 정지선이 이 거리 안일 때부터
 

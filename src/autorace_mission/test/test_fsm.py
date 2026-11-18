@@ -651,6 +651,26 @@ def test_m2_exit_corner_reference_is_lane_axis_not_taper_heading():
     assert old.m7_corner_k(5100.0, 0.0)[0] < -1.0                  # 끄면 예전 (기준 = 들어올 때 방향)
 
 
+def test_corner_preview_lookahead_in_m7_corner_and_m2_exit():
+    """11/19: corner_preview_lookahead_mm는 M7 직전 코너(차선 주행)·M2_EXIT 동안만 차선 lookahead로. 0이면 안 보냄"""
+    fsm = MissionFSM({'start_state': 'M2_FORK', 'cones_source_ready': True, 'odom_jump_mm': 1e9,
+                      'corner_preview_lookahead_mm': 500.0})
+    fsm.fork_choice, fsm.axis_yaw = 'A', 0.0
+    fsm._next(Inputs(t=0.0, dist_mm=5000.0, yaw=0.0), 'fork A done')
+    cmd = fsm.step(Inputs(t=0.1, dist_mm=5100.0, yaw=0.0, lane={'status': 'BOTH'}))
+    assert fsm.state == 'M2_EXIT' and cmd.lane['lookahead_mm'] == 500.0
+    off = MissionFSM({'start_state': 'M2_FORK', 'cones_source_ready': True, 'odom_jump_mm': 1e9})
+    off.fork_choice, off.axis_yaw = 'A', 0.0
+    off._next(Inputs(t=0.0, dist_mm=5000.0, yaw=0.0), 'fork A done')
+    assert 'lookahead_mm' not in off.step(Inputs(t=0.1, dist_mm=5100.0, yaw=0.0, lane={'status': 'BOTH'})).lane
+    m7 = MissionFSM({'start_state': 'M3_PEDESTRIAN', 'corner_preview_lookahead_mm': 500.0, 'odom_jump_mm': 1e9,
+                     'm7_external_avoid': True})          # 실차 launch (m7_avoid:=true)
+    m7._goto('M7_OBSTACLE', Inputs(t=0.0, dist_mm=1000.0, yaw=0.0), 'crosswalk done')
+    assert m7.m7c is not None
+    cmd = m7.step(Inputs(t=0.1, dist_mm=1050.0, yaw=0.0, lane={'status': 'BOTH'}))
+    assert cmd.lane['lookahead_mm'] == 500.0
+
+
 def test_m2_exit_off_keeps_old_m8_approach():
     fsm = MissionFSM({'start_state': 'M2_FORK', 'm2_exit': False})
     fsm.fork_choice = 'A'
