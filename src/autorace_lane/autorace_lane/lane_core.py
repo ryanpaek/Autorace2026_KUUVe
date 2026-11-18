@@ -292,8 +292,10 @@ class LaneParams:
     # 코너 들어가기 전 감속: 앞에 보이는(또는 도면상) 곡률이 preview_kappa_ref면 이 비율만큼 감속
     preview_slowdown: float = 0.0     # 권장 0.25
     preview_kappa_ref: float = 1.5
-    # 속도에 따라 lookahead 늘리기: lookahead = lookahead_mm + 이 값 * (속도 - 0.3). 상한 750
-    lookahead_per_mps: float = 0.0    # 권장 500 (0.4 m/s에서 +50mm)
+    # 속도에 따라 lookahead 늘리기: lookahead = lookahead_mm + 이 값 * max(0, 속도 - 0.3). 상한 lookahead_max_mm
+    #   11/19: 0.3 m/s 넘을 때만 늘림 (그 밑은 미션이 정한 lookahead 그대로 -> 커브 0.15·M7·지그재그·코너 미리보기 동작 안 바뀜).
+    #   1118_10 직선 0.47 m/s S자(판단~바퀴 지연 약 0.6 s) 시뮬레이션: 1000이면 ±53 -> ±5 mm
+    lookahead_per_mps: float = 0.0
     lookahead_max_mm: float = 750.0
     # 한쪽 선만 보일 때 lookahead (0이면 같은 값). 모의 맵 코너는 바깥 선이 안쪽 선보다 60~70cm 늦게
     # 휘어서, 바깥 선만 보일 때 650 앞은 아직 직선 -> 늦게 꺾는다 (11/06 두 번째 코너 이탈)
@@ -1546,9 +1548,12 @@ class LaneFollower:
         cfg, p = self.cfg, self.p
         raw_lane = bev_lane                 # 가로선 찾기용 (아래 팽창·가로 성분 제거 전)
         look = p.lookahead_mm
-        if p.lookahead_per_mps:
-            look = float(np.clip(p.lookahead_mm + p.lookahead_per_mps * (speed - 0.3),
-                                 min(p.lookahead_mm, 450.0), p.lookahead_max_mm))
+        v_look = speed
+        if self.in_corner_spd and p.corner_speed > 0.0:
+            v_look = min(speed, p.corner_speed)     # 11/19: 커브(속도 상한 걸림)에서는 줄인 속도 기준 (명령 0.4로 750이면 우상단 코너 바깥 여유 43 -> 28 mm)
+        if p.lookahead_per_mps and v_look > 0.3:
+            look = float(min(p.lookahead_mm + p.lookahead_per_mps * (v_look - 0.3),
+                             max(p.lookahead_max_mm, p.lookahead_mm)))
         if p.corner_lookahead_mm > look and p.lookahead_mm >= p.corner_ld_base_min and self.mode == 'normal':
             k_ahead = abs(self.kappa_cmd)
             if self.route_k:

@@ -32,16 +32,21 @@ def small_steer_comp(delta: float, gain: float = 1.0, below: float = 0.10) -> fl
 def twist_to_ackermann(v: float, w: float, wheelbase: float = 0.2,
                        max_steer: float = 0.40, min_speed: float = 0.02,
                        small_gain: float = 1.0, small_below: float = 0.10,
-                       steer_gain: float = 1.0):
+                       steer_gain: float = 1.0, steer_trim: float = 0.0):
     """(speed, steering_angle) 반환. 정지에 가까우면 조향 0.
 
     steer_gain (11/15): 전체 조향 배율. 1114 bag 네 판 R640 코너에서 명령 곡률 1.6~1.8 1/m인데
     IMU로 잰 실제 곡률은 1.35~1.40 (명령의 약 80%) -> 코너를 크게 돌아 바깥 선에 붙음. 1.2면 거의 맞음.
     오도메트리 곡률은 명령대로 나와서(조향 모델값) 시뮬·디버그 화면에서는 정상처럼 보였다.
+
+    steer_trim (11/18, rad, 왼쪽 +): 조향 0점 보정. 1118_04 bag 방지턱 직선: 실제 곡률(IMU) ≈
+    0.45 x 명령 - 0.035 -> 명령 0이면 오른쪽으로 돎, 직진하려면 가상 바퀴 약 +0.015 rad(0.9°)가 필요.
+    움직일 때만 더한다 (정지 중 조향 0은 그대로).
     """
     if abs(v) < min_speed:
         return float(v), 0.0
     delta = small_steer_comp(math.atan(wheelbase * w / v), small_gain, small_below) * steer_gain
+    delta += steer_trim
     return float(v), float(max(-max_steer, min(max_steer, delta)))
 
 
@@ -61,6 +66,7 @@ def main(args=None):
             self.declare_parameter('small_steer_gain', 1.0)   # 작은 조향 보정 (1.0 = 끔, 권장 1.3)
             self.declare_parameter('small_steer_below', 0.10)
             self.declare_parameter('steer_gain', 1.0)         # 11/15: 전체 조향 배율 (실측 80%만 돎 -> 1.2 권장)
+            self.declare_parameter('steer_trim', 0.0)         # 11/18: 조향 0점 보정 rad (왼쪽 +)
             self.declare_parameter('in_topic', '/cmd_vel')
             self.declare_parameter('out_topic', '/limo/ack_cmd')
             self.speed = 0.0
@@ -79,7 +85,8 @@ def main(args=None):
                                       p('max_steer').value,
                                       small_gain=float(p('small_steer_gain').value),
                                       small_below=float(p('small_steer_below').value),
-                                      steer_gain=float(p('steer_gain').value))
+                                      steer_gain=float(p('steer_gain').value),
+                                      steer_trim=float(p('steer_trim').value))
             vmax = p('max_speed').value
             self.speed = max(-vmax, min(vmax, v))
             self.steer = d

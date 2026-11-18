@@ -485,3 +485,31 @@ def test_curve_kappa_gain_only_in_detected_curves(cfg):
     assert ks[(650.0, 1.2)] < ks[(650.0, 0.0)] - 0.05        # 커브: 더 크게 (오른쪽 = 음수)
     z = LaneFollower(cfg, LaneParams(lookahead_mm=260.0, curve_kappa_gain=0.0, corner_kappa_gain=1.1))
     assert ks[(260.0, 1.2)] == pytest.approx(run(z, bev, frames=25, yaw=0.0, speed=0.15).kappa, abs=1e-6)
+
+
+def test_lookahead_per_mps_only_above_0p3_1119():
+    """11/19: 속도 비례 lookahead는 0.3 m/s 넘을 때만 늘리고, 그 밑은 그대로."""
+    import numpy as np
+    from autorace_lane.lane_core import BevConfig, LaneFollower, LaneParams
+    cfg = BevConfig(H=np.eye(3), calibrated=True)
+    img = np.zeros((480, 640, 3), np.uint8)
+    for spd, base, want in ((0.15, 650.0, 650.0), (0.20, 400.0, 400.0), (0.40, 650.0, 750.0),
+                            (0.50, 650.0, 850.0), (0.60, 650.0, 850.0)):
+        f = LaneFollower(cfg, LaneParams(lookahead_mm=base, lookahead_per_mps=1000.0, lookahead_max_mm=850.0,
+                                         corner_lookahead_mm=0.0))
+        out = f.process(img, speed=spd)
+        assert abs(out.lookahead_mm - want) < 1e-6, (spd, base, out.lookahead_mm)
+
+
+def test_lookahead_per_mps_uses_corner_speed_in_curve_1119():
+    """11/19: 커브 판단(in_corner_spd)이 켜져 있으면 줄인 속도(corner_speed) 기준 lookahead."""
+    import numpy as np
+    from autorace_lane.lane_core import BevConfig, LaneFollower, LaneParams
+    cfg = BevConfig(H=np.eye(3), calibrated=True)
+    img = np.zeros((480, 640, 3), np.uint8)
+    f = LaneFollower(cfg, LaneParams(lookahead_mm=650.0, lookahead_per_mps=1000.0, lookahead_max_mm=850.0,
+                                     corner_lookahead_mm=0.0, corner_speed=0.15))
+    f.in_corner_spd = True
+    f.kappa_cmd = 1.0                     # 이번 프레임도 커브로 남게
+    out = f.process(img, speed=0.40)
+    assert abs(out.lookahead_mm - 650.0) < 1e-6, out.lookahead_mm
