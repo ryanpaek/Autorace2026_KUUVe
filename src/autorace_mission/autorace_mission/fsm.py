@@ -52,6 +52,13 @@ DEFAULT_PARAMS = {
     #   corner_lock 하한(|k|-0.3=1.42)이 '덜 꺾기' 보정을 막음 -> 코너 끝에서 뒷바퀴가 차로 중심보다 약 22 cm 안쪽.
     #   이 구간에서만 차선 노드 route_ff_preview_mm을 이 값으로 덮어씀 (M7 직전 코너 등은 그대로). 음수 = 안 덮어씀
     'c1_ff_preview_mm': -1.0,
+    # 11/20 시뮬(r3b·r4): 2번 코너(M3 횡단보도 끝 -> M7, 우회전)도 같은 원인으로 오른쪽 바퀴가 안쪽 선 밖(5/5 차로 이탈).
+    #   M7 코너 보완(plain lane) 중에만 같은 덮어쓰기. 음수 = 안 덮어씀
+    'c2_ff_preview_mm': -1.0,
+    # 11/20 시뮬: M3 대기를 '정지 명령'부터 세면 차가 아직 굴러가서 실제로 선 시간은 약 3.0 s (규정 3 s 이상 아슬아슬).
+    #   >0이면 오도메트리가 멈춘 순간(m3_still_mm 안)부터 이 시간도 채워야 출발. 0 = 끔 (예전)
+    'm3_still_wait_sec': 0.0,
+    'm3_still_mm': 3.0,
     'zigzag_start_mm': 7200.0,   # 경로 지도도 카메라 선도 없을 때만: M5 종료 ~ 지그재그 시작선 (3순위)
     'zigzag_len_mm': 1800.0,     # 도면: 지그재그 약 1.7~1.9m. 바로 뒤 횡단보도 정지선까지 약 250mm라 여유를 크게 안 둠
     'zigzag_width_mm': 570.0,
@@ -961,8 +968,17 @@ class MissionFSM:
             self._sub('stopped', inp)
         if self.sub == 'stopped':
             t, _ = self._since(inp, sub=True)
-            if t < p['ped_wait_sec']:
+            still_ok = True
+            if p.get('m3_still_wait_sec', 0.0) > 0.0:
+                last = getattr(self, '_m3_last_d', None)
+                if last is None or inp.dist_mm - last > p.get('m3_still_mm', 3.0) or getattr(self, '_m3_still_t', None) is None:
+                    if last is None or inp.dist_mm - last > p.get('m3_still_mm', 3.0):
+                        self._m3_still_t = inp.t          # 아직 굴러감 -> 멈춘 순간을 다시 잡음
+                    self._m3_last_d = inp.dist_mm
+                still_ok = inp.t - self._m3_still_t >= p['m3_still_wait_sec']
+            if t < p['ped_wait_sec'] or not still_ok:
                 return Command('stop', self._lane(0.0))
+            self._m3_last_d, self._m3_still_t = None, None
             self._sub('go', inp)
         _, d = self._since(inp, sub=True)
         if d >= p['leave_mm'] and self._past(inp, 'm3_crosswalk_end') is not False:
@@ -1019,6 +1035,8 @@ class MissionFSM:
             #   직선(흰 선)을 따라 코너를 직진했다(IMU 3°만 돎). 코너를 IMU로 다 돌 때까지는 보통 차선 설정 그대로
             kw = {'lost_search': True} if self.p.get('fork_lost_search', False) else {}
             kw.update(self._corner_look())
+            if self.p.get('c2_ff_preview_mm', -1.0) >= 0.0:
+                kw['route_ff_preview_mm'] = float(self.p['c2_ff_preview_mm'])
             return Command('lane', self._lane(self.p['m7_speed'], **kw), note='M7_OBSTACLE/corner (plain lane)')
         kw = {'lookahead_mm': float(self.p['m7_lookahead_mm'])} if self.p.get('m7_lookahead_mm', 0.0) > 0.0 else {}
         return Command(src, self._lane(self.p['m7_speed'],
