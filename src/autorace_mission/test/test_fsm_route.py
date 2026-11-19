@@ -352,3 +352,14 @@ def test_m8_entry_waits_for_merge_and_corner():
     assert fsm._cones_entry(Inputs(t=1.0, dist_mm=100.0, route_s=22100.0, yaw=_m.radians(-40.0)), 'M2_EXIT') is None
     fsm.m2m = {'done': True}
     assert fsm._cones_entry(Inputs(t=1.1, dist_mm=120.0, route_s=22150.0, yaw=_m.radians(-10.0)), 'M2_EXIT') is None
+
+
+def test_m8_route_end_ignored_while_cones_ahead():
+    """11/20 yubin sim_1 063912: 도면 위치가 끝선을 넘었어도 앞에 콘이 보이면 handover 안 함"""
+    fsm = MissionFSM({'start_state': 'M8_CONES', 'cones_source_ready': True, 'route_points': {'m8_end_line': 25000.0}})
+    fsm._sub('cones', Inputs(t=0.0, dist_mm=0.0), 'test')
+    cmd = fsm.step(Inputs(t=1.0, dist_mm=500.0, route_s=26000.0, yaw=0.0,
+                          obstacle={'cone_any_ahead_mm': 400.0, 'cones_done': False}))
+    assert fsm.sub == 'cones' and cmd.source == 'obstacle'
+    fsm.step(Inputs(t=1.1, dist_mm=520.0, route_s=26000.0, yaw=0.0, obstacle={'cones_done': False}))
+    assert fsm.sub == 'handover'

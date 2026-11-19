@@ -1449,7 +1449,9 @@ class MissionFSM:
                     self.cones_gone_t = inp.t
                 gone = inp.t - self.cones_gone_t >= p['cones_gone_sec']
             done = inp.obstacle.get('cones_done', False)
-            end = self._past(inp, 'm8_end_line', p['cones_end_after_mm'])
+            # 11/20 yubin: 도면 위치는 코너 보정으로 1~2 m 앞서 튈 수 있음 (sim_1 063912: 끝선 1.8 m 전 y 2.17에서 M1로 -> M1 코너로 동쪽 이탈).
+            #   앞에 콘이 보이면 도면 끝선은 안 믿음 (콘 안 보임·obstacle done·거리 상한은 그대로)
+            end = self._past(inp, 'm8_end_line', p['cones_end_after_mm']) and not visible
             if gone or done or end or d >= p['cones_zone_mm']:
                 why = ('no cones ahead' if gone else 'obstacle done' if done
                        else 'FALLBACK: end line' if end else f'FALLBACK: distance {d:.0f}mm')
