@@ -363,3 +363,17 @@ def test_m8_route_end_ignored_while_cones_ahead():
     assert fsm.sub == 'cones' and cmd.source == 'obstacle'
     fsm.step(Inputs(t=1.1, dist_mm=520.0, route_s=26000.0, yaw=0.0, obstacle={'cones_done': False}))
     assert fsm.sub == 'handover'
+
+
+def test_m2_fork_a_ignores_tip_and_route_when_disabled():
+    """11/20 yubin: m2_fork_adj_a false면 A는 섬 앞 끝 측정(-400)도 도면 위치도 안 쓰고 M2 시작부터 1945 mm에서 끝. B는 예전대로 (여기선 도면 위치 1718)"""
+    for choice, want in (('A', 1945.0), ('B', 1718.0)):
+        fsm = _m2_fsm(m2_fork_adj_a=False, route_points={'m7_island_tip': 17973.0, 'm2_island_end': 19718.0,
+                                                         'm2_merge_end': 20272.0})
+        fsm.fork_choice = choice
+        d = 0.0
+        while fsm.state == 'M2_FORK' and d < 4000.0:
+            fsm.step(Inputs(t=d / 200.0, dist_mm=d, route_s=18200.0 + d, yaw=0.0,
+                            obstacle={'m7_exit': choice, 'm7_to_tip_mm': -400.0}))
+            d += 10.0
+        assert abs(d - 10.0 - want) <= 30.0, (choice, d)

@@ -186,6 +186,7 @@ DEFAULT_PARAMS = {
     'fork_normal_after_dist_mm': 700.0,   #   도면 위치가 없으면 갈림길 시작부터 이 거리 뒤
     'm2_merge': True,
     'm2_merge_lane_first': True,       # 11/20 yubin: false = S자 동안 차선 조향 안 섞음 (sim_1: 차선이 갈래 직선을 붙잡아 S자가 늦고 45°로 따라잡다 넘침)
+    'm2_fork_adj_a': True,             # 11/20 yubin: false = A 갈래는 M7이 잰 섬 앞 끝 거리로 M2 끝을 안 당김 (params.yaml에서 끔)
     'm2_merge_plain': False,           # 11/20 yubin: m2_plain_lane에서도 합류 강제 S자 (params.yaml에서 켬). sim_1: 직선 그대로 가 합류 사선 바깥선을 넘음
     'm2_merge_before_end_mm': 500.0,   # 섬 왼쪽 끝(m2_island_end)보다 이만큼 앞에서 시작 (자기 차로 안에서 먼저 안쪽으로)
     'm2_merge_from_tip_mm': 1245.0,    # 도면 위치가 없을 때: M2 시작(섬 앞 끝 근처)부터 이만큼 가서 시작 (섬 길이 1745 - 500)
@@ -1093,6 +1094,9 @@ class MissionFSM:
             tip = inp.obstacle.get('m7_to_tip_mm')
             self.fork_adj_mm = (max(-self.p['fork_adj_max_mm'], min(self.p['fork_adj_max_mm'], float(tip)))
                                 if isinstance(tip, (int, float)) else 0.0)
+            if self.fork_choice == 'A' and not self.p.get('m2_fork_adj_a', True):
+                # 11/20 yubin: A는 섬 앞을 비스듬히 지나 섬 앞 끝 측정이 -0.3~-0.6 m 틀어짐 -> M2를 0.3~0.45 m 일찍 끝내 코너 안쪽 밟음 (sim_1 A 8판 중 5판)
+                self.fork_adj_mm = 0.0
         _, db = self._since(inp, sub=True)
         if self.p.get('m2_plain_lane', True):
             # 11/18: CSV 재생 뒤 = 일반 차선 (한쪽 선 모드·폭 460·합류 S자 없음). 끝 판정은 그대로
@@ -1153,6 +1157,8 @@ class MissionFSM:
         # M2 시작 = 섬 앞 끝 + (-fork_adj_mm) (fork_adj_mm = M7이 마지막으로 잰 섬 앞 끝까지 거리, 지나쳤으면 음수)
         need = p.get('m2_island_len_mm', 1745.0) + p.get('m2_exit_after_island_mm', 200.0) + self.fork_adj_mm
         rem_d = need - db
+        if self.fork_choice == 'A' and not p.get('m2_fork_adj_a', True):
+            return rem_d <= 0.0     # A: 도면 위치도 같은 만큼 앞서(주행거리 기반) -> 거리로만
         s0 = self._rp('m2_island_end')
         if route_end is None or s0 is None or inp.route_s is None:
             return route_end
