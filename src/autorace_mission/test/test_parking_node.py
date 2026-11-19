@@ -860,6 +860,22 @@ def test_fixed_lane_lost_creep_waits_for_front_object():
     assert stop_d == pytest.approx(616.0 - 56.0, abs=15.0)
 
 
+def test_fixed_stale_line_at_arm_is_not_caught():
+    """시뮬 재현: 켜지는 순간 낡은 선 1636 mm가 0.4초 남아 있다가 사라지고, 진짜 선은 400 mm 앞 -> 진짜 선에서 섬."""
+    lg = pn.ParkingV2(dict(pn.DEFAULTS, **FIXED))
+    d, stop_d = 0.0, None
+    for i in range(3000):
+        t = i * 0.05
+        ls = [1636.0] if t < 0.4 else sorted(x for x in [400.0 - d] if 60.0 <= x <= 700.0)
+        v, k, info = lg.step({'t': t, 'dist_mm': d, 'yaw': 0.0, 'lane_v': 0.18, 'lane_w': 0.0,
+                              'stoplines_mm': ls, 'clusters': [], 'blocked': False})
+        if lg.phase == 'F_PAUSE':
+            stop_d = d
+            break
+        d += v * 50.0
+    assert stop_d == pytest.approx(400.0 - 56.0, abs=15.0)
+
+
 def test_fixed_no_line_seen_lane_stop_does_not_creep():
     """선을 아직 못 잡았으면(end_d 없음) 차선이 멈출 때 같이 멈춤 (아무 데로나 가지 않음)."""
     lg = pn.ParkingV2(dict(pn.DEFAULTS, **FIXED))
