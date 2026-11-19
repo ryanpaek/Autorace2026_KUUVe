@@ -166,6 +166,16 @@ class LaneParams:
     yellow_h_max: int = 40
     yellow_s_min: int = 80
     yellow_v_min: int = 80
+    # 11/19 대회장 1~4차: 조명 센 곳에서 노란 선이 노출 과다로 흰색이 됨 (1119_09 첫 코너 앞: 선 V 253~254, S 150 -> 30, 37 s부터 RGB 모두 250+).
+    #   일반 모드(lane_color yellow)에서 직전 프레임에 따라가던 선 둘레 ±white_bridge_mm 안의 흰색·옅은 노랑 화소만 차선으로 이어 붙인다.
+    #   새 선은 만들지 않음. 가로로 white_bridge_max_w_mm 넘게 이어진 밝은 덩어리(바닥 반사)는 버림. 0 = 끔
+    white_bridge_mm: float = 0.0
+    white_bridge_max_w_mm: float = 60.0
+    white_bridge_keep_frames: int = 3       # 선을 한 프레임 놓쳐도 이만큼은 직전 선 둘레를 계속 봄
+    white_bridge_pale_s_min: int = 20       # 옅은 노랑: 노란 색상 범위 + 이 채도 이상 + 아래 밝기 이상
+    white_bridge_pale_v_min: int = 200
+    # 11/19: 선을 놓쳐 hold/route/search로 갈 때 속도 상한 (m/s, 0 = 끔). 1~4차 첫 코너 앞에서 선 없이 0.4 m/s로 3 m 달림
+    lost_speed: float = 0.0
     # 마스크 전처리
     suppress_transverse: bool = True  # 가로로 긴 선(정지선·시작선)을 차선 마스크에서 제거
     max_run_mm: float = 150.0         # 이보다 긴 가로 연속 화소는 차선이 아니라고 본다
@@ -430,6 +440,7 @@ class LaneOutput:
         d['model'] = ('circle' if cl.circle is not None else 'poly') if cl is not None else None
         d['circle_r_mm'] = round(cl.circle[2]) if cl is not None and cl.circle is not None else None
         d['inner'] = self.debug.get('inner')      # 코너 안쪽 선 기준이면 'L'/'R'
+        d['white_bridge'] = self.debug.get('white_bridge')   # 11/19: 흰색 이어 붙이기로 더한 화소 수
         d['realign_deg'] = self.debug.get('realign_deg')   # 크게 기운 노란 선으로 방향 바로잡는 중이면 그 선 각도
         d['stopline_angle_deg'] = self.debug.get('stopline_angle_deg')  # 가로선을 찾은 기울기 (0 = 예전처럼 수평)
         return d
@@ -1496,6 +1507,9 @@ class LaneFollower:
         self.last_side = None
         self.last_lr = (None, None)          # 직전 프레임 좌/우 선 시작점 (BEV 열)
         self.prev_line_masks = (None, None)  # 직전 프레임 좌/우 선 화소 (BEV, 조금 부풀림)
+        self.prev_tracks = [None, None]      # 11/19 흰색 이어 붙이기: 직전 좌/우 선 윈도우 중심 (BEV [col,row])
+        self.prev_tracks_age = [0, 0]
+        self._bev_bridge_src = None
         self.prev_target_x = None
         self.reject_count = 0
         self.lost_frames = 0
@@ -1539,6 +1553,13 @@ class LaneFollower:
                 lane, white = self.mask_fn(bgr)
         bev_lane = cfg.warp(lane)
         bev_white = cfg.warp(white)
+        self._bev_bridge_src = None
+        if p.white_bridge_mm > 0.0 and p.lane_color == 'yellow' and self.mask_fn is None:
+            hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+            pale = cv2.inRange(hsv, np.array([p.yellow_h_min, p.white_bridge_pale_s_min,
+                                              p.white_bridge_pale_v_min], np.uint8),
+                               np.array([p.yellow_h_max, 255, 255], np.uint8))
+            self._bev_bridge_src = cv2.bitwise_or(bev_white, cfg.warp(pale))
         return self.process_bev(bev_lane, bev_white, yaw=yaw, speed=speed, pose=pose,
                                 dist_mm=dist_mm)
 
@@ -1547,6 +1568,9 @@ class LaneFollower:
                     pose=None, dist_mm: Optional[float] = None) -> LaneOutput:
         cfg, p = self.cfg, self.p
         raw_lane = bev_lane                 # 가로선 찾기용 (아래 팽창·가로 성분 제거 전)
+        bridge_px = self._white_bridge(bev_lane, bev_white)
+        if bridge_px:
+            bev_lane = cv2.bitwise_or(bev_lane, self._bridge_add)
         look = p.lookahead_mm
         v_look = speed
         if self.in_corner_spd and p.corner_speed > 0.0:
@@ -1574,6 +1598,7 @@ class LaneFollower:
 
         out = LaneOutput()
         out.debug['bev'] = bev_lane
+        out.debug['white_bridge'] = bridge_px or None
         det = detect_lanes(bev_lane, cfg, p, self.mode, self.mid_ema, self.last_side,
                            self.last_lr)
         n_lab, lab_full = cv2.connectedComponents((bev_lane > 0).astype(np.uint8), connectivity=8)
@@ -1591,6 +1616,13 @@ class LaneFollower:
         left = track_line(bev_lane, det.left_x0, cfg, p) if det.left_x0 is not None else None
         right = track_line(bev_lane, det.right_x0, cfg, p) if det.right_x0 is not None else None
         out.debug['left'], out.debug['right'] = left, right
+        for i, tr in enumerate((left, right)):
+            if tr is not None and int((~np.isnan(tr[:, 0])).sum()) >= 2:
+                self.prev_tracks[i], self.prev_tracks_age[i] = tr, 0
+            else:
+                self.prev_tracks_age[i] += 1
+                if self.prev_tracks_age[i] > p.white_bridge_keep_frames:
+                    self.prev_tracks[i] = None
         if p.line_types:
             out.line_left = classify_line(left, raw_lane, bev_white, cfg, p)
             out.line_right = classify_line(right, raw_lane, bev_white, cfg, p)
@@ -1866,6 +1898,8 @@ class LaneFollower:
                                       * min(1.0, kp / max(p.preview_kappa_ref, 1e-3)))
             if p.corner_speed > 0.0 and speed > p.corner_speed and self.in_corner_spd:
                 out.speed_scale = min(out.speed_scale, p.corner_speed / speed)
+            if p.lost_speed > 0.0 and speed > p.lost_speed and source in ('hold', 'route', 'search'):
+                out.speed_scale = min(out.speed_scale, p.lost_speed / speed)   # 11/19: 선 없이 빨리 달리지 않게
 
         # 정지선 (흰색 마스크 기준, 차로 안쪽만)
         if bev_white is not None:
@@ -1922,6 +1956,37 @@ class LaneFollower:
             return None
         m = np.isin(lab, list(labels)).astype(np.uint8)
         return cv2.dilate(m, np.ones((19, 19), np.uint8)) > 0   # 한 프레임 이동·회전 여유
+
+    def _white_bridge(self, bev_lane: np.ndarray, bev_white: Optional[np.ndarray]) -> int:
+        """11/19: 직전에 따라가던 선 둘레의 흰색·옅은 노랑 화소 (white_bridge_mm 설명). 붙일 화소 수를 돌려주고
+        self._bridge_add에 그 마스크를 둔다."""
+        p, cfg = self.p, self.cfg
+        self._bridge_add = None
+        src = self._bev_bridge_src if self._bev_bridge_src is not None else bev_white
+        if (p.white_bridge_mm <= 0.0 or p.lane_color != 'yellow' or self.mode != 'normal'
+                or src is None or src.shape != bev_lane.shape):
+            return 0
+        corr = np.zeros_like(bev_lane)
+        th = max(1, int(round(2.0 * p.white_bridge_mm / cfg.mm_per_px_x)))
+        for tr in self.prev_tracks:
+            if tr is None:
+                continue
+            pts = tr[~np.isnan(tr[:, 0])]
+            if len(pts) < 2:
+                continue
+            pts = pts[np.argsort(-pts[:, 1])]            # 아래 -> 위
+            ext = np.vstack([[pts[0, 0], bev_lane.shape[0] - 1], pts])   # BEV 아래 끝까지 이어 그림
+            cv2.polylines(corr, [np.round(ext).astype(np.int32).reshape(-1, 1, 2)], False, 255, th)
+        if not corr.any():
+            return 0
+        add = cv2.bitwise_and(src, corr)
+        add = cv2.bitwise_and(add, cv2.bitwise_not(bev_lane))
+        add = remove_transverse(add, p.white_bridge_max_w_mm / cfg.mm_per_px_x)
+        n = int(cv2.countNonZero(add))
+        if n == 0:
+            return 0
+        self._bridge_add = add
+        return n
 
     def _keep_side_by_overlap(self, det: 'Detection', lab: np.ndarray) -> None:
         """한쪽 선만 보일 때, 직전 프레임의 좌/우 선 화소와 더 많이 겹치는 쪽으로 판정한다.
