@@ -68,7 +68,9 @@ def raycast(x, y, psi, segs, lidar_x, rng, rmax=3.0):
     return out
 
 
-def run(seed, entry='straight', overrides=None, gain=0.74 * 1.2, bias=-0.051 + 0.075, t_max=120.0, ped=False, core_cls=None):
+def run(seed, entry='straight', overrides=None, gain=0.74 * 1.2, bias=-0.051 + 0.075, t_max=120.0, ped=False, core_cls=None,
+        section=None):
+    """section: 노드에 넣는 섬까지 거리 (None = 실제 5.6 m + end_before). 실차 m7_link는 4.8 m로 자름 -> 끝 뒤엔 FSM처럼 그 차로 직진."""
     rng = random.Random(seed * 104729 + 7)
     obs, fork = layout(seed)
     segs = segments(obs)
@@ -77,7 +79,7 @@ def run(seed, entry='straight', overrides=None, gain=0.74 * 1.2, bias=-0.051 + 0
     p = WaypointParams()
     for k, v in (overrides or {}).items():
         setattr(p, k, v)
-    p.section_length = 5.6 + p.end_before
+    p.section_length = 5.6 + p.end_before if section is None else section
     if entry == 'inside':
         p.start_lane = -1
     core = (core_cls or M7Waypoint)(p)
@@ -106,7 +108,10 @@ def run(seed, entry='straight', overrides=None, gain=0.74 * 1.2, bias=-0.051 + 0
     contact = depart = False
     t0 = t
     min_gap = 9.9
+    fsm = False                             # DONE 뒤: FSM 차선 주행 흉내 (끝난 차로 가운데로 0.2 m/s)
     while t - t0 < t_max:
+        if fsm and X >= 5.6:
+            break
         if t >= next_scan:
             next_scan += 0.1
             sg = segs
@@ -115,9 +120,17 @@ def run(seed, entry='straight', overrides=None, gain=0.74 * 1.2, bias=-0.051 + 0
             core.on_scan(t, raycast(X, Y, PSI, sg, p.lidar_x, rng), math.radians(-120), math.radians(120))
         if t >= next_ctl:
             next_ctl += 0.05
-            v, k_cmd = core.step(t)
-            if core.state == 'DONE':
-                break
+            if fsm:
+                c0, s0 = math.cos(PSI), math.sin(PSI)
+                dy0 = core.target * LW - Y
+                xr0, yr0 = 0.4 * c0 + dy0 * s0, -0.4 * s0 + dy0 * c0
+                v, k_cmd = 0.2, max(-1.9, min(1.9, 2 * yr0 / (xr0 * xr0 + yr0 * yr0)))
+            else:
+                v, k_cmd = core.step(t)
+            if core.state == 'DONE' and not fsm:
+                if section is None:
+                    break
+                fsm, x_done, lane_done = True, X, core.target
         q.append(k_cmd)
         kd = q.pop(0)
         K += (max(-1.6, min(1.6, gain * kd + bias)) - K) * dt / 0.1
@@ -147,9 +160,12 @@ def run(seed, entry='straight', overrides=None, gain=0.74 * 1.2, bias=-0.051 + 0
             depart = True
     reached = core.state == 'DONE' and X >= 5.6 - 0.4
     st = core.status()
+    lane_end = core.target if core.state == 'DONE' else None
     return {'seed': seed, 'feasible': feasible, 'reached': reached, 'contact': contact, 'depart': depart,
             'success': reached and not contact and not depart, 'x': round(X, 2), 't': round(t - t0, 1),
-            'n_rev': st['n_rev'], 'why': st['why'], 'y_err': round(core.pose()[1] - Y, 3)}
+            'n_rev': st['n_rev'], 'why': st['why'], 'y_err': round(core.pose()[1] - Y, 3),
+            'fork': fork, 'lane_end': lane_end, 'fork_ok': lane_end == (1 if fork == 'A' else -1),
+            'x_done': round(x_done, 2) if fsm else None}
 
 
 def main():
