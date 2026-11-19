@@ -23,6 +23,7 @@ setup(
             'bev_calib = autorace_lane.bev_calib:main',
             'offline_replay = autorace_lane.offline_replay:main',
             'lane_eval = autorace_lane.lane_eval:main',
+            'yellow_side_node = autorace_lane.yellow_side_node:main',   # 11/19 노란 선 옆 거리 (보기·기록용)
         ],
     },
 )
