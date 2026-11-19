@@ -18,11 +18,49 @@
   level 4: 바닥 V  80                        100% / 98%              | x0.60
   (참고: 자동 노출 그대로일 때 출발선 바닥 V 119~132, 주행 중 중앙 137)
 """
+import os
 from dataclasses import dataclass
 
 import numpy as np
 
 LEVEL_FLOOR_V = {1: 115.0, 2: 100.0, 3: 90.0, 4: 80.0}
+
+# 정해 둔 단계를 저장하는 파일 (LIMO 홈 폴더, git pull·빌드해도 안 지워짐)
+#   저장: ros2 run autorace_bringup cam_level 3     확인: ros2 run autorace_bringup cam_level
+LEVEL_FILE = os.path.expanduser('~/.autorace/cam_exp_level')
+
+
+def parse_level(text):
+    """'3' -> 3, 0~4 밖이거나 숫자가 아니면 None"""
+    try:
+        v = int(str(text).strip())
+    except (TypeError, ValueError):
+        return None
+    return v if v == 0 or v in LEVEL_FLOOR_V else None
+
+
+def read_saved_level(path=LEVEL_FILE):
+    try:
+        with open(path) as f:
+            return parse_level(f.read())
+    except OSError:
+        return None
+
+
+def save_level(level, path=LEVEL_FILE):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w') as f:
+        f.write(f'{int(level)}\n')
+
+
+def resolve_level(override, saved, default):
+    """단계 우선순위: launch 인자 cam_exp_level > 저장 파일 > params.yaml level. (단계, 출처)"""
+    o = parse_level(override)
+    if o is not None:
+        return o, 'launch 인자'
+    if saved is not None:
+        return saved, LEVEL_FILE
+    return int(default), 'params.yaml'
 
 
 @dataclass

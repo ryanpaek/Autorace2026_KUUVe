@@ -1,7 +1,11 @@
 """출발 전에 카메라 노출을 한 번 정해서 고정하는 노드 (11/19 '노란 실선이 흰색으로 날아감' 대응).
 
   ros2 run autorace_bringup exposure_node
-  (sensors.launch.py / full.launch.py 가 기본으로 띄움. 단계: cam_exp_level:=0~4, 0 = 끔)
+  (sensors.launch.py / full.launch.py 가 기본으로 띄움)
+단계 정하기 (0 = 끔, 1~4 클수록 어두움, 표는 exposure_core.py):
+  ros2 run autorace_bringup cam_level 3     # 저장 -> 다음 실행부터 계속 3 (LIMO ~/.autorace/cam_exp_level)
+  ros2 run autorace_bringup cam_level       # 지금 저장된 단계 보기
+  우선순위: launch 인자 cam_exp_level:=N (그 실행만) > 저장 파일 > params.yaml level
 
 순서 (카메라가 켜지고 약 4초, 출발 전에 끝남):
   1. 자동 노출이 settle_s 초 동안 자리 잡게 둠
@@ -25,7 +29,7 @@ from sensor_msgs.msg import Image
 from std_msgs.msg import String
 from std_srvs.srv import SetBool
 
-from autorace_bringup.exposure_core import ExposureParams, fixed_exposure, floor_v
+from autorace_bringup.exposure_core import ExposureParams, fixed_exposure, floor_v, read_saved_level, resolve_level
 
 try:
     from orbbec_camera_msgs.srv import GetInt32, SetInt32
@@ -53,6 +57,7 @@ class ExposureNode(Node):
         self.declare_parameter('camera_ns', '/camera')
         self.declare_parameter('settle_s', 3.0)
         self.declare_parameter('lock_wb', True)
+        self.declare_parameter('level_override', 'saved')   # launch 인자 cam_exp_level ('saved' = 저장 파일)
         for k in ('level', 'fixed_exposure', 'min_exposure'):
             self.declare_parameter(k, int(getattr(d, k)))
         for k in ('target_floor_v', 'gamma', 'max_ratio', 'roi_top'):
@@ -60,9 +65,11 @@ class ExposureNode(Node):
         g = lambda k: self.get_parameter(k).value
         self.p = ExposureParams(**{k: g(k) for k in (
             'level', 'fixed_exposure', 'min_exposure', 'target_floor_v', 'gamma', 'max_ratio', 'roi_top')})
+        self.p.level, src = resolve_level(g('level_override'), read_saved_level(), self.p.level)
+        self.get_logger().info(f'exposure_node: 단계 {self.p.level} ({src})')
         self.settle_s = float(g('settle_s'))
         self.lock_wb = bool(g('lock_wb'))
-        self.info = {'state': 'start', 'level': self.p.level, 'target_floor_v': self.p.target()}
+        self.info = {'state': 'start', 'level': self.p.level, 'level_from': src, 'target_floor_v': self.p.target()}
         self.vs = []
         self.t_first = None
         self.sub = None

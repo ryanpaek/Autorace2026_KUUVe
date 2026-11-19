@@ -35,3 +35,16 @@ def test_level0_off_and_fixed_value():
 def test_dark_start_capped():
     p = ExposureParams(level=1)
     assert fixed_exposure(p, 1000, 40.0) <= 1500
+
+
+def test_level_priority(tmp_path):
+    from autorace_bringup.exposure_core import read_saved_level, resolve_level, save_level
+    f = str(tmp_path / 'lv')
+    assert read_saved_level(f) is None
+    assert resolve_level('saved', read_saved_level(f), 2)[0] == 2        # 파일 없음 -> params
+    save_level(3, f)
+    assert resolve_level('saved', read_saved_level(f), 2)[0] == 3        # 저장 파일
+    assert resolve_level('1', read_saved_level(f), 2)[0] == 1            # launch 인자가 우선
+    assert resolve_level('9', read_saved_level(f), 2)[0] == 3            # 이상한 값은 무시
+    save_level(0, f)
+    assert resolve_level('saved', read_saved_level(f), 2)[0] == 0        # 0 = 끔도 저장됨

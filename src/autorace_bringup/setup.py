@@ -25,7 +25,8 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'exposure_node = autorace_bringup.exposure_node:main',   # 11/19 카메라 노출을 바닥 밝기로 고정
+            'exposure_node = autorace_bringup.exposure_node:main',   # 11/19 출발 전 카메라 노출 고정
+            'cam_level = autorace_bringup.cam_level:main',           # 11/19 노출 단계 저장/확인
         ],
     },
 )
