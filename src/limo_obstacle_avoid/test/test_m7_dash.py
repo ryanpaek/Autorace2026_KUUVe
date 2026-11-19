@@ -125,7 +125,7 @@ def test_sim_first_competition_layout():
 
 
 def test_sign_ends_only_after_min_x_and_frames():
-    c = _core(end_sign_h_px=60.0, end_sign_frames=3, end_min_x=2.5)
+    c = _core(end_by_sign=True, end_sign_h_px=60.0, end_sign_frames=3, end_min_x=2.5)
     c.n_scan = 5
     for _ in range(3):
         c.on_sign(80.0)
@@ -182,3 +182,49 @@ def test_stop_then_rejudge_relaxes_and_resumes():
     assert c.relax >= 1                         # 같은 자리 재판단 -> 여유 줄임
     c.relax = 10
     assert c._eff(c.p.clear, c.p.clear_min) == c.p.clear_min
+
+
+# ---------- 팀 주행 통합 (m7_impl:=dash) ----------
+def test_start_positions_team_frame():
+    c = M7Dash(DashParams())
+    c.start()
+    assert abs(c.pose()[1] - 0.26) < 1e-9                  # 가운데 차로 중심 = 점선 기준 +0.26
+    st = c.status()
+    assert st['now_lane'] == 0 and abs(st['y']) < 1e-9 and st['state'] == 'RUN'
+    c = M7Dash(DashParams(start_on_dash=True))
+    c.start()
+    assert abs(c.pose()[1]) < 1e-9
+    c = M7Dash(DashParams(m2_test_start=True, start_lane_no=3))
+    c.start()
+    x, y, _ = c.pose()
+    assert abs(x - c.m2_x()) < 1e-9 and abs(y + 0.26) < 1e-9 and c.status()['now_lane'] == -1
+
+
+def test_base_goes_dash_then_fork_lane():
+    import os
+    from limo_obstacle_avoid.m7_replay_core import load_m2
+    c = M7Dash(DashParams())
+    c.set_m2(*load_m2(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'paths')))
+    c.start()
+    assert abs(c.base(0.0) - 0.26) < 1e-9 and abs(c.base(1.5)) < 1e-9
+    c.set_exit('B')
+    assert abs(c.base(c.m2_x()) + 0.26) < 1e-9             # B: 오른쪽 차로 중심
+    c.set_exit('A')
+    assert abs(c.base(c.m2_x()) - 0.26) < 1e-9             # A: 가운데 차로 중심 (2-A 녹화 시작 자리)
+
+
+def test_m7_link_reports_fork_lane():
+    import os
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'autorace_obstacle'))
+    from autorace_obstacle.m7_link import M7Link
+    from limo_obstacle_avoid.m7_dash_sim import run
+    for fork in ('A', 'B'):
+        r = run(1, 'long', jitter=0.0, integrated=True, fork=fork)
+        assert r['success'], (fork, r['why'], r['status'].get('end'))
+        link = M7Link()
+        link.phase = 'running'
+        link.on_avoid_state(r['status'])
+        link.on_avoid_done(True)
+        link.on_avoid_state(r['status'])
+        assert link.exit_fork == fork and link.report['fork'] == fork

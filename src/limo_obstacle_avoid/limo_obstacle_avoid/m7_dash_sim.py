@@ -32,26 +32,42 @@ def layout(seed, orient='side', jitter=1.0):
     return obs
 
 
-def segments(obs):
+def segments(obs, sign_x=None):
     from limo_obstacle_avoid.m7_waypoint_core import rect
     segs = []
+    if sign_x is not None:                     # 섬 앞 꼭짓점 표지판 막대 (4 cm, 가운데 차로 중심)
+        c = rect(sign_x + 0.02, SHIFT, 0.0, 0.04, 0.04)
+        segs += [(c[i][0], c[i][1], c[(i + 1) % 4][0], c[(i + 1) % 4][1]) for i in range(4)]
     for x, y, th in obs:
         c = rect(x, y, th, ALONG, ACROSS)
         segs += [(c[i][0], c[i][1], c[(i + 1) % 4][0], c[(i + 1) % 4][1]) for i in range(4)]
     return segs + [(-1, 1.3 + SHIFT, 8, 1.3 + SHIFT), (-1, -1.3 + SHIFT, 8, -1.3 + SHIFT)]
 
 
-def run(seed, orient='side', jitter=1.0, overrides=None, start_deg=1.5, dash_drop=0.5, gain=0.74 * 1.2, bias=-0.051 + 0.075, t_max=60.0, trace=False):
+def run(seed, orient='side', jitter=1.0, overrides=None, start_deg=1.5, dash_drop=0.5, gain=0.74 * 1.2, bias=-0.051 + 0.075,
+        t_max=60.0, trace=False, integrated=False, fork=None, section=5.8):
+    """integrated: 팀 주행처럼 가운데 차로 중심에서 켜고(start_y 0), 섬 앞 꼭짓점(section) 표지판 막대 + M2 녹화 재생까지.
+    아니면 단독 시험 (점선 위에서 켜고 x 5.0 m에서 끝, M2 없음)."""
+    import os
+    from limo_obstacle_avoid.m7_replay_core import load_m2
     rng = random.Random(seed * 104729 + 7)
     obs = layout(seed, orient, jitter)
-    segs = segments(obs)
-    rects = [(x, y, ALONG, ACROSS, th) for x, y, th in obs]
+    segs = segments(obs, section if integrated else None)
+    rects = [(x, y, ALONG, ACROSS, th) for x, y, th in obs] + ([(section + 0.02, SHIFT, 0.04, 0.04, 0.0)] if integrated else [])
     p = DashParams()
+    p.start_on_dash = not integrated
+    p.m2_replay = integrated
+    p.section_length = section if integrated else 6.0
+    p.end_x = 7.5 if integrated else 5.0
     for k, v in (overrides or {}).items():
         setattr(p, k, v)
-    p.end_x = 5.0
     core = M7Dash(p)
-    X, Y, PSI, K = 0.0, rng.uniform(-0.02, 0.02), math.radians(rng.uniform(-start_deg, start_deg)), 0.0
+    if integrated:
+        fork = fork or ('A' if rng.random() < 0.5 else 'B')
+        core.set_m2(*load_m2(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'paths')))
+        core.set_exit(fork)
+    y_start = SHIFT if integrated else 0.0
+    X, Y, PSI, K = 0.0, y_start + rng.uniform(-0.02, 0.02), math.radians(rng.uniform(-start_deg, start_deg)), 0.0
     odo_scale, gyro_scale, gyro_bias = 1 + rng.gauss(0, 0.03), 1 + rng.gauss(0, 0.03), math.radians(rng.gauss(0, 0.05))
     ox = oy = 0.0
     oyaw = rng.uniform(-math.pi, math.pi)
@@ -112,12 +128,15 @@ def run(seed, orient='side', jitter=1.0, overrides=None, start_deg=1.5, dash_dro
         gap_min = min(gap_min, g)
         contact = contact or g < 0
         wr = [Y + ax * s - 0.09 * c for ax in (0.1, -0.1)]
-        depart = depart or max(wr) < -LW - 0.01
+        depart = depart or ((not integrated or X < p.section_length) and max(wr) < -LW - 0.01)
         body = [Y + a * s + b * c for a in (p.robot_front, -p.robot_rear) for b in (p.robot_half_width, -p.robot_half_width)]
-        y_hi, y_lo = max(y_hi, max(body)), min(y_lo, min(body))
+        if core.m2_run is None:                       # M2 재생(갈래 들어가기) 중엔 다른 선 배치
+            y_hi, y_lo = max(y_hi, max(body)), min(y_lo, min(body))
     reached = core.state == 'DONE'
+    if integrated:                         # 표지 갈래로 들어가 끝났나 (A = +1 왼쪽, B = -1 오른쪽)
+        reached = reached and core.end_lane == (1 if fork == 'A' else -1) and core.m2_run is not None
     lane3 = y_hi > LW                      # 차체가 2|3차로 점선(+0.52)을 넘음
-    return {'seed': seed, 'reached': reached, 'contact': contact, 'depart': depart, 'lane3': lane3,
+    return {'seed': seed, 'fork': fork, 'end_x': round(X, 2), 'end_y': round(Y - SHIFT, 2), 'reached': reached, 'contact': contact, 'depart': depart, 'lane3': lane3,
             'body_hi_cm': round(100 * y_hi, 1), 'body_lo_cm': round(100 * y_lo, 1),
             'n_rejudge': core.n_rejudge, 'n_rev': core.n_rev,
             'success': reached and not contact and not depart and not lane3, 'gap_cm': round(100 * gap_min, 1),

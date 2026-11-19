@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
-"""M7 점선 기준 회피 노드 (11/19 실험, 단독 실행). 판단은 m7_dash_core.M7Dash.
+"""M7 점선 기준 회피 + M2 갈림길 진입 노드 (11/19). 판단은 m7_dash_core.M7Dash.
 
-mission_node 없이 돈다: /cmd_vel 직접 (ackermann_bridge가 /limo/ack_cmd로). 나중에 합칠 때 cmd_topic:=/obstacle/cmd_vel.
-차를 1|2차로 사이 점선 위, 시작선(커브 뒤 흰 가로선)에 똑바로 놓고 시작.
+팀 주행(autorace.launch.py m7_impl:=dash, 기본): avoid_node 자리에서 replay·waypoint와 같은 토픽·파라미터로 돈다.
+  obstacle_node(m7_link)가 3차선 시작선에서 section_length·start_heading_deg·start_y 등을 넣고 /avoid/enable true.
+  끝나면 /avoid/done -> FSM M2 (갈래 A/B 차선 주행). 출력 /avoid/cmd_vel은 launch에서 /obstacle/cmd_vel로.
+단독 시험(m7_dash.launch.py): /avoid/cmd_vel -> /cmd_vel, 차를 점선 위에 놓고(start_on_dash) /avoid/enable true.
 
-입력  /m7dash/enable (Bool)  true = 지금 자리·방향을 기준으로 시작, false = 정지
+입력  /avoid/enable (Bool)      true = 지금 자리·방향을 기준으로 시작, false = 정지
+      /fork_direction (String)  A | B (FSM 투표, m7_link가 넘김). 안 오면 detector fork_a/fork_b 투표로
       /scan, /odom, /imu, image_topic (Image 또는 .../compressed), /lane/status (있으면 노란선 보조)
-      /perception/detections (String JSON, 원본 detector_node) fork_a/fork_b 상자 높이 -> 표지판 가까우면 끝
-출력  cmd_topic (Twist, 기본 /cmd_vel), /m7dash/state (String JSON), /m7dash/done (Bool)
+      /perception/detections (String JSON, 원본 detector_node)
+출력  /avoid/cmd_vel (Twist), /avoid/active (Bool, 실행 중 20 Hz), /avoid/done (Bool), /avoid/state (String JSON)
+M2 녹화: share/limo_obstacle_avoid/paths/m2_{1|2|3}-{A|B}.csv (replay와 같은 파일, m2_dir로 바꿈)
 """
 import json
 import math
+import os
 import time
 from dataclasses import fields
 
@@ -27,26 +32,44 @@ from std_msgs.msg import Bool, String
 from autorace_lane.lane_core import BevConfig, remove_transverse
 from autorace_lane.lane_node import image_msg_to_bgr
 from limo_obstacle_avoid.m7_dash_core import DashParams, M7Dash, dash_points
+from limo_obstacle_avoid.m7_replay_core import load_m2
 from limo_obstacle_avoid.path_track import yaw_of
+
+
+def _share_paths():
+    try:
+        from ament_index_python.packages import get_package_share_directory
+        return os.path.join(get_package_share_directory('limo_obstacle_avoid'), 'paths')
+    except Exception:                             # 패키지 설치 전 (소스에서 직접 실행)
+        return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'paths')
 
 
 class M7DashNode(Node):
     def __init__(self):
-        super().__init__('m7_dash_node')
+        super().__init__('avoid_node')
         self.p = DashParams()
         for f in fields(DashParams):
             self.declare_parameter(f.name, getattr(self.p, f.name))
         for name, val in (('scan_topic', '/scan'), ('odom_topic', '/odom'), ('imu_topic', '/imu'),
                           ('image_topic', '/camera/color/image_raw'), ('lane_status_topic', '/lane/status'),
-                          ('cmd_topic', '/cmd_vel'), ('bev_config', ''), ('white_v_min', 180), ('white_s_max', 60),
+                          ('cmd_topic', '/avoid/cmd_vel'), ('bev_config', ''), ('white_v_min', 180), ('white_s_max', 60),
                           ('cam_hz', 10.0), ('odom_timeout', 0.3), ('scan_timeout', 0.5), ('range_min', 0.10),
                           ('range_max', 3.0), ('scan_yaw_offset_deg', 0.0), ('scan_flip', False),
-                          ('start_y', 0.0), ('start_heading_deg', 0.0), ('dry_run', False),
+                          ('dry_run', False), ('m2_dir', ''),
                           ('det_topic', '/perception/detections'), ('sign_classes', ['fork_a', 'fork_b']),
-                          ('sign_conf', 0.5)):
+                          ('sign_conf', 0.5), ('fork_vote_window', 8), ('fork_vote_need', 5)):
             self.declare_parameter(name, val)
         self._read_params()
         self.core = M7Dash(self.p)
+        m2d = self.gp('m2_dir') or _share_paths()
+        m2, m2src = load_m2(m2d, True)
+        self.core.set_m2(m2, m2src)
+        self.get_logger().info(f'[M7 점선] M2 녹화 {len(m2)}/6 ({m2d}): '
+                               + ', '.join(f'{k}: {v}' for k, v in sorted(m2src.items())))
+        if self.p.m2_replay and not m2:
+            self.get_logger().error('[M7 점선] M2 녹화 파일 없음 -> 섬 끝까지 점선 주행 후 끝 (갈래 진입은 FSM 차선 주행)')
+        self.fork_topic_got = False
+        self.fork_votes = []
         self.cfg = None
         path = self.gp('bev_config')
         if path:
@@ -59,9 +82,11 @@ class M7DashNode(Node):
         self.dry = bool(self.gp('dry_run'))
         out = self.gp('cmd_topic')
         self.pub_cmd = self.create_publisher(Twist, out + '_preview' if self.dry else out, 10)
-        self.pub_state = self.create_publisher(String, '/m7dash/state', 10)
-        self.pub_done = self.create_publisher(Bool, '/m7dash/done', 10)
-        self.create_subscription(Bool, '/m7dash/enable', self.on_enable, 10)
+        self.pub_state = self.create_publisher(String, '/avoid/state', 10)
+        self.pub_done = self.create_publisher(Bool, '/avoid/done', 10)
+        self.pub_active = self.create_publisher(Bool, '/avoid/active', 10)
+        self.create_subscription(Bool, '/avoid/enable', self.on_enable, 10)
+        self.create_subscription(String, '/fork_direction', self.on_fork, 10)
         self.create_subscription(LaserScan, self.gp('scan_topic'), self.on_scan, qos_profile_sensor_data)
         self.create_subscription(Odometry, self.gp('odom_topic'), self.on_odom, qos_profile_sensor_data)
         self.create_subscription(Imu, self.gp('imu_topic'), self.on_imu, qos_profile_sensor_data)
@@ -82,9 +107,9 @@ class M7DashNode(Node):
         self.create_timer(0.05, self.loop)
         self.get_logger().info(f'[M7 점선] 준비: 출력 {out}{" (dry_run)" if self.dry else ""}, 속도 {self.p.speed}, '
                                f'옆 여유 {100 * self.p.clear:.0f} cm, 끝 = '
-                               + (f'표지판 상자 {self.p.end_sign_h_px:.0f} px 이상 {self.p.end_sign_frames}번 (x {self.p.end_min_x} m 뒤) / ' if self.p.end_by_sign else '')
-                               + f'거리 {self.p.end_x} m, '
-                               f'점선 {"켬" if self.cfg is not None else "끔"}. 시작: ros2 topic pub --once /m7dash/enable std_msgs/Bool "{{data: true}}"')
+                               + (f'M2 녹화 재생 (섬 앞 {self.p.m2_start_gap} m)' if self.p.m2_replay else
+                                  f'표지판 상자 {self.p.end_sign_h_px:.0f} px' if self.p.end_by_sign else f'섬 + {self.p.done_margin} m')
+                               + f', 점선 {"켬" if self.cfg is not None else "끔"}. 시작: /avoid/enable true')
 
     def gp(self, name):
         return self.get_parameter(name).value
@@ -156,6 +181,28 @@ class M7DashNode(Node):
             except (AttributeError, TypeError, ValueError):
                 continue
         self.core.on_sign(max(hs) if hs else None)
+        # /fork_direction(FSM)이 안 오면(단독 시험) 표지 투표로 갈래
+        if not self.fork_topic_got:
+            seen = set()
+            for d in dets:
+                try:
+                    if d.get('cls') in ('fork_a', 'fork_b') and float(d.get('conf', 0.0)) >= conf:
+                        seen.add('A' if d.get('cls') == 'fork_a' else 'B')
+                except (AttributeError, TypeError, ValueError):
+                    continue
+            self.fork_votes.append(seen.pop() if len(seen) == 1 else None)
+            del self.fork_votes[:-int(self.gp('fork_vote_window'))]
+            for f in ('A', 'B'):
+                if self.fork_votes.count(f) >= int(self.gp('fork_vote_need')) and self.core.exit_fork != f:
+                    self.core.set_exit(f)
+                    self.get_logger().info(f'[M7 점선] 표지 투표 -> 갈래 {f}')
+
+    def on_fork(self, m):
+        self.fork_topic_got = True
+        old = self.core.exit_fork
+        self.core.set_exit(m.data)
+        if self.core.exit_fork != old:
+            self.get_logger().info(f'[M7 점선] 갈림길 방향 {m.data} -> 갈래 {self.core.exit_fork}')
 
     def on_image(self, m):
         if self._cam_due():
@@ -196,10 +243,12 @@ class M7DashNode(Node):
                 return
             self._read_params()
             self.core.p = self.p
-            self.core.start(float(self.gp('start_y')), float(self.gp('start_heading_deg')))
+            self.core.start()
             self.n_ev = 0
             self.active = True
-            self.get_logger().info('▶ [M7 점선] 시작')
+            self.get_logger().info(f'▶ [M7 점선] 시작 (섬까지 {self.p.section_length:.2f} m, 켤 때 방향 {self.p.start_heading_deg:+.1f}°, '
+                                   f'옆 {100 * self.p.start_y:+.0f} cm{", 점선 위" if self.p.start_on_dash else ""}'
+                                   f'{", M2만" if self.p.m2_test_start else ""}, 갈래 {self.core.exit_fork or "?"})')
         elif not m.data and self.active:
             self.finish('수동 중단', done=False)
 
@@ -211,6 +260,8 @@ class M7DashNode(Node):
         if (self.t_odom is None or now - self.t_odom > self.gp('odom_timeout')
                 or self.t_scan is None or now - self.t_scan > self.gp('scan_timeout')):
             self.pub_cmd.publish(Twist())
+            if not self.dry:
+                self.pub_active.publish(Bool(data=True))
             self.get_logger().warn('[M7 점선] 센서 끊김 -> 정지', throttle_duration_sec=1.0)
             return
         v, kap = self.core.step(now)
@@ -222,6 +273,8 @@ class M7DashNode(Node):
         tw.linear.x = float(v)
         tw.angular.z = float(v * kap)
         self.pub_cmd.publish(tw)
+        if not self.dry:
+            self.pub_active.publish(Bool(data=True))
         self.k += 1
         if self.k % 4 == 0:
             st = self.core.status()
@@ -240,10 +293,15 @@ class M7DashNode(Node):
         st = self.core.status()
         st['state'] = 'DONE' if done else 'IDLE'
         self.pub_state.publish(String(data=json.dumps(st, ensure_ascii=False)))
-        if done:
-            self.pub_done.publish(Bool(data=True))
+        if not self.dry:
+            self.pub_active.publish(Bool(data=False))
+            if done:
+                self.pub_done.publish(Bool(data=True))
         self.core.stop()
-        self.get_logger().info(f'■ [M7 점선] {why}: {st["end"]} (보정 {st["fix"]}, 점선 본 프레임 {self.n_dash}, '
+        self.core.exit_fork = None                # 다음 판은 새로 받음
+        self.fork_topic_got = False
+        self.fork_votes = []
+        self.get_logger().info(f'■ [M7 점선] {why}: {st["end"]} (끝 차로 {st["now_lane"]}, 보정 {st["fix"]}, 점선 본 프레임 {self.n_dash}, '
                                f'재판단 {st["n_rejudge"]}, 마지막 표지판 상자 {st["sign_h"]} px)')
 
 
