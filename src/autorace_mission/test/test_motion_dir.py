@@ -46,3 +46,40 @@ def test_unknown_axis_never_says_reverse():
 def test_motion_sign_uses_accel_last():
     assert motion_sign(0.01, 0.0, 0.0, 0.2, None, -1) == (-1, 'imu_acc')
     assert motion_sign(0.01, 0.0, 0.0, 0.2, None, 0) == (1, '')
+
+
+def _drive_axes(a, seq, seed=0):
+    """seq: (시간, 목표 속도, 명령, 가속도 축 부호). 축 부호를 중간에 바꿔 '오염된 출발'을 흉내 낸다."""
+    random.seed(seed)
+    t, v, x = 0.0, 0.0, 0.0
+    for dur, vt, cmd, axis in seq:
+        for i in range(int(dur / 0.01)):
+            t += 0.01
+            acc = max(-1.0, min(1.0, (vt - v) / 0.3))
+            v += acc * 0.01
+            x += abs(v) * 0.01
+            a.on_imu(t, axis * acc + 0.03 + random.gauss(0, 0.08))
+            if i % 2 == 0:
+                a.on_odom(t, x, 0.0, cmd)
+    return a
+
+
+# 출발 때 3번 깨끗하게 배운 뒤(축 +), M7 전후진처럼 반대로 보이는 출발 4번 (11/19, 1119_08 bag)
+_LEARN = [(1, 0, 0, 1), (2, 0.2, 0.2, 1)] * 3
+_BAD = [(1, 0, 0, -1), (1.5, 0.2, 0.2, -1), (1, 0, 0, -1), (1.5, -0.2, -0.2, -1)] * 2
+
+
+def test_learn_once_keeps_axis_after_bad_starts():
+    for seed in range(5):
+        a = _drive_axes(AccelDirection(), _LEARN + _BAD, seed)
+        assert a.sign == 1                       # 처음 배운 방향 유지
+        assert a.n_ignored >= 3                  # 반대 배움은 세기만 하고 안 씀
+
+
+def test_learn_forever_flips_axis_old_behavior():
+    """learn_once=False(예전): 반대로 보이는 출발이 쌓이면 축 방향이 뒤집힌다 -> 전진을 후진으로 봄."""
+    flipped = 0
+    for seed in range(5):
+        a = _drive_axes(AccelDirection(learn_once=False), _LEARN + _BAD + _BAD, seed)
+        flipped += a.sign == -1
+    assert flipped >= 4

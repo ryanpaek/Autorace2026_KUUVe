@@ -109,6 +109,8 @@ class MissionNode(Node):
         # accel_sign: 0 = 가속도계 축 방향을 우리 /cmd_vel 출발로 배움 (2번 이상), 1 = +x가 앞, -1 = +x가 뒤
         self.declare_parameter('reverse_from_accel', True)
         self.declare_parameter('accel_sign', 0)
+        # 11/19: 축 방향을 한 번 배우면 고정 (M7 전후진 중 다시 배워 방향이 뒤집히던 문제, 1119_08 bag). false = 예전처럼 계속 배움
+        self.declare_parameter('accel_learn_once', True)
         # 11/11 위치 추정 강화
         # 후진 판단: odom 속도 부호 + odom 위치 변화 방향 + 최근 /cmd_vel 부호 중 하나라도 후진이면 후진
         # 경로 방향 투영: 차가 경로와 비스듬히 달린 거리는 cos(방향 차)만큼만 s에 더하고 나머지는 좌우 d로
@@ -178,7 +180,8 @@ class MissionNode(Node):
 
         self.dist_mm = 0.0
         self.route_dist_mm = 0.0      # 경로 위치용 거리: 후진이면 뺌 (route_signed_dist)
-        self.accdir = AccelDirection(fixed_sign=int(self.get_parameter('accel_sign').value))
+        self.accdir = AccelDirection(fixed_sign=int(self.get_parameter('accel_sign').value),
+                                     learn_once=bool(self.get_parameter('accel_learn_once').value))
         self._acc_sign_logged = 0
         self.route_s_map = None       # 길을 잃어도 화면·곡률 미리보기용으로는 계속 내는 s
         self._last_xy = None
