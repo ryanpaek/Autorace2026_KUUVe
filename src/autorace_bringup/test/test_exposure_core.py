@@ -1,61 +1,37 @@
-"""exposure_core: 노란선 B 채널 기준 노출 (11/19)"""
+"""exposure_core: 출발 전 노출 고정값 계산 (11/19)"""
 import numpy as np
 
-from autorace_bringup.exposure_core import ExposureController, ExposureParams, Meas, measure
+from autorace_bringup.exposure_core import LEVEL_FLOOR_V, ExposureParams, fixed_exposure, floor_v
 
 
 def scene(light, exposure, gamma=2.2):
-    """간단한 카메라: 값 = 255 * clip(radiance * exposure)^(1/gamma).
-    바닥 회색, 노란선(B 반사 낮음), 흰선, 위쪽 검은 벽 (측광에 안 들어가야 함)"""
+    """간단한 카메라: 값 = 255 * clip(radiance * exposure)^(1/gamma). 위쪽 벽, 아래 바닥 + 노란선"""
     img = np.zeros((240, 320, 3))
-    img[:] = np.array([0.18, 0.18, 0.18]) * light
-    img[:100] = 0.01                                          # 벽
-    img[150:, 100:120] = np.array([0.25, 0.90, 0.95]) * light  # 노란선 (BGR)
-    img[150:, 220:240] = np.array([0.95, 0.95, 0.95]) * light  # 흰선
-    v = np.clip(img * exposure, 0, 1) ** (1 / gamma) * 255
-    return v.astype(np.uint8)
+    img[:] = 0.18 * light
+    img[:100] = 0.01
+    img[150:, 100:120] = np.array([0.25, 0.90, 0.95]) * light
+    return (np.clip(img * exposure, 0, 1) ** (1 / gamma) * 255).astype(np.uint8)
 
 
-def run(start_exp, light, steps=40):
-    p = ExposureParams()
-    c = ExposureController(p, start_exp)
-    exp = start_exp
-    for _ in range(steps):
-        new = c.next_exposure(measure(scene(light, exp / 1000.0), p), exp)
-        if new is not None:
-            exp = new
-    return exp, scene(light, exp / 1000.0)
+def test_level_reaches_target_floor():
+    for lv, t in LEVEL_FLOOR_V.items():
+        p = ExposureParams(level=lv)
+        e0, light = 1000, 1.5
+        v0 = floor_v(scene(light, e0 / 1000), p)
+        e = fixed_exposure(p, e0, v0)
+        assert abs(floor_v(scene(light, e / 1000), p) - t) <= 3
 
 
-def test_saturated_yellow_recovers():
-    # 너무 밝아 노란선이 흰색 (B 255) -> 노란선 B 160 근처, 채도 회복
-    exp, img = run(1000, light=4.0)
-    b, g, r = img[200, 110].astype(int)
-    s = (max(b, g, r) - min(b, g, r)) / max(b, g, r) * 255
-    assert b <= 165 and s >= 80
+def test_higher_level_is_darker():
+    es = [fixed_exposure(ExposureParams(level=lv), 1000, 130.0) for lv in (1, 2, 3, 4)]
+    assert es == sorted(es, reverse=True)
 
 
-def test_ok_scene_untouched():
-    # 노란선 B가 120~160 사이면 노출 그대로 (다른 색 안 건드림)
-    p = ExposureParams()
-    c = ExposureController(p, 100)
-    assert c.next_exposure(Meas(floor_v=90, yellow_b=140, yellow_px=3000), 100) is None
+def test_level0_off_and_fixed_value():
+    assert fixed_exposure(ExposureParams(level=0), 1000, 130.0) is None
+    assert fixed_exposure(ExposureParams(level=0, fixed_exposure=321), 1000, 130.0) == 321
 
 
-def test_no_yellow_uses_floor_ceiling():
-    p = ExposureParams()
-    c = ExposureController(p, 100)
-    assert c.next_exposure(Meas(floor_v=160, yellow_b=None), 100) < 100     # 너무 밝음 -> 내림
-    assert c.next_exposure(Meas(floor_v=90, yellow_b=None), 100) is None     # 적당 -> 그대로
-
-
-def test_dark_goes_up_but_capped():
-    p = ExposureParams()
-    exp, _ = run(100, light=0.2)
-    assert exp <= ExposureController(p, 100).max_exp
-
-
-def test_step_limited():
-    p = ExposureParams()
-    c = ExposureController(p, 1000)
-    assert c.next_exposure(Meas(floor_v=200, yellow_b=255, yellow_px=5000), 1000) >= int(1000 * p.max_down)
+def test_dark_start_capped():
+    p = ExposureParams(level=1)
+    assert fixed_exposure(p, 1000, 40.0) <= 1500
