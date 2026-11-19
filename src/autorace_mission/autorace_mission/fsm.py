@@ -222,6 +222,7 @@ DEFAULT_PARAMS = {
     # 11/13 실차: 라바콘 뒤 좌상단 코너(R640 오른쪽 90°)에서 미리보기가 없어 0.3 m/s 보통 차선으로 직진하다 늦게 꺾고 안쪽 선을 밟음
     #   -> M8에서 넘어올 때 같은 IMU 코너 미리보기 + 안쪽 선 모드 + 천천히. 기준 방향 = 라바콘 세로 직선(3차선 방향 + 90°)
     'm1_corner_preview': True,
+    'c1_corner_preview': True,       # 11/19: 1번 코너(출발 직선 끝) IMU 코너 미리보기 (도면 c1_corner_start 필요). false = 예전
     'm1_corner_start_mm': 200.0,     # 도면 위치를 모를 때: M1 진입 -> 코너 시작 (도면: 끝선 -> 코너 280 mm, handover가 끝선 근처)
     'm1_corner_k_gain': 1.0,
     'm7_corner_k_gain': 1.0,
@@ -569,11 +570,28 @@ class MissionFSM:
         if state == 'M2_FORK':
             self.m2m = None
             self._m2_dev_logged = False
+        if state == 'M5_BUMP':
+            # 출발 직선 방향 (1번 코너 IMU 기준). 연습으로 바로 M5면 없음
+            self.c1_axis = inp.yaw if why not in ('manual', 'init', 'skip') else None
         if state == 'M6_ZIGZAG':
             self.pre_stop, self.pre_stop_name = None, None
             self.zz_at = None
             self.zz_capped = False
             self.ped_seen = False                        # M6~M3에서 본 보행자 표지 (상태가 바뀌면 투표는 지워지므로 따로 기억)
+            # 11/19 1번 코너(우상단 R640 오른쪽 90°)도 다른 코너처럼 IMU 코너 미리보기 (시작 = 도면 c1_corner_start).
+            #   실차: 선 보고 늦게 꺾어 바깥 선 밟음 -> 선 놓침 -> 보호 없어 직진 이탈. 도면 위치 없으면 안 켬 (거리 추측 안 함)
+            cs = self._rp('c1_corner_start')
+            self.m7c = None
+            if (self.p.get('c1_corner_preview', True) and self.p.get('m7_corner_done_deg', 85.0) > 0
+                    and why not in ('manual', 'init', 'skip') and inp.yaw is not None
+                    and cs is not None and inp.route_s is not None):
+                start = max(0.0, cs - inp.route_s)
+                ax = getattr(self, 'c1_axis', None)
+                # 기준 = 출발 직선 방향. 없으면 아직 직선 위(코너 300 mm 이상 앞)일 때만 지금 방향
+                yaw0 = ax if ax is not None else (inp.yaw if start >= 300.0 else None)
+                if yaw0 is not None:
+                    self.m7c = (yaw0, inp.dist_mm, 'M6_ZIGZAG', start)
+                    self.log.append(f'M6 corner1 preview on (start {start:.0f}mm)')
         if state == 'M1_TRAFFIC':
             use = (self.p.get('m1_corner_preview', True) and self.p.get('m7_corner_done_deg', 85.0) > 0
                    and why not in ('manual', 'init', 'skip') and inp.yaw is not None)
@@ -622,6 +640,8 @@ class MissionFSM:
             return None                                  # 라바콘 구간부터는 콘 따라가기
         if self.state == 'M1_TRAFFIC' and self.sub not in ('', 'approach'):
             return None                                  # 정지선에 섰으면 끝
+        if self.state == 'M6_ZIGZAG' and self.sub != '':
+            return None                                  # 지그재그 시작선을 지났으면 끝 (지그재그에 코너 곡률 안 넣음)
         yaw0, d0, _, start_mm = c
         p = self.p
         r = p['m7_corner_r_mm']
