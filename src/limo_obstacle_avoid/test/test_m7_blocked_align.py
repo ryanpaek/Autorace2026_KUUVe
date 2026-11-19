@@ -81,14 +81,14 @@ def test_center_lane_finds_distance_and_side():
     assert any('틈 통과 거리' in e for e in m.events), m.events
 
 
-def test_no_gap_falls_back_to_500_and_runs_anyway():
-    """옆 차로가 길게 막혀 어느 거리에서도 틈 없음 -> 앞 장애물만 보고 500 mm에서 무조건 재생 (오른쪽 바깥 -> left csv)"""
+def test_no_gap_falls_back_to_520_and_runs_anyway():
+    """옆 차로가 길게 막혀 어느 거리에서도 틈 없음 -> 앞 장애물만 보고 520 mm(녹화 거리 540보다 살짝 가깝게)에서 무조건 재생 (오른쪽 바깥 -> left csv)"""
     m = _m(lane=-1)
     world = _box(0.10 + 0.62, -1) + _box(0.0, 0) + _box(0.33, 0) + _box(0.66, 0)
     _drive(m, world, stop_at=_exec_started)
     assert m.state == 'EXEC' and m.target == 0
     assert any('틈 통과 거리 없음' in e for e in m.events), m.events
-    assert abs(_gap(m) - 0.50) < 0.03, _gap(m)
+    assert abs(_gap(m) - 0.52) < 0.03, _gap(m)
 
 
 def test_never_stands_still_keeps_retrying():

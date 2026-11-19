@@ -148,7 +148,7 @@ class ReplayParams:
     #   11/19 실차 '공간 있는데 전진·후진 반복': 고정 400 mm는 (1) backup_if_mm 460 안이라 재생이 끊기면 50 cm로 후진 -> 다시 400으로 전진,
     #   (2) 녹화 CSV가 400 mm면 앞 장애물 모서리와 왼쪽 -1.0 cm(겹침)라 재생 중 안전 정지 -> 반복. 그래서 거리 찾기 + 맞춤 거리 >= backup_if_mm
     blocked_align: bool = True
-    blocked_align_mm: float = 500.0     # 틈을 못 찾을 때 맞출 거리 (backup_if_mm + 20 mm보다 작으면 그 값). 녹화 CSV 여유 왼 +7.2 / 오 +8.3 cm
+    blocked_align_mm: float = 520.0     # 틈을 못 찾을 때 맞출 거리: 녹화 거리 540보다 살짝 가깝게 (backup_if_mm + 20 mm보다 작으면 그 값). CSV 여유 약 +9/+10 cm
     blocked_search_min_mm: float = 470.0
     blocked_search_max_mm: float = 650.0
     blocked_search_step_mm: float = 10.0
