@@ -42,7 +42,7 @@ def generate_launch_description():
         DeclareLaunchArgument('start_state', default_value='WAIT_START'),
         DeclareLaunchArgument('parking', default_value='true'),
         DeclareLaunchArgument('m7_avoid', default_value='true'),
-        DeclareLaunchArgument('m7_impl', default_value='dash'),     # dash = 11/20 점선 기준 회피 + M2 녹화 재생 / replay = 녹화 재생 (11/17, 되돌리기) / legacy = 예전 회피 노드 / waypoint = 11/19 실험 (M7만)
+        DeclareLaunchArgument('m7_impl', default_value='waypoint'),  # waypoint = 정차 LIMO 기준 웨이포인트 (11/20 기본, M7만·M2는 FSM) / dash = 점선 기준 회피 + M2 녹화 재생 / replay = 녹화 재생 (11/17) / legacy = 예전 회피 노드
         DeclareLaunchArgument('use_fork_node', default_value='true'),
         DeclareLaunchArgument('use_detector', default_value='true'),
         DeclareLaunchArgument('use_class_commands', default_value='true'),
