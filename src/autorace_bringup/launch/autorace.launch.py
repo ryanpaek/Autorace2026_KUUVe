@@ -6,7 +6,8 @@ LIMO 드라이버·카메라·라이다를 먼저 띄운 뒤 실행한다 (애�
   ros2 launch orbbec_camera dabai.launch.py
   ros2 launch autorace_bringup autorace.launch.py
   ros2 launch autorace_bringup autorace.launch.py start_state:=M3_PEDESTRIAN use_detector:=false
-  ros2 launch autorace_bringup autorace.launch.py m7_avoid:=true            # M7을 limo_obstacle_avoid로 (기본 m7_impl:=replay)
+  ros2 launch autorace_bringup autorace.launch.py m7_avoid:=true            # M7을 limo_obstacle_avoid로 (기본 m7_impl:=dash)
+  ros2 launch autorace_bringup autorace.launch.py m7_avoid:=true m7_impl:=replay   # 11/17 녹화 재생 방식 (되돌리기)
   ros2 launch autorace_bringup autorace.launch.py m7_avoid:=true m7_impl:=legacy   # 예전 avoid_node 방식
   ros2 launch autorace_bringup autorace.launch.py m7_avoid:=true m7_impl:=waypoint # 11/19 실험: 정차 LIMO 기준 웨이포인트 (M7만)
   ros2 launch autorace_bringup autorace.launch.py m7_avoid:=true m7_dry_run:=true   # 판단만 (바퀴는 차선)
@@ -51,6 +52,14 @@ def _waypoint_params() -> str:
         return ''
 
 
+def _dash_params() -> str:
+    try:
+        return os.path.join(get_package_share_directory('limo_obstacle_avoid'),
+                            'config', 'm7_dash_params.yaml')
+    except Exception:
+        return ''
+
+
 def _fork_params() -> str:
     """autorace_fork가 빌드돼 있지 않아도 (use_fork_node:=false) launch가 깨지지 않게."""
     try:
@@ -74,17 +83,20 @@ def generate_launch_description():
     is_replay = IfCondition(PythonExpression(["'", m7_avoid, "' == 'true' and '", m7_impl, "' == 'replay'"]))
     # 11/19 실험: waypoint = 정차 LIMO 기준 웨이포인트 (m7_waypoint_node, M7만. M2는 FSM). obstacle_node 설정은 replay와 같게
     is_waypoint = IfCondition(PythonExpression(["'", m7_avoid, "' == 'true' and '", m7_impl, "' == 'waypoint'"]))
-    is_legacy = IfCondition(PythonExpression(["'", m7_avoid, "' == 'true' and '", m7_impl, "' not in ('replay', 'waypoint')"]))
-    is_link = IfCondition(PythonExpression(["'", m7_avoid, "' == 'true' and '", m7_impl, "' in ('replay', 'waypoint')"]))
-    not_replay = IfCondition(PythonExpression(["not ('", m7_avoid, "' == 'true' and '", m7_impl, "' in ('replay', 'waypoint'))"]))
-    # waypoint일 때 차선 노드 노란선 거리 = 직선 맞추기 (lane_core yellow_guard_fit). 다른 방식은 그대로(false)
-    yg_fit = ParameterValue(PythonExpression(["'", m7_impl, "' == 'waypoint'"]), value_type=bool)
+    # 11/20: dash = 가운데|오른쪽 차로 사이 점선 기준 회피 + M2 녹화 재생 (m7_dash_node, M7+M2). 기본
+    is_dash = IfCondition(PythonExpression(["'", m7_avoid, "' == 'true' and '", m7_impl, "' == 'dash'"]))
+    is_legacy = IfCondition(PythonExpression(["'", m7_avoid, "' == 'true' and '", m7_impl, "' not in ('replay', 'waypoint', 'dash')"]))
+    is_link = IfCondition(PythonExpression(["'", m7_avoid, "' == 'true' and '", m7_impl, "' in ('replay', 'waypoint', 'dash')"]))
+    not_replay = IfCondition(PythonExpression(["not ('", m7_avoid, "' == 'true' and '", m7_impl, "' in ('replay', 'waypoint', 'dash'))"]))
+    # waypoint·dash일 때 차선 노드 노란선 거리 = 직선 맞추기 (lane_core yellow_guard_fit). 다른 방식은 그대로(false)
+    yg_fit = ParameterValue(PythonExpression(["'", m7_impl, "' in ('waypoint', 'dash')"]), value_type=bool)
     # 재생 방식일 때 obstacle_node(m7_link) 설정: 코너 미리보기(코너 중간 켜기)·표지 보고 끄기 끔 -> 시작선 근처에서 켜고 재생 노드가 끝냄
     replay_link = {'m7_pre_enable': False, 'm7_off_mode': 'none'}
     return LaunchDescription([
-        DeclareLaunchArgument('m7_impl', default_value='replay'),
+        DeclareLaunchArgument('m7_impl', default_value='dash'),
         DeclareLaunchArgument('m7_replay_params', default_value=_replay_params()),
         DeclareLaunchArgument('m7_waypoint_params', default_value=_waypoint_params()),
+        DeclareLaunchArgument('m7_dash_params', default_value=_dash_params()),
         DeclareLaunchArgument('params', default_value=os.path.join(share, 'config', 'params.yaml')),
         DeclareLaunchArgument('bev_config',
                               default_value=os.path.join(share, 'config', 'bev_limo.yaml')),
@@ -167,6 +179,11 @@ def generate_launch_description():
                          {'dry_run': ParameterValue(m7_dry, value_type=bool)}],
              remappings=[('/avoid/cmd_vel', '/obstacle/cmd_vel')],
              output='screen', condition=is_waypoint),
+        Node(package='limo_obstacle_avoid', executable='m7_dash_node', name='avoid_node',
+             parameters=[LaunchConfiguration('m7_dash_params'),
+                         {'bev_config': bev, 'dry_run': ParameterValue(m7_dry, value_type=bool)}],
+             remappings=[('/avoid/cmd_vel', '/obstacle/cmd_vel')],
+             output='screen', condition=is_dash),
         Node(package='autorace_fork', executable='fork_node', name='fork_node',
              parameters=[LaunchConfiguration('fork_params')], output='screen',
              condition=IfCondition(LaunchConfiguration('use_fork_node'))),

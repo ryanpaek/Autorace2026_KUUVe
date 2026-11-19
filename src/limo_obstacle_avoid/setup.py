@@ -32,6 +32,7 @@ setup(
             'cmd_mux = limo_obstacle_avoid.cmd_mux:main',
             'm7_replay_node = limo_obstacle_avoid.m7_replay_node:main',
             'm7_waypoint_node = limo_obstacle_avoid.m7_waypoint_node:main',
+            'm7_dash_node = limo_obstacle_avoid.m7_dash_node:main',
         ],
     },
 )

@@ -19,6 +19,7 @@
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>rviz2</exec_depend>
+  <exec_depend>autorace_lane</exec_depend>
 
   <test_depend>python3-pytest</test_depend>
 
