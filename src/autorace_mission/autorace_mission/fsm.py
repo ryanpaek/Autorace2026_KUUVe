@@ -160,6 +160,12 @@ DEFAULT_PARAMS = {
     #   B면 섬 오른쪽 변을 왼쪽 선으로(left_only), 바닥 글자(A/B = 차로 가운데)가 보이면 그 위치로 섬 변을 고름.
     #   1119_09: 일반 차선이 섬 양쪽 변을 한 차로로 묶어 섬 위로 감. false = 예전 일반 차선
     'm2_island_ref': True,
+    # 11/19: M2 끝(섬 끝 + m2_exit_after_island_mm)·M2_EXIT 코너 시작을 도면 위치로 잡는데, 도면 위치가 M7 전후진으로
+    #   수 m 뒤처지면(1119_09: M2 50초, 합류·코너 미리보기가 엉뚱한 곳) -> M2 시작부터 간 거리로 계산한 값과
+    #   이보다 더 다르면 거리 쪽을 씀. M2 시작 = 섬 앞 끝 + (-m7_to_tip_mm). 0 = 예전(도면 우선)
+    'm2_route_max_dev_mm': 700.0,
+    'm2_island_len_mm': 1745.0,        # 도면: 섬 앞 끝(x 4268) -> 섬 뒤 끝(x 2523)
+    'm2_taper_len_mm': 554.0,          # 도면: 섬 뒤 끝 -> 합류 끝(x 1969)
     'm2_island_lane_width_mm': 520.0,   # 섬 변 ~ 차로 가운데 = 이 값의 반 (차로 500 + 선 20)
     'fork_normal': True,             # 11/16: 갈래 안(섬 앞 끝 + fork_normal_after_mm)부터 양쪽 선 보통 차선 모드
     'fork_normal_after_mm': 300.0,
@@ -466,8 +472,14 @@ class MissionFSM:
                    and why not in ('manual', 'init') and inp.yaw is not None)
             # 섬 끝에서 시작하므로 합류 끝까지 남은 거리만큼 코너 시작·거리 예비값을 늦춘다
             me = self._rp('m2_merge_end')
+            dflt = max(0.0, self.p.get('m2_taper_len_mm', 554.0) - self.p.get('m2_exit_after_island_mm', 200.0))
             self.m2x_extra = (max(0.0, me - inp.route_s) if me is not None and inp.route_s is not None
-                              else max(0.0, 554.0 - self.p.get('m2_exit_after_island_mm', 200.0)))
+                              else dflt)
+            dev = self.p.get('m2_route_max_dev_mm', 0.0)
+            if dev > 0 and abs(self.m2x_extra - dflt) > dev and why not in ('manual', 'init'):
+                # 11/19: 도면 위치가 틀리면 합류 끝까지 거리를 도면 규격으로 (M2 끝을 거리로 잡았을 때와 같은 기준)
+                self.log.append(f'M2_EXIT corner start: route extra {self.m2x_extra:.0f}mm ignored -> {dflt:.0f}mm')
+                self.m2x_extra = dflt
             yaw0 = inp.yaw
             if self.p.get('m2x_corner_axis', True):
                 ax = getattr(self, 'axis_yaw', None)
@@ -509,6 +521,7 @@ class MissionFSM:
             self.m8_inner_mode = None
         if state == 'M2_FORK':
             self.m2m = None
+            self._m2_dev_logged = False
         if state == 'M6_ZIGZAG':
             self.pre_stop, self.pre_stop_name = None, None
             self.zz_at = None
@@ -992,6 +1005,7 @@ class MissionFSM:
                 if self.p.get('m2_exit', True) else None
             if end is None:
                 end = self._past(inp, 'm2_merge_end')
+            end = self._m2_end_by_distance(inp, db, end)
             if (db >= self.p['fork_len_mm'] + self.fork_adj_mm) if end is None else end:
                 self._next(inp, f'fork {self.fork_choice} done')
                 return Command('lane', self._lane(self.p['base_speed']))
@@ -1024,6 +1038,26 @@ class MissionFSM:
         if merge_cmd is not None:
             return merge_cmd
         return Command('lane', self._lane(self.p['approach_speed'], mode, **self._fork_cfg(inp, mode)))
+
+    def _m2_end_by_distance(self, inp, db: float, route_end: Optional[bool]) -> Optional[bool]:
+        """11/19: M2 끝을 도면 위치(route_end)와 M2 시작부터 간 거리로 따로 계산해 크게 다르면 거리 쪽 (m2_route_max_dev_mm)"""
+        p = self.p
+        dev = p.get('m2_route_max_dev_mm', 0.0)
+        if dev <= 0 or not p.get('m2_exit', True):
+            return route_end
+        # M2 시작 = 섬 앞 끝 + (-fork_adj_mm) (fork_adj_mm = M7이 마지막으로 잰 섬 앞 끝까지 거리, 지나쳤으면 음수)
+        need = p.get('m2_island_len_mm', 1745.0) + p.get('m2_exit_after_island_mm', 200.0) + self.fork_adj_mm
+        rem_d = need - db
+        s0 = self._rp('m2_island_end')
+        if route_end is None or s0 is None or inp.route_s is None:
+            return route_end
+        rem_r = s0 + p.get('m2_exit_after_island_mm', 200.0) - inp.route_s
+        if abs(rem_r - rem_d) <= dev:
+            return route_end
+        if not getattr(self, '_m2_dev_logged', False):
+            self._m2_dev_logged = True
+            self.log.append(f'M2 end: route says {rem_r:.0f}mm left, distance says {rem_d:.0f}mm -> distance (route s off)')
+        return rem_d <= 0.0
 
     def _lane_first(self, inp) -> bool:
         """11/16: 선이 보이면 강제 경로(IMU heading) 대신 차선 주행 (lane_first).
