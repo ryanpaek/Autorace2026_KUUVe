@@ -59,6 +59,7 @@ DEFAULT_PARAMS = {
     #   >0이면 오도메트리가 멈춘 순간(m3_still_mm 안)부터 이 시간도 채워야 출발. 0 = 끔 (예전)
     'm3_still_wait_sec': 0.0,
     'm3_still_mm': 3.0,
+    'm3_cap_cam_margin_mm': -1.0,   # >=0이면 카메라가 정지선을 보고 남은 거리 > 정지 거리+이 값일 때 지그재그 거리 안전장치 보류. 음수 = 끔
     'zigzag_start_mm': 7200.0,   # 경로 지도도 카메라 선도 없을 때만: M5 종료 ~ 지그재그 시작선 (3순위)
     'zigzag_len_mm': 1800.0,     # 도면: 지그재그 약 1.7~1.9m. 바로 뒤 횡단보도 정지선까지 약 250mm라 여유를 크게 안 둠
     'zigzag_width_mm': 570.0,
@@ -746,6 +747,21 @@ class MissionFSM:
         total = (b - a) if (a is not None and b is not None) else self.p['m3_zz_to_stop_mm']
         return inp.dist_mm - at >= total - self.p['m3_zz_cap_target_mm'] - self.p['stop_brake_mm']
 
+    def _cam_line_far(self, inp: Inputs) -> bool:
+        """11/20 시뮬 r6: 지그재그 거리 안전장치가 카메라가 아직 정지선을 보고 있는데(488 mm 남음) 먼저 걸려 +47 cm에 섬.
+        미리 잰/따라가는 정지선을 지금 카메라로 보고 있고 남은 거리가 정지 거리+m3_cap_cam_margin_mm보다 크면 True(안전장치 보류).
+        카메라로 못 볼 때·도면만일 때는 False -> 안전장치 그대로."""
+        mg = self.p.get('m3_cap_cam_margin_mm', -1.0)
+        if mg < 0.0:
+            return False
+        st = getattr(self, 'pre_stop', None) or (getattr(self, 'stop', None) if self.state == 'M3_PEDESTRIAN' else None)
+        if st is None or st.how != 'camera' or st.seen_d is None or st.seen_at is None:
+            return False
+        if inp.dist_mm - st.seen_at > 150.0:          # 최근 150 mm 안에 카메라로 갱신된 선만 믿음
+            return False
+        rem = st.seen_d - (inp.dist_mm - st.seen_at)   # remaining()은 상태를 바꾸므로 여기선 예측값만
+        return rem > st.target_mm + st.brake_mm + mg
+
     def _crosswalk_near(self, inp: Inputs) -> bool:
         lines = inp.lane.get('crosswalk_lines_mm') or []
         return bool(lines) and lines[0] <= self.p['arm_on_crosswalk_mm']
@@ -927,7 +943,7 @@ class MissionFSM:
                 if self.pre_stop.should_stop(inp):
                     self._next(inp, 'stop line close (pre-tracked in zigzag)')
                     return Command('stop', self._lane(0.0))
-        if self._zz_cap(inp):
+        if self._zz_cap(inp) and not self._cam_line_far(inp):
             self.zz_capped = True
             self._next(inp, f'stop line by zigzag-line distance {inp.dist_mm - self.zz_at:.0f}mm ({self.zz_how})')
             return Command('stop', self._lane(0.0))
@@ -954,7 +970,7 @@ class MissionFSM:
             else:
                 return Command('lane', self._lane(p['slow_speed']))    # 지그재그 서행 그대로 (재출발부터 일반 속도)
         if self.sub == 'approach':
-            capped = getattr(self, 'zz_capped', False) or self._zz_cap(inp)
+            capped = getattr(self, 'zz_capped', False) or (self._zz_cap(inp) and not self._cam_line_far(inp))
             normal = self.stop.should_stop(inp)
             if not normal and not capped:
                 return Command('lane', self._lane(p['approach_speed']))
