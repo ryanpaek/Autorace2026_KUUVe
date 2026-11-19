@@ -122,9 +122,16 @@ class ExposureNode(Node):
         self._call('get_exp', None, self._got_exp)
 
     # ---- 서비스 (순서대로) ----
-    def _call(self, name, data, done):
+    def _call(self, name, data, done, optional=False):
+        """optional=True: 실패해도 전체를 포기하지 않고 done(None)으로 넘어감.
+        11/19 LIMO(Dabai DC1): get_color_gain은 'Property is not supported (2002)'.
+        노출 읽기·자동 노출 끄기·노출 쓰기·WB 읽기는 됨 -> 게인 단계 때문에 노출 고정 전체가 실패하던 것 고침."""
         c = self.cli[name]
         if not c.service_is_ready():
+            if optional:
+                self.get_logger().warn(f'exposure_node: 서비스 없음 {c.srv_name} -> 이 단계만 건너뜀')
+                done(None)
+                return
             self._fail(f'서비스 없음: {c.srv_name} (카메라 노드가 켜져 있나?)')
             return
         req = c.srv_type.Request()
@@ -135,39 +142,51 @@ class ExposureNode(Node):
         def cb(f):
             r = f.result()
             if r is None or (hasattr(r, 'success') and not r.success):
-                self._fail(f'{c.srv_name} 실패: {getattr(r, "message", "")}')
+                msg = getattr(r, "message", "")
+                if optional:
+                    self.get_logger().warn(f'exposure_node: {c.srv_name} 지원 안 함({msg}) -> 이 단계만 건너뜀')
+                    done(None)
+                    return
+                self._fail(f'{c.srv_name} 실패: {msg}')
                 return
             done(r)
         fut.add_done_callback(cb)
 
     def _got_exp(self, r):
         self.e0 = int(r.data)
-        self._call('get_gain', None, self._got_gain)
+        self._call('get_gain', None, self._got_gain, optional=True)
 
     def _got_gain(self, r):
-        self.gain = int(r.data)
-        self._call('get_wb', None, self._got_wb)
+        self.gain = int(r.data) if r is not None else None     # None = 이 카메라는 게인 미지원 -> 안 건드림
+        self._call('get_wb', None, self._got_wb, optional=True)
 
     def _got_wb(self, r):
-        self.wb = int(r.data)
+        self.wb = int(r.data) if r is not None else None       # None = WB 못 읽음 -> 자동 WB 그대로
         self.e = fixed_exposure(self.p, self.e0, self.v0)
         self.info.update(auto_exposure=self.e0, gain=self.gain, wb=self.wb, floor_v_at_start=round(self.v0, 1),
                          exposure=self.e)
         if self.e is None:
             self._fail(f'노출 계산 불가 (자동 노출 값 {self.e0}, 바닥 V {self.v0:.0f})')
             return
-        self._call('ae', False, lambda r: self._call('set_exp', self.e, lambda r: self._call(
-            'set_gain', self.gain, lambda r: self._lock_wb())))
+        self._call('ae', False, lambda r: self._call('set_exp', self.e, lambda r: self._set_gain()))
+
+    def _set_gain(self):
+        if self.gain is None:
+            self._lock_wb()
+            return
+        self._call('set_gain', self.gain, lambda r: self._lock_wb(), optional=True)
 
     def _lock_wb(self):
-        if not self.lock_wb:
+        if not self.lock_wb or self.wb is None:
             self._fixed()
             return
-        self._call('awb', False, lambda r: self._call('set_wb', self.wb, lambda r: self._fixed()))
+        self._call('awb', False, lambda r: self._call('set_wb', self.wb, lambda r: self._fixed(), optional=True),
+                   optional=True)
 
     def _fixed(self):
         self._done('fixed', f'노출 고정: 자동 {self.e0} -> {self.e} (출발선 바닥 V {self.v0:.0f}, '
-                            f'목표 {self.p.target() or "-"}), 게인 {self.gain}, WB {self.wb}')
+                            f'목표 {self.p.target() or "-"}), 게인 {self.gain if self.gain is not None else "미지원"}, '
+                            f'WB {self.wb if self.wb is not None else "자동"}')
 
     def _fail(self, why):
         for n in ('ae', 'awb'):
