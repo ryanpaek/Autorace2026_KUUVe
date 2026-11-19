@@ -1299,6 +1299,23 @@ class ParkingV2:
                 self._enter('F_PAUSE', inp)
                 return self._out(0.0, 0.0)
             v = inp['lane_v']
+            # 11/20 시뮬(simcheck M4): 선을 잡은 뒤(남은 380 mm) 주차 구역에서 차선 노드가 선을 놓쳐 /lane/cmd_vel = 0
+            #   -> 그 속도를 그대로 따라 F_LINE에서 영원히 정지(116 s). 선을 잡았으면 차선 속도가 0이어도
+            #   fixed_slow_speed로 '선 잡을 때까지 차선이 가던 방향'(IMU)을 지키며 남은 거리만큼 감. 앞에 물체면 기다림.
+            if p['fixed_line_creep'] and v < p['fixed_line_creep_min_v']:
+                if inp['blocked']:
+                    return self._out(0.0, 0.0)
+                if not getattr(self, 'creep_on', False):
+                    self.creep_on = True
+                    self.creep_n = getattr(self, 'creep_n', 0) + 1
+                k = 0.0
+                if inp['yaw'] is not None and getattr(self, 'creep_yaw', None) is not None:
+                    k = -p['fixed_heading_gain'] * wrap(inp['yaw'] - self.creep_yaw)
+                    k = max(-1.0, min(1.0, k))
+                return self._out(p['fixed_slow_speed'], k)
+            self.creep_on = False
+            if inp['yaw'] is not None:
+                self.creep_yaw = inp['yaw']                   # 차선이 살아 있을 때 방향 (선 놓치면 이 방향 유지)
             if remain < p['fixed_line_target_mm'] + 250.0:
                 v = min(v, p['fixed_slow_speed'])          # 선 25cm 앞부터 천천히 (밀림 줄임)
             return self._out(v, None)
@@ -1641,7 +1658,8 @@ class ParkingV2:
         return {'phase': self.phase, 'done': self.phase == 'DONE', 'result': self.result,
                 'backs': self.backs, 'realigns': self.realigns, 'last_err': self.err,
                 'back_mm': getattr(self, 'back_done_mm', None), 'rejects': getattr(self, 'rejects', 0), 'occ_n': getattr(self, 'occ_n', None), 'cell': getattr(self, 'fixed_cell', None), 'cell_src': getattr(self, 'cell_src', None), 'cell_a': getattr(self, 'cell_a', None), 'cell_b': getattr(self, 'cell_b', None), 'cell_avg': getattr(self, 'cell_avg', None), 'row': self.row, 'stop_how': self.stop_how, 'trigger': self.trigger, 'turn_ref': self.turn_ref_used, 'corner_s': None if self.corner_s is None else round(self.corner_s), 'corner_n': self.corner_n, 'turn_at': self.turn_at, 'target_s': None if self.target_s is None else round(self.target_s), 'target_src': self.target_src, 'n_c5': len(self.tgt_c5), 'n_pm': len(self.tgt_pm), 'q_s': self.q_s, 'r_meas': None if self.r_meas is None else round(self.r_meas), 'fix_n': self.fix_n, 'fix_pred': self.fix_pred,
-                'end_mm': None if self.end_d is None else round(self.end_d)}
+                'end_mm': None if self.end_d is None else round(self.end_d),
+                'creep': getattr(self, 'creep_on', False), 'creep_n': getattr(self, 'creep_n', 0)}
 
 
 DEFAULTS = {
@@ -1681,6 +1699,8 @@ DEFAULTS = {
     'fixed_brake_mm': 0.0,     #   정지 명령 뒤 밀리는 거리 (미측정 -> 0). 실차에서 지나치면 그만큼 넣기
     'fixed_slow_speed': 0.10,  #   선 25cm 앞부터 이 속도 이하
     'fixed_line_max_mm': 4000.0,   # 주차 모드 시작 뒤 이만큼 가도 선을 못 보면 FAIL_NO_LINE (정지)
+    'fixed_line_creep': True,      # 11/20: 선을 잡은 뒤 차선 속도가 0(선 놓침)이어도 fixed_slow_speed로 방향 유지하며 선까지 감
+    'fixed_line_creep_min_v': 0.03,   #   차선 속도가 이보다 작으면 '차선이 멈춤'으로 봄 (m/s)
     'fixed_pause_sec': 0.3,    # 선에서 멈추는 시간
     'fixed_move_mm': 870.0,    # 멈춘 자리부터 직진 거리 (11/16 캡틴 실차 확정)
     'fixed_move_speed': 0.10,
