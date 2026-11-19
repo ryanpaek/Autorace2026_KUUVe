@@ -276,3 +276,28 @@ def test_m2_island_ref_after_replay():
         assert fsm.state == 'M2_EXIT'
         cmd = fsm.step(Inputs(t=99.0, dist_mm=d, yaw=0.0, obstacle={'m7_exit': choice}))
         assert cmd.lane.get('mode') == 'normal' and 'island_ref' not in cmd.lane
+
+
+def test_m2_end_uses_distance_when_route_lags():
+    """11/19: 1119_09 도면 위치가 3 m 뒤처져 M2를 50초 끌었음 -> M2 시작부터 거리로 끝 (섬 1745 + 200)"""
+    fsm = _m2_fsm(route_points={'m7_island_tip': 17973.0, 'm2_island_end': 19718.0, 'm2_merge_end': 20272.0})
+    fsm.fork_choice = 'B'
+    lag = 3000.0
+    d = 0.0
+    while fsm.state == 'M2_FORK' and d < 6000.0:
+        fsm.step(Inputs(t=d / 200.0, dist_mm=d, route_s=17973.0 + d - lag, yaw=0.0, obstacle={'m7_exit': 'B'}))
+        d += 10.0
+    assert fsm.state == 'M2_EXIT'
+    assert 1900.0 <= d <= 2000.0
+    assert any('distance (route s off)' in m for m in fsm.log)
+
+
+def test_m2_end_keeps_route_when_close():
+    fsm = _m2_fsm(route_points={'m7_island_tip': 17973.0, 'm2_island_end': 19718.0, 'm2_merge_end': 20272.0})
+    fsm.fork_choice = 'B'
+    d = 0.0
+    while fsm.state == 'M2_FORK' and d < 6000.0:
+        fsm.step(Inputs(t=d / 200.0, dist_mm=d, route_s=17973.0 + d + 300.0, yaw=0.0, obstacle={'m7_exit': 'B'}))
+        d += 10.0
+    assert 1600.0 <= d <= 1700.0                      # 도면이 300 mm 앞서 있음 -> 도면대로 (700 안)
+    assert not any('distance (route s off)' in m for m in fsm.log)
