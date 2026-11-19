@@ -20,7 +20,7 @@ case "$IMPL" in dash|waypoint|replay) ;; *) echo "M7 방식은 dash / waypoint /
 say() { echo -e "\n\033[1;36m[$1]\033[0m $2"; }
 die() { echo -e "\033[1;31m중단: $1\033[0m"; exit 1; }
 
-source /opt/ros/humble/setup.bash
+set +u; source /opt/ros/humble/setup.bash; set -u   # ROS setup은 set -u에서 깨짐 (AMENT_TRACE_SETUP_FILES)
 cd "$WS" || die "$WS 없음"
 
 # ------------------------------------------------------------ 1. 최신 main
@@ -40,7 +40,7 @@ if [ -z "${NO_PULL:-}" ]; then
 else
   say 1/6 "pull·빌드 건너뜀 (NO_PULL)"; git log -1 --format='  지금 코드: %h %s'
 fi
-source install/setup.bash
+set +u; source install/setup.bash; set -u
 case "$(ros2 pkg prefix autorace_bringup)" in "$WS"/install/*) ;; *) die "autorace_bringup이 $WS 것이 아님 (catkin_ws 등 옛 코드 source됨)";; esac
 
 # ------------------------------------------------------------ 3. 정리
