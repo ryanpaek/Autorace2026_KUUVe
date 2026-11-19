@@ -7,6 +7,10 @@
     적분한 속도 변화의 부호 = 그 다음 멈출 때까지의 방향.
     가속도계 축 방향(+가 앞인지)은 우리가 /cmd_vel 전진·후진을 내며 출발할 때마다 배운다 (learn_need번 같고 반대보다
     learn_margin번 많아야 켜짐). 다 배우기 전엔 판단 안 함(0) -> 예전과 같음. accel_sign 파라미터로 고정 가능.
+11/19 learn_once: 축 방향은 한 번 정해지면 다시 배우지 않는다 (기본 켬).
+    왜: 1119_08 bag에서 M7 전후진 중(142.7·146.7·164.3초) '+x가 뒤'로 다시 배워져 방향이 뒤집혔고,
+    전진 중 31초 동안 후진으로 판정돼 도면 위치 s가 14.8 m -> 5.3 m로 거꾸로 줄었다 (11/19 bag 보고서 새 문제 1).
+    출발 때 배운 축 방향은 주행 중 바뀔 이유가 없다 (센서가 차에 고정). 끄면(False) 예전처럼 계속 배움.
 """
 from typing import Optional, Tuple
 
@@ -14,11 +18,13 @@ from typing import Optional, Tuple
 class AccelDirection:
     def __init__(self, still_v: float = 0.012, move_v: float = 0.03, still_sec: float = 0.08,
                  start_win: float = 0.35, dv_min: float = 0.04, learn_need: int = 2, learn_margin: int = 2,
-                 fixed_sign: int = 0):
+                 fixed_sign: int = 0, learn_once: bool = True):
         self.still_v, self.move_v, self.still_sec = still_v, move_v, still_sec
         self.start_win, self.dv_min = start_win, dv_min
         self.learn_need, self.learn_margin = learn_need, learn_margin
         self.fixed_sign = fixed_sign
+        self.learn_once = learn_once
+        self.n_ignored = 0          # learn_once로 무시한 (확정과 반대인) 배움 횟수
         self.bias = 0.0
         self.nb = 0
         self.t_imu = None
@@ -89,11 +95,14 @@ class AccelDirection:
             if abs(self.dv) >= self.dv_min:
                 self.raw = 1 if self.dv > 0 else -1
                 c = self.cmd_at_start
-                if abs(c) > 0.05:
+                frozen = self.learn_once and self.sign != 0     # 11/19: 확정 뒤엔 다시 안 배움
+                if abs(c) > 0.05 and not frozen:
                     if self.raw * (1 if c > 0 else -1) > 0:
                         self.n_pos += 1
                     else:
                         self.n_neg += 1
+                elif abs(c) > 0.05 and self.raw * (1 if c > 0 else -1) != self.sign:
+                    self.n_ignored += 1
                 s = self.sign
                 self.dir = self.raw * s if s else 0
                 if self.dir < 0:

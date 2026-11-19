@@ -125,6 +125,8 @@ mission_node:
     route_gain: 0.6
     odom_scale: 1.0                        # TODO 실측: 직선 3m 주행 -> 실제 거리 / /odom 거리
     route_signed_dist: true                # 후진 거리는 경로 위치에서 뺌. 후진 판단: odom 속도 부호 / odom 위치 변화 방향 / 최근 /cmd_vel 중 하나라도 (11/11)
+    reverse_from_accel: false              # 11/19: 후진은 /odom 속도 부호로만 (bag: 후진 때 odom 음수 확인). 가속도 판정은 M7 전후진에서 전진을 후진으로 봄 (1119_08 s 14.8 -> 5.3 m). true = 11/17 방식
+    accel_learn_once: true                 # 11/19: reverse_from_accel=true일 때만 씀. 가속도계 축 방향은 한 번 배우면 고정. 1119_08 M7 전후진 중 '+x가 뒤'로 다시 배워 전진 31초를 후진으로 봄 (s 14.8 -> 5.3 m). false = 예전
     route_project_heading: true            # 차가 경로와 비스듬히 간 거리는 cos(방향 차)만 s에 (지그재그 과대 측정 줄임), 나머지는 좌우 d로 (11/11)
     route_align_on_reset: true             # 출발선·연습 시작점·/route/set_s에서 차가 경로 방향으로 반듯이 놓였다고 보고 방향 맞춤
     route_lost_misses: 2                   # 도면 선을 연속 2개 못 보고 지나치면 길 잃음 -> FSM은 표지·카메라·거리로만 (0 = 끔)
