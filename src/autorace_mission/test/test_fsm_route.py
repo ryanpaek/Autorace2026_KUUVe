@@ -245,7 +245,7 @@ def old_m2(monkeypatch):
 
 def test_m2_plain_lane_after_replay_is_normal_lane():
     """11/18: CSV 재생 뒤 M2는 일반 차선만 (한쪽 선 모드·폭 460·직선 방향 붙잡기·합류 S자 없음), 끝 판정은 그대로."""
-    fsm = _m2_fsm()
+    fsm = _m2_fsm(m2_island_ref=False)        # 11/19부터 기본은 섬 기준 (test_m2_island_ref_*)
     fsm.fork_choice = 'B'
     for i, s in enumerate((18100.0, 18400.0, 19500.0)):
         cmd = fsm.step(Inputs(t=float(i), dist_mm=s - 18100.0, route_s=s, yaw=0.0, obstacle={'m7_exit': 'B'}))
@@ -259,3 +259,20 @@ def test_m2_plain_lane_after_replay_is_normal_lane():
     assert fsm.state == 'M2_EXIT'
     cmd = fsm.step(Inputs(t=99.0, dist_mm=d, yaw=0.0, obstacle={'m7_exit': 'B'}))
     assert cmd.lane.get('mode') == 'normal' and getattr(fsm, 'm2m', None) is None
+
+
+def test_m2_island_ref_after_replay():
+    """11/19: CSV 재생 뒤 M2 = 섬 기준. B면 섬 오른쪽 변을 왼쪽 선으로(left_only), A면 right_only, 폭 520, 끝나면 M2_EXIT 일반 차선"""
+    for choice, mode in (('B', 'left_only'), ('A', 'right_only')):
+        fsm = _m2_fsm()
+        fsm.fork_choice = choice
+        cmd = fsm.step(Inputs(t=0.0, dist_mm=0.0, route_s=18100.0, yaw=0.0, obstacle={'m7_exit': choice}))
+        assert cmd.lane['mode'] == mode and cmd.lane['island_ref'] is True
+        assert cmd.lane['lane_width_mm'] == pytest.approx(520.0)
+        d = 0.0
+        while fsm.state == 'M2_FORK' and d < 6000.0:
+            fsm.step(Inputs(t=d / 200.0, dist_mm=d, yaw=0.0, obstacle={'m7_exit': choice}))
+            d += 10.0
+        assert fsm.state == 'M2_EXIT'
+        cmd = fsm.step(Inputs(t=99.0, dist_mm=d, yaw=0.0, obstacle={'m7_exit': choice}))
+        assert cmd.lane.get('mode') == 'normal' and 'island_ref' not in cmd.lane

@@ -186,6 +186,11 @@ class LaneParams:
     min_peak: int = 20                # 후보 열이 밴드 안에서 가져야 할 최소 화소 수
     pair_min_ratio: float = 0.6       # 쌍 폭 하한 (예상 폭 대비). 노면 마름모와 짝을 막음
     pair_max_ratio: float = 1.35
+    # 11/19: 갈림길 섬 기준 (left_only/right_only에서만). A(왼쪽 갈래)면 섬 왼쪽 변 = 내 차로 오른쪽 선(right_only),
+    #   B면 섬 오른쪽 변 = 왼쪽 선(left_only). 차가 섬 변 위에 걸쳐 있으면 가장 가까운 선이 섬 반대쪽 변이 됨(1119_09 133~136 s) ->
+    #   그 갈래 바깥선(B면 맨 오른쪽)이 보이면 거기서 차로 폭(0.8~1.25배) 안쪽에 있는 선을 섬 변으로 고른다. false = 예전
+    island_ref: bool = False
+    island_letter_frames: int = 8          # 그 갈래 바닥 글자를 본 뒤 이 프레임 동안 글자 위치로 섬 변을 고름 (글자 = 차로 가운데)
     continuity_lambda: float = 3.0    # 쌍 점수 = |폭-예상| + lambda*|중점-직전 중점|
     side_deadband_mm: float = 40.0    # 한쪽 선이 중심 근처일 때 좌/우 판정 유지 폭
     side_track_mm: float = 300.0      # 한쪽 선만 보일 때, 직전 시작점에서 이 안이면 같은 선으로 본다 (차로 폭의 절반 남짓)
@@ -496,7 +501,8 @@ def _side_candidates(col_sum: np.ndarray, lo: int, hi: int, min_peak: int,
 
 def detect_lanes(bev: np.ndarray, cfg: BevConfig, p: LaneParams, mode: str,
                  mid_ema: Optional[float], last_side: Optional[str],
-                 last_lr: Tuple[Optional[float], Optional[float]] = (None, None)) -> Detection:
+                 last_lr: Tuple[Optional[float], Optional[float]] = (None, None),
+                 hint_center: Optional[float] = None) -> Detection:
     h, w = bev.shape[:2]
     exp_w = p.lane_width_mm / cfg.mm_per_px_x
     band_rows = int(min(h, max(10, round(p.hist_band_mm / cfg.mm_per_px_y))))
@@ -505,6 +511,37 @@ def detect_lanes(bev: np.ndarray, cfg: BevConfig, p: LaneParams, mode: str,
     vci = int(round(min(max(vc, 1.0), w - 1.0)))
     suppress = max(2, int(round(p.window_margin_mm / cfg.mm_per_px_x)))
     det = Detection(status='NONE', expected_w_px=exp_w)
+
+    if mode in ('left_only', 'right_only') and p.island_ref:
+        # 11/19 섬 기준 (island_ref 설명). left_only = B: 섬 오른쪽 변이 차 왼쪽, right_only = A: 섬 왼쪽 변이 차 오른쪽
+        cands = _side_candidates(col_sum, 0, w, p.min_peak, suppress, k=6)
+        if cands:
+            xs = sorted(c[0] for c in cands)
+            pick = None
+            if hint_center is not None:
+                # 바닥 글자(A/B)는 그 갈래 차로 한가운데 -> 섬 변은 글자에서 반폭 섬 쪽
+                exp_x = hint_center - exp_w / 2.0 if mode == 'left_only' else hint_center + exp_w / 2.0
+                near = min(xs, key=lambda x: abs(x - exp_x))
+                if abs(near - exp_x) <= 0.35 * exp_w:
+                    pick = near
+            if pick is None and mode == 'left_only' and len(xs) >= 2:
+                outer = xs[-1]                         # B 바깥선 (맨 오른쪽)
+                inner = [x for x in xs[:-1] if 0.8 * exp_w <= outer - x <= 1.25 * exp_w]
+                if inner and outer > vc:
+                    pick = max(inner)
+            elif pick is None and mode == 'right_only' and len(xs) >= 2:
+                outer = xs[0]                          # A 바깥선 (맨 왼쪽)
+                inner = [x for x in xs[1:] if 0.8 * exp_w <= x - outer <= 1.25 * exp_w]
+                if inner and outer < vc:
+                    pick = min(inner)
+            if pick is None:
+                expect = vc - exp_w / 2.0 if mode == 'left_only' else vc + exp_w / 2.0
+                pick = min(xs, key=lambda x: abs(x - expect))
+            if mode == 'left_only':
+                det.left_x0, det.status = pick, 'L'
+            else:
+                det.right_x0, det.status = pick, 'R'
+        return det
 
     if mode in ('left_only', 'right_only'):
         # 갈림길: 한쪽 경계만 따라간다. 중심선을 조금 넘어온 선까지 허용.
@@ -1514,6 +1551,8 @@ class LaneFollower:
         self.reject_count = 0
         self.lost_frames = 0
         self.kappa_cmd = 0.0
+        self._letter_seen = None             # 11/19 섬 기준: (글자, 차 기준 옆 mm, 본 프레임 번호)
+        self._frame_n = 0
         self.in_corner_ld = False
         self.in_corner_spd = False
         self.last_good_kappa = 0.0
@@ -1598,8 +1637,15 @@ class LaneFollower:
 
         out = LaneOutput()
         out.debug['bev'] = bev_lane
+        self._frame_n = getattr(self, '_frame_n', 0) + 1
+        hint = None
+        ls = getattr(self, '_letter_seen', None)
+        if (p.island_ref and self.mode in ('left_only', 'right_only') and ls is not None
+                and self._frame_n - ls[2] <= p.island_letter_frames
+                and ls[0] == ('B' if self.mode == 'left_only' else 'A')):
+            hint = cfg.vehicle_col + ls[1] / cfg.mm_per_px_x
         det = detect_lanes(bev_lane, cfg, p, self.mode, self.mid_ema, self.last_side,
-                           self.last_lr)
+                           self.last_lr, hint_center=hint)
         n_lab, lab_full = cv2.connectedComponents((bev_lane > 0).astype(np.uint8), connectivity=8)
         if det.status in ('L', 'R') and self.mode not in ('left_only', 'right_only'):
             self._keep_side_by_overlap(det, lab_full)
@@ -1915,6 +1961,7 @@ class LaneFollower:
                 fl = detect_floor_letter(bev_white, cfg, p)
                 if fl is not None:
                     out.floor_letter, out.floor_letter_mm, out.floor_letter_off_mm = fl
+                    self._letter_seen = (fl[0], float(fl[2]), self._frame_n)
             # 주차 칸 끝 선: 흰+노란 마스크, 차 정면 기준 (칸 안에서는 차선 중심 추정이 엉뚱할 수 있음)
             both = bev_white if raw_lane is None else cv2.bitwise_or(bev_white, raw_lane)
             out.end_lines_mm = [d for d, _ in detect_stoplines(both, cfg.vehicle_col, cfg, p, max_angle_deg=0.0)]
