@@ -124,6 +124,29 @@ class WaypointParams:
     eyg_front: float = 0.20
     eyg_latency: float = 0.15
     eyg_fresh_s: float = 0.3
+    # 11/20 옆 위치: 노란 실선(차선 노드 yellow_l/r_mm)으로 직접 고침.
+    #   시뮬 전체 판: 코너 안쪽(-21 cm)·+18°로 켜졌는데 켤 때 옆 0으로 잡음 -> 옆 오차 25~55 cm(한 차로) 그대로 ->
+    #   LIMO가 차로 경계에 걸쳐 보여 '길 없음'·'굴려 보니 닿음' 반복, 15 s Time-out. 스냅(snap_max 0.15)으로는 못 고침
+    yellow_fix: bool = True
+    yfix_gain: float = 0.35             # 한 번에 고치는 비율 (차선 노드 25~30 Hz)
+    yfix_n: int = 3                     # 최근 이만큼 값이
+    yfix_spread: float = 0.06           #   이 폭 안에 모여야 고침
+    yfix_max: float = 0.65              # 이보다 큰 차이는 잘못 본 선으로 버림
+    yfix_psi_deg: float = 35.0          # 차로 방향과 이보다 틀어져 있으면 안 씀
+    yfix_front_min: float = 0.6         # 차 앞 간격이 이보다 가까우면 안 씀 (LIMO가 화면 가림)
+    yfix_snap_off_s: float = 1.0        # 노란선으로 고친 뒤 이 시간 동안은 LIMO 차로 격자 스냅 안 함 (서로 당김 방지)
+    # 11/20 끝: section_length - end_before를 넘어도 앞(end_ahead 안)에 정차 LIMO가 남아 있거나 갈림길 차로가 아니면 계속.
+    #   (실차 섬까지 거리는 m7_link가 4.8 m로 자름 -> 마지막 줄 LIMO 전에 FSM에 넘겨 그 LIMO로 직진할 수 있음)
+    end_ahead: float = 1.0              # 차 앞 이 안에 기억한 LIMO가 있으면 아직 안 끝냄
+    end_extra: float = 1.6              # 그래도 section_length - end_before + 이만큼에서는 끝
+    island_plan: bool = True            # 계획이 섬 앞 끝을 넘어가면 그 뒤 가운데 차로를 막힘으로 (안 되면 예전 계획)
+    tip_margin: float = 0.15            #   섬 앞 끝 이만큼 전부터
+    # 11/20 15 s 규정(멈춰 있으면 미션 실패): '기다림'과 '굴려 보니 닿음 -> 정지'가 번갈아 나오면 기다림 타이머가 0으로 돌아가
+    #   끝없이 섬. 길 없음이 풀려도 wait_unblock_s 동안은 타이머 유지, 모두 합쳐 stall_s 넘게 서 있으면 stall_go_s 동안 천천히 감
+    wait_unblock_s: float = 1.0
+    stall_s: float = 9.0
+    stall_go_s: float = 1.5
+    stall_rev_max: int = 2              # 앞이 막혀(creep_stop 안) 천천히도 못 가면 reverse_max가 0이어도 이만큼 후진 (계획 차로 쪽으로 머리)
 
 
 def rect(x, y, th, along, across):
@@ -271,6 +294,44 @@ class M7Waypoint:
 
     def on_lane(self, msg: dict, t: float):
         self.lane_msg, self.lane_t = msg, t
+        if self.state == 'RUN' and self.p.yellow_fix:
+            self._yellow_fix(msg or {})
+
+    def _yellow_fix(self, msg: dict):
+        """노란 실선 옆 거리로 옆 위치 y를 고친다 (y = ±노란선 - f sinψ ∓ d cosψ). 기억한 LIMO도 같이 옮김."""
+        p = self.p
+        x, y, psi = self.pose()
+        if abs(psi) > math.radians(p.yfix_psi_deg) or self.front_gap < p.yfix_front_min:
+            self.yfix_buf = []          # 바로 앞 LIMO가 카메라를 가리면 선을 잘못 봄
+            return
+        f = msg.get('yellow_f_mm')
+        f = float(f) / 1000.0 if f is not None else 0.575
+        meas = []
+        for side, key in ((1, 'yellow_l_mm'), (-1, 'yellow_r_mm')):
+            d = msg.get(key)
+            if d is None:
+                continue
+            d = float(d) / 1000.0
+            if not -0.15 < d < 0.75:
+                continue
+            meas.append(side * p.yellow_line_y - f * math.sin(psi) - side * d * math.cos(psi))
+        if not meas:
+            return
+        r = sum(meas) / len(meas) - y
+        if abs(r) > p.yfix_max:
+            self.yfix_buf = []
+            return
+        self.yfix_buf = (self.yfix_buf + [r])[-p.yfix_n:]
+        if len(self.yfix_buf) < p.yfix_n or max(self.yfix_buf) - min(self.yfix_buf) > p.yfix_spread:
+            return
+        dy = p.yfix_gain * median(self.yfix_buf)
+        if abs(dy) < 0.003:
+            return
+        self._shift(ddy=dy)
+        self.yfix_t = self.t_last or 0.0
+        self.yfix_buf = [v - dy for v in self.yfix_buf]
+        self.yfix_sum += dy
+        self.yfix_cnt += 1
 
     # ---------- 켜기·끄기 ----------
     def reset(self):
@@ -300,6 +361,16 @@ class M7Waypoint:
         self.last_k = 0.0
         self.k_hist: List[Tuple[float, float]] = []
         self.lane_msg, self.lane_t = None, None
+        self.yfix_buf: List[float] = []
+        self.yfix_sum = 0.0
+        self.yfix_cnt = 0
+        self.yfix_t = -1e9
+        self.end_wait_logged = False
+        self.unblk_t = 0.0
+        self.still_t = 0.0
+        self.stall_until = -1.0
+        self.n_stall = 0
+        self.n_stall_rev = 0
         self.eyg_n = 0
         self.eyg_hits = 0
         self.yg = None
@@ -385,7 +456,7 @@ class M7Waypoint:
             return ex + d[0] * c - d[1] * s, ey + d[0] * s + d[1] * c
 
         # 옆 보정 (차로 격자 스냅)
-        if self.y_unlocked:
+        if self.y_unlocked and t - self.yfix_t > p.yfix_snap_off_s:
             res = []
             for d in dets:
                 if math.hypot(d[0], d[1]) > p.snap_range:
@@ -450,10 +521,11 @@ class M7Waypoint:
         self.mem = keep
 
     # ---------- 계획 ----------
-    def _plan(self, obs, x0, lane0, target, fixed: Optional[Trans]):
+    def _plan(self, obs, x0, lane0, target, fixed: Optional[Trans], island: bool = False):
+        """island: 섬 앞 끝(section_length - tip_margin)부터 가운데 차로 막힘 (끝 차로는 1/3차선)"""
         p = self.p
         ds = p.plan_ds
-        x_end = p.section_length - p.end_before
+        x_end = self._x_end(obs)
         n = max(2, int(math.ceil((x_end - x0) / ds)) + 1)
         half = (p.robot_front + p.robot_rear) / 2 + p.obs_along / 2 + p.clear
         bl = {-1: [], 0: [], 1: []}
@@ -467,6 +539,9 @@ class M7Waypoint:
 
         xs = [x0 + j * ds for j in range(n + int(math.ceil(max(p.change_len, p.change_len_short) / ds)) + 2)]
         B = {k: [any(abs(x - ox) < half for ox in bl[k]) for x in xs] for k in (-1, 0, 1)}
+        if island:
+            x_tip = p.section_length - p.tip_margin
+            B[0] = [b or x >= x_tip for b, x in zip(B[0], xs)]
         pre = {k: [0] for k in (-1, 0, 1)}
         for k in (-1, 0, 1):
             for b in B[k]:
@@ -525,6 +600,16 @@ class M7Waypoint:
             j = min(n - 1, j + int(round(a[1] / ds)))
         return tr
 
+    def _x_end(self, obs=None):
+        """계획 끝: 섬 앞 끝 - end_before. 그 뒤에도 LIMO가 있으면 마지막 LIMO + 지나갈 거리 + 차로 변경까지 (end_extra 안)."""
+        p = self.p
+        x0 = p.section_length - p.end_before
+        xs = [o['x'] for o in (obs if obs is not None else self.mem) if o.get('n', 2) >= 2]
+        if not xs or max(xs) + 0.4 < x0 - 0.5:
+            return x0
+        half = (p.robot_front + p.robot_rear) / 2 + p.obs_along / 2 + p.clear
+        return min(x0 + p.end_extra, max(x0, max(xs) + half + p.change_len))
+
     def _lane_at(self, x):
         k = self.plan_lane0
         for t in self.plan_tr or []:
@@ -563,12 +648,15 @@ class M7Waypoint:
         else:
             lane0 = egoL
         tgt = self.exit_lane()
-        pl = self._plan(obs, x0, lane0, tgt, fixed)
+        isl = p.island_plan and self._x_end(obs) > p.section_length - p.tip_margin
+        pl = self._plan(obs, x0, lane0, tgt, fixed, island=True) if isl else None
+        if pl is None:
+            pl = self._plan(obs, x0, lane0, tgt, fixed)
         if pl is not None and fixed:
             self.plan_lane0 = fixed.a
         if pl is None and fixed:
             for k0 in (fixed.a, fixed.b):
-                pl = self._plan(obs, ex, k0, tgt, None)
+                pl = (self._plan(obs, ex, k0, tgt, None, island=True) if isl else None) or self._plan(obs, ex, k0, tgt, None)
                 if pl is not None:
                     self.plan_lane0 = k0
                     break
@@ -697,11 +785,22 @@ class M7Waypoint:
             return 0.0, 0.0
         x, y, psi = self.pose()
         self.lane = self.lane_of(y)
-        if x >= p.section_length - p.end_before:
-            self.target = self.lane
-            self.state = 'DONE'
-            self.events.append(f'[x={x:.2f}] 3차선 끝 -> 차로 {LANE_NO[self.lane]}로 끝 (출구 {self.exit_fork or "?"})')
-            return 0.0, 0.0
+        x_min = p.section_length - p.end_before
+        if x >= x_min:
+            ahead = [m for m in self.mem if m['n'] >= 2 and x - 0.35 < m['x'] < x + p.end_ahead]
+            tgt = self.exit_lane()
+            wrong = tgt is not None and self.lane != tgt and (x < p.section_length - 0.4 or self.lane == 0)
+            hard = x >= x_min + p.end_extra
+            if hard or (not ahead and not wrong):
+                self.target = self.lane
+                self.state = 'DONE'
+                why = '' if not (ahead or wrong) else (' (최대 거리: ' + ('앞에 LIMO ' if ahead else '') + ('갈림길 차로 아님' if wrong else '') + ')')
+                self.events.append(f'[x={x:.2f}] 3차선 끝 -> 차로 {LANE_NO[self.lane]}로 끝 (출구 {self.exit_fork or "?"}){why}')
+                return 0.0, 0.0
+            if not self.end_wait_logged:
+                self.end_wait_logged = True
+                self.events.append(f'[x={x:.2f}] 끝 거리 지났지만 계속: ' + (f'앞 {min(m["x"] for m in ahead) - x:.2f} m에 LIMO ' if ahead else '')
+                                   + (f'갈림길 {self.exit_fork} 차로 아님(지금 {LANE_NO[self.lane]}차선)' if wrong else ''))
         if self.n_scan < 2:
             return self._out(0.0, 0.0, '라이다 2바퀴 기다림')
         v = p.speed
@@ -759,7 +858,11 @@ class M7Waypoint:
                 self.blocked_t += dt
         else:
             self.blocked_t = 0.0
-            self.wait_t = 0.0
+            self.unblk_t += dt
+            if self.unblk_t >= p.wait_unblock_s:
+                self.wait_t = 0.0
+        if self.blocked:
+            self.unblk_t = 0.0
         if self.danger and not self.blocked:
             v = 0.0
             self.danger_t += dt
@@ -798,11 +901,37 @@ class M7Waypoint:
             kc = -side * p.max_curv
             self.yg = side
             self.eyg_hits += 1
+        # 15 s 막기: 다 합쳐 stall_s 넘게 서 있으면 stall_go_s 동안 지금 차로 따라 천천히
+        stall = False
+        if (v <= 0 and self.still_t > p.stall_s and self.front_gap <= p.creep_stop and t >= self.stall_until
+                and self.n_stall_rev < p.stall_rev_max):
+            k, tr = self._lane_at(x + 0.5) if self.plan_tr else (self.lane, None)
+            tgt = tr.b if tr else k
+            aim = math.copysign(math.radians(p.reverse_aim_deg), tgt * p.lane_width - y) if tgt * p.lane_width != y else 0.0
+            self.rev = {'left': p.reverse_dist, 'aim': aim}
+            self.n_stall_rev += 1
+            self.n_rev += 1
+            self.still_t = 0.0
+            self.events.append(f'[x={x:.2f}] {p.stall_s:.0f} s 넘게 서 있고 앞이 막힘 -> 후진 {self.n_stall_rev}/{p.stall_rev_max} (15 s 규정)')
+            return self._out(-p.reverse_speed, 0.0, '15 s 막기 -> 후진')
+        if t < self.stall_until or (v <= 0 and self.still_t > p.stall_s and self.front_gap > p.creep_stop):
+            if t >= self.stall_until:
+                self.stall_until = t + p.stall_go_s
+                self.n_stall += 1
+                self.events.append(f'[x={x:.2f}] {self.still_t:.0f} s 서 있음 -> {p.stall_go_s:.1f} s 천천히 감 (15 s 규정)')
+            if self.front_gap > p.creep_stop:
+                v, stall = p.creep_v, True
+                dy2 = self.lane * p.lane_width - y
+                xr2, yr2 = p.lookahead * c + dy2 * s, -p.lookahead * s + dy2 * c
+                if self.yg is None:
+                    kc = 2 * yr2 / (xr2 * xr2 + yr2 * yr2)
+        self.still_t = 0.0 if v > 0 else self.still_t + dt
         # 안전 정지
         if self.front_gap < p.safety_stop and v > 0:
             v = 0.0
             self.stop_why = f'차 앞 {100 * self.front_gap:.0f} cm'
-        why = ('길 없음 -> 천천히 접근' if self.creep else
+        why = ('15 s 막기 -> 천천히 감' if stall else
+               '길 없음 -> 천천히 접근' if self.creep else
                f'길 없음 -> 옮길 자리 남기고 기다림 ({self.wait_t:.0f}/{p.wait_s:.0f} s)' if waiting else
                '길 없음 -> 정지' if self.blocked else
                '굴려 보니 닿음 -> 정지' if self.danger else '계획 따라감')
@@ -828,6 +957,6 @@ class M7Waypoint:
                 'first_block_mm': {str(k): (None if v is None else round(1000 * v)) for k, v in self.first_block.items()},
                 'mem': [[round(m['x'], 2), round(m['y'], 2), m['n'], bool(m.get('prior'))] for m in self.mem],
                 'hold': None if self.hold is None else self.hold[0], 'psi_ok': self.psi_ok, 'y_unlocked': self.y_unlocked, 'n_rev': self.n_rev,
-                'n_forgot': self.n_forgot,
+                'n_forgot': self.n_forgot, 'yfix_cm': round(100 * self.yfix_sum, 1), 'yfix_n': self.yfix_cnt, 'n_stall': self.n_stall,
                 'yellow': self.yg, 'eyg_hits': self.eyg_hits, 'why': self.why, 'stop': self.stop_why,
                 'lane_why': {'reason': self.why}}
