@@ -23,6 +23,13 @@ def _limo(gap, yc, x_car=0.0):
     return [(x0 + 0.02 * i, yc - 0.115 + 0.023 * j) for i in range(16) for j in range(11)]
 
 
+def _scans(m, pts, n=3, t0=1.0):
+    """정차 LIMO는 스캔마다 보임 -> 같은 점을 n 스캔 넣고 매 스캔 판단 (11/19: 장애물은 연속 3스캔 확인)"""
+    for i in range(n):
+        m.on_scan_points(t0 + 0.1 * i, pts)
+        m.step(t0 + 0.1 * i)
+
+
 def test_paths_need_46cm():
     for tr, ok in ((440, False), (460, True), (540, True)):
         p = ReplayParams(trigger_mm=float(tr))
@@ -36,16 +43,14 @@ def test_paths_need_46cm():
 
 def test_between_46_and_54_starts_from_here():
     m = _m()
-    m.on_scan_points(0.0, _limo(0.50, 0.0))
-    m.step(1.0)
+    _scans(m, _limo(0.50, 0.0))
     assert m.state == 'EXEC'
     assert abs(m.track.segs[0].x[0] - 0.0) < 0.02          # 녹화 경로를 지금 위치에 붙임
 
 
 def test_closer_than_46_backs_up_to_50():
     m = _m()
-    m.on_scan_points(0.0, _limo(0.42, 0.0))
-    m.step(1.0)
+    _scans(m, _limo(0.42, 0.0))
     assert m.state == 'BACKUP'
     assert any('500 mm까지 후진' in e for e in m.events)
 
@@ -53,8 +58,7 @@ def test_closer_than_46_backs_up_to_50():
 def test_blocked_between_46_and_50_backs_up():
     """47 cm인데 옆 차로도 막혀 지금 자세로 갈 곳 없음 -> 50 cm까지 후진"""
     m = _m(lane=1)
-    m.on_scan_points(0.0, _limo(0.47, 0.52) + _limo(0.20, 0.0))
-    m.step(1.0)
+    _scans(m, _limo(0.47, 0.52) + _limo(0.20, 0.0), n=5)    # 장애물 확인 3스캔 + 막힘 확인 3스캔 (겹침)
     assert m.state == 'BACKUP'
 
 

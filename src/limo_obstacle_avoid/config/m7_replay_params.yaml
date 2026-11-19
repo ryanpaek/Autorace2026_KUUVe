@@ -50,3 +50,26 @@
     eyg_psi_deg: 2.0           #   노란선 쪽으로 이만큼 이상 틀어져 있을 때만
     eyg_arm_frac: 0.30         #   재생 진행률 30% 지나야 켬
     eyg_frames: 2              #   연속 2프레임
+    # 11/19 실차 '앞에 장애물 없는데 후진' (라이다 점 튐): 차로 장애물은 연속 3스캔 같은 자리(±10 cm)여야 트리거·후진·차로 고르기에 씀.
+    #   라이다 점으로 정하는 후진(지금 자세로 막힘·출구 쪽·M2 시작 자리)도 그 판단이 연속 3스캔이어야. 차체 바로 앞 안전 정지는 그대로 1스캔
+    #   예전으로: ros2 param set /avoid_node obs_confirm_frames 1 / reverse_confirm_frames 1
+    obs_confirm_frames: 3
+    obs_confirm_tol: 0.10
+    reverse_confirm_frames: 3
+    # 11/19 실차 '앞·옆 다 막혔다고 영원히 서 있음(틈 있는데)': 정해진 자리 녹화 경로가 양쪽 다 닿으면 (연속 3스캔 확인 뒤)
+    #   조금 더 가서(최대 20 cm) / 물러나서(최대 50 cm) 녹화 경로나 만든 S자(25~60°, 반경 0.53 x 1.2)로 갈 길을 찾음.
+    #   로그 '막힘 -> 다른 길: ...' / '다른 길도 없음'. 끄기: ros2 param set /avoid_node rescue false
+    rescue: true
+    rescue_r_scale: 1.2
+    rescue_deg_min: 25.0
+    rescue_deg_max: 60.0
+    rescue_deg_step: 5.0
+    rescue_margin: 0.04          #   만든 S자 검사 여유 (녹화 경로는 hit_margin 0.03)
+    rescue_island_margin: 0.08   #   섬(도면 위치)은 위치 추정 오차만큼 더 넓게
+    rescue_fwd_max: 0.20
+    rescue_back: true            #   앞으로 갈 길이 없을 때만 물러나서 찾음 (false = 후진 안 함)
+    rescue_back_max: 0.50
+    rescue_step: 0.05
+    rescue_back_step: 0.10
+    rescue_tail: 0.15            #   도착 뒤 이만큼 더 가도 안 닿아야
+    rescue_period_s: 0.5
