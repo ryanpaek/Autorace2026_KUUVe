@@ -174,6 +174,13 @@ class LaneParams:
     white_bridge_keep_frames: int = 3       # 선을 한 프레임 놓쳐도 이만큼은 직전 선 둘레를 계속 봄
     white_bridge_pale_s_min: int = 20       # 옅은 노랑: 노란 색상 범위 + 이 채도 이상 + 아래 밝기 이상
     white_bridge_pale_v_min: int = 200
+    # 11/20 시뮬(simcheck r1): 스팟 조명 아래(첫 코너 출구·M6·M3)는 바닥까지 포화(흰색 마스크 92~98%)라 white_bridge가
+    #   밝은 덩어리로 보고 다 버림 -> 차선 NONE -> 정지 / 한쪽 선만 보고 코너 안쪽 파고듦.
+    #   포화된 노란 선은 H 29~31, S 42~55, V 255 / 바닥은 S <= 15 -> 노란 색상 + 옅은 채도 + 높은 밝기를 차선으로 더함.
+    #   실차 1119_09: 선 S 150 -> 30. 0 = 끔
+    pale_yellow_s_min: int = 0
+    pale_yellow_v_min: int = 200
+    pale_yellow_max_frac: float = 0.25      # 아래 절반에서 옅은 노랑이 이 비율을 넘으면 바닥 색으로 보고 안 씀
     # 11/19: 선을 놓쳐 hold/route/search로 갈 때 속도 상한 (m/s, 0 = 끔). 1~4차 첫 코너 앞에서 선 없이 0.4 m/s로 3 m 달림
     lost_speed: float = 0.0
     # 마스크 전처리
@@ -472,6 +479,12 @@ def color_masks(bgr: np.ndarray, p: LaneParams) -> Tuple[np.ndarray, np.ndarray]
     yellow = cv2.inRange(hsv, np.array([p.yellow_h_min, p.yellow_s_min,
                                         p.yellow_v_min], np.uint8),
                          np.array([p.yellow_h_max, 255, 255], np.uint8))
+    if p.pale_yellow_s_min > 0 and p.lane_color in ('yellow', 'both'):
+        pale = cv2.inRange(hsv, np.array([p.yellow_h_min, p.pale_yellow_s_min, p.pale_yellow_v_min], np.uint8),
+                           np.array([p.yellow_h_max, 255, 255], np.uint8))
+        h = pale.shape[0] // 2
+        if float(np.count_nonzero(pale[h:])) / max(1, pale[h:].size) <= p.pale_yellow_max_frac:
+            yellow = cv2.bitwise_or(yellow, pale)
     if p.lane_color == 'white':
         lane = white
     elif p.lane_color == 'yellow':
