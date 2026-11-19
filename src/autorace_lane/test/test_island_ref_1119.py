@@ -53,3 +53,35 @@ def test_island_ref_off_keeps_old_choice():
     o = lf.process_bev(_scene(cfg, [-300.0, 100.0, 620.0]), blank(cfg), speed=0.2)
     x0 = (o.debug['left'][0, 0] - cfg.vehicle_col) * cfg.mm_per_px_x
     assert abs(x0 + 300.0) < 30.0
+
+
+def test_only_far_side_outer_line_is_not_island_edge():
+    """11/20 yubin: A 끝 직선에서 섬 변이 화면 밖 -> 차 왼쪽 바깥선만 보임. 그걸 오른쪽 선으로 잡으면 왼쪽으로 나감 -> 선 없음"""
+    for mode, x in (('right_only', -260.0), ('left_only', 260.0)):
+        cfg, lf = _lf()
+        lf.mode = mode
+        o = lf.process_bev(_scene(cfg, [x]), blank(cfg), speed=0.2)
+        assert o.status == 'NONE'
+    cfg, lf = _lf()
+    lf.mode = 'right_only'
+    assert lf.process_bev(_scene(cfg, [260.0]), blank(cfg), speed=0.2).status == 'R'   # 맞는 쪽 선은 그대로
+
+
+def test_outer_line_crossing_ahead_is_not_island_edge():
+    """11/20 yubin sim_1 042914: A 재생 끝에 차가 바깥쪽으로 21° -> 왼쪽 바깥선이 차 앞 가운데를 지나 오른쪽으로 뻗음. 섬 변 아님"""
+    import math
+    cfg, lf = _lf()
+    lf.mode = 'right_only'
+    ys = np.linspace(0, 3000, 50)
+    img = blank(cfg)
+    t = math.tan(math.radians(21.0))
+    draw_polyline_mm(img, cfg, -250.0 / math.cos(math.radians(21.0)) + ys * t, ys)
+    assert lf.process_bev(img, blank(cfg), speed=0.2).status == 'NONE'
+
+
+def test_single_line_slightly_on_wrong_side_is_not_island_edge():
+    """11/20 yubin sim_1 055926: B에서 섬 변이 화면 밖, 차 오른쪽 100 mm 바깥선만 -> 섬 변 아님 (예전 130 mm 기준은 통과)"""
+    cfg, lf = _lf()
+    assert lf.process_bev(_scene(cfg, [100.0]), blank(cfg), speed=0.2).status == 'NONE'
+    cfg, lf = _lf()
+    assert lf.process_bev(_scene(cfg, [-200.0]), blank(cfg), speed=0.2).status == 'L'    # 맞는 쪽은 그대로
