@@ -47,6 +47,11 @@ DEFAULT_PARAMS = {
     'bump_imu_rate': 0.30,
     'bump_after_mm': 300.0,      # 뒷바퀴까지 넘게 (축거 210 + 여유)
     # M6 지그재그
+    # 11/20 시뮬(simcheck r3): 1번 코너(M5 끝 -> M6 지그재그 전, 우회전)에서 오른쪽 바퀴가 안쪽 선을 밟음(여유 1~3 cm).
+    #   차선 노드가 도면 곡률을 '앞바퀴 앞 route_ff_preview_mm(300)+지연보상' 지점에서 읽어 회전 중심(뒷바퀴)보다 약 0.56 m 일찍 꺾고,
+    #   corner_lock 하한(|k|-0.3=1.42)이 '덜 꺾기' 보정을 막음 -> 코너 끝에서 뒷바퀴가 차로 중심보다 약 22 cm 안쪽.
+    #   이 구간에서만 차선 노드 route_ff_preview_mm을 이 값으로 덮어씀 (M7 직전 코너 등은 그대로). 음수 = 안 덮어씀
+    'c1_ff_preview_mm': -1.0,
     'zigzag_start_mm': 7200.0,   # 경로 지도도 카메라 선도 없을 때만: M5 종료 ~ 지그재그 시작선 (3순위)
     'zigzag_len_mm': 1800.0,     # 도면: 지그재그 약 1.7~1.9m. 바로 뒤 횡단보도 정지선까지 약 250mm라 여유를 크게 안 둠
     'zigzag_width_mm': 570.0,
@@ -895,7 +900,8 @@ class MissionFSM:
                 _, d = self._since(inp)
                 at = d >= self.p['zigzag_start_mm']
             if not at:
-                return Command('lane', self._lane(self.p['base_speed']))
+                kw = {'route_ff_preview_mm': float(self.p['c1_ff_preview_mm'])} if self.p.get('c1_ff_preview_mm', -1.0) >= 0.0 else {}
+                return Command('lane', self._lane(self.p['base_speed'], **kw))
             self._sub('zigzag', inp, f'start line ({self.line.how or "route/distance"})')
             # 정지선 안전장치 기준점: 카메라로 선을 지난 순간(가장 정확). 도면 위치로 지난 것도 씀, 거리로만 지난 것은 안 씀
             self.zz_at = inp.dist_mm if self.line.how in ('camera', 'route') else None

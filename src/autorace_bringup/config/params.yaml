@@ -91,6 +91,7 @@ mission_node:
     leave_mm: 600.0
     state_max_mm: 10000.0
     stop_target_mm: 150.0                  # 11/15 저녁: 100으로도 실차는 정지선 직전에 섬 -> 150. 실행 중 바로 바꾸기: ros2 param set /mission_node stop_target_mm 200.0
+    c1_ff_preview_mm: 0.0                  # 11/20 시뮬: 1번 코너(M5->M6)만 도면 곡률을 앞바퀴 위치에서 읽음 (기본 300 -> 0). 안쪽 선 밟음 대응. -1 = 끔
     m3_stop_target_mm: 250.0               # 11/15 저녁: M7 직전 횡단보도는 여유롭게 25 cm 앞 (실행 중 ros2 param set /mission_node m3_stop_target_mm ...)
     stop_passed_mm: 120.0                  #   정지선을 이만큼 지났다고 보이면 그 자리에서 정지 (끝선까지 가서 서던 것)
     m3_pretrack: true                      # 11/15 밤: 지그재그 중에 횡단보도 정지선을 미리 재 둠 (M3 시작 땐 정지선이 이미 카메라 사각이라 지나서 섰음)
