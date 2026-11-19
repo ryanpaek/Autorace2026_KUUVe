@@ -185,6 +185,8 @@ DEFAULT_PARAMS = {
     'fork_normal_after_mm': 300.0,
     'fork_normal_after_dist_mm': 700.0,   #   도면 위치가 없으면 갈림길 시작부터 이 거리 뒤
     'm2_merge': True,
+    'm2_merge_lane_first': True,       # 11/20 yubin: false = S자 동안 차선 조향 안 섞음 (sim_1: 차선이 갈래 직선을 붙잡아 S자가 늦고 45°로 따라잡다 넘침)
+    'm2_merge_plain': False,           # 11/20 yubin: m2_plain_lane에서도 합류 강제 S자 (params.yaml에서 켬). sim_1: 직선 그대로 가 합류 사선 바깥선을 넘음
     'm2_merge_before_end_mm': 500.0,   # 섬 왼쪽 끝(m2_island_end)보다 이만큼 앞에서 시작 (자기 차로 안에서 먼저 안쪽으로)
     'm2_merge_from_tip_mm': 1245.0,    # 도면 위치가 없을 때: M2 시작(섬 앞 끝 근처)부터 이만큼 가서 시작 (섬 길이 1745 - 500)
     'm2_merge_len_mm': 1100.0,
@@ -511,6 +513,8 @@ class MissionFSM:
             self.m7c = (inp.yaw, inp.dist_mm, 'M7_OBSTACLE', start) if use else None
             # 3차선·갈림길 직선 방향 = 코너 진입 방향에서 90° 돈 방향 (M2·합류에서 선을 놓쳤을 때 붙잡을 방향)
             self.axis_yaw = (inp.yaw + self.p['m7_corner_dir'] * math.pi / 2.0) if use else None
+            # 11/20 yubin: 연습으로 M7부터면 차를 직선에 바로 놓음 -> M7 첫 yaw를 직선 방향으로 (없으면 M2·합류·M8이 재생 끝 방향(최대 20° 틀어짐)을 씀)
+            self.m7_placed = why in ('manual', 'init')
             self.m2m = None                          # 합류 강제 S자 (다음 판 위해 지움)
             self.floor_fork, self.floor_buf = None, []
             self.floor_blocked = False
@@ -981,6 +985,8 @@ class MissionFSM:
         갈림길 표지가 이 구간 끝에서 보일 수 있으니 여기서부터 미리 투표해 둔다.
         obstacle 노드는 /mission/state의 fork_choice를 보고 회피 마지막에 그쪽 차로로 들어가야 한다.
         """
+        if getattr(self, 'm7_placed', False) and inp.yaw is not None:
+            self.axis_yaw, self.m7_placed = inp.yaw, False
         self._remember_fork(inp)
         _, d = self._since(inp)
         done = inp.obstacle.get('m7_done', False)
@@ -1098,11 +1104,21 @@ class MissionFSM:
             if (db >= self.p['fork_len_mm'] + self.fork_adj_mm) if end is None else end:
                 self._next(inp, f'fork {self.fork_choice} done')
                 return Command('lane', self._lane(self.p['base_speed']))
+            merge_cmd = self._m2_merge(inp, db)      # m2_merge_plain일 때만 (섬 끝 500 mm 앞에서 S자 시작, M2_EXIT까지 이어짐)
+            if merge_cmd is not None:
+                return merge_cmd
             if self.p.get('m2_island_ref', True) and self.fork_choice in ('A', 'B'):
                 mode = 'right_only' if self.fork_choice == 'A' else 'left_only'
+                # 11/20 yubin: 선을 놓치면 정지(15초 Time-out -> M2 실패) 대신 갈래 직선 방향 유지 (lost_never_stop)
+                #   마지막 차선 방향은 원 맞춤이 틀어지면 수십 도 어긋남 -> 갈래 직선 방향(M7 축, 없으면 갈래 시작 방향)
+                kw = {}
+                ax = self.axis_yaw if getattr(self, 'axis_yaw', None) is not None else getattr(self, 'm2_yaw', None)
+                if ax is not None:
+                    kw['hold_axis_deg'] = round(math.degrees(math.atan2(math.sin(ax), math.cos(ax))), 1)
                 return Command('lane', self._lane(self.p['approach_speed'], mode, island_ref=True,
-                                                  lane_width_mm=self.p.get('m2_island_lane_width_mm', 520.0)))
-            return Command('lane', self._lane(self.p['approach_speed']))
+                                                  lane_width_mm=self.p.get('m2_island_lane_width_mm', 520.0),
+                                                  lost_never_stop=True, **kw))
+            return Command('lane', self._lane(self.p['approach_speed'], lost_never_stop=True))
         mode = 'left_only' if self.fork_choice == 'A' else 'right_only'
         if self.p.get('fork_normal', True):
             # 11/16: 섬 앞 끝을 지나 갈래 안에 들어오면 양쪽 선(바깥선 + 섬 선)을 다 보는 보통 차선 모드.
@@ -1171,7 +1187,7 @@ class MissionFSM:
     def _m2_merge(self, inp, db: Optional[float] = None) -> Optional[Command]:
         """A/B 뒤 합류: 도면 규격으로 강제 S자 (m2_merge 설명). 하는 중이면 명령, 아니면 None."""
         p = self.p
-        if p.get('m2_plain_lane', True):
+        if p.get('m2_plain_lane', True) and not p.get('m2_merge_plain', False):
             return None                                  # 11/18: 일반 차선만 (합류 강제 S자 안 씀)
         if not p.get('m2_merge', True) or inp.yaw is None or self.fork_choice not in ('A', 'B'):
             return None
@@ -1184,9 +1200,9 @@ class MissionFSM:
             m['y'] = m['side'] * p['m2_merge_shift_mm'] + moved
             self.log.append(f'M2 merge side fixed by floor letter {ff}')
         if m is None:
-            start = self._past(inp, 'm2_island_end', -p['m2_merge_before_end_mm'])
-            if start is None:
-                start = db is not None and db >= p['m2_merge_from_tip_mm'] + getattr(self, 'fork_adj_mm', 0.0)
+            # 11/20 yubin: 도면 위치가 2 m 넘게 뒤처지면(sim_1 052614) S자가 섬 끝을 지나서야 시작 -> 거리 기준과 먼저 오는 쪽 (M2 끝 판정과 같은 방식)
+            by_dist = db is not None and db >= p['m2_merge_from_tip_mm'] + getattr(self, 'fork_adj_mm', 0.0)
+            start = bool(self._past(inp, 'm2_island_end', -p['m2_merge_before_end_mm'])) or by_dist
             if not start:
                 return None
             ax = getattr(self, 'axis_yaw', None)
@@ -1226,7 +1242,7 @@ class MissionFSM:
         head = max(-lim, min(lim, head))
         yaw_ref = m['axis'] + head
         yaw_ref = math.atan2(math.sin(yaw_ref), math.cos(yaw_ref))
-        if self._lane_first(inp):
+        if p.get('m2_merge_lane_first', True) and self._lane_first(inp):
             # 선이 보이면 S자 위치 계산은 계속(선을 놓치면 이어서 씀)하고 조향은 차선으로
             return Command('lane', self._lane(self._m2x_speed(p['approach_speed']), **self._m2x_kw()),
                            note=f'M2 merge {u:.0f}/{L:.0f}mm by lane (y {m["y"]:+.0f}mm)')
@@ -1243,6 +1259,7 @@ class MissionFSM:
         """M2_EXIT 동안만: 코너 앞(미리보기 0)은 차선 그대로 (m2x_zero_lane), 코너 lookahead (corner_preview_lookahead_mm)"""
         kw = {}
         if self.state == 'M2_EXIT':
+            kw['lost_never_stop'] = True                # 11/20 yubin: 합류 끝 ~ 라바콘 시작선에서 선 놓쳐도 정지 안 함
             if self.p.get('m2x_zero_lane', True):
                 kw['route_corner_zero_lane'] = True
             kw.update(self._corner_look())          # 11/19: 합류 끝 ~ 라바콘 시작선 (코너 뒤 짧은 직선까지 같은 값)
@@ -1259,12 +1276,17 @@ class MissionFSM:
         1순위: 시작 흰 선을 앞바퀴가 지나는 순간 (서지 않음). 2순위: 도면 위치. 3순위: 거리.
         좌하단 코너를 IMU로 다 돌기 전에는 카메라로 시작선을 넘은 것만 받는다."""
         p = self.p
+        m = getattr(self, 'm2m', None)
+        if m is not None and not m['done']:
+            return None         # 11/20 yubin: 합류 S자 중 (A는 코너 쪽으로 46°까지 틀어 '코너 돎'으로 잘못 봄, sim_1 7ed1b13 A 3판 코너 안쪽 이탈)
         t = self._m8_turn_deg(inp) if p.get('m8_line_trigger', True) else None
         if t is not None and t >= p['m8_line_min_turn_deg'] and not getattr(self, '_m8_line_fresh', False):
             # 11/19: 코너를 돌기 시작한 뒤 본 선만 (그 전에 잡은 다른 흰 선 때문에 진짜 시작선을 '다른 선'으로 버리지 않게)
             self._m8_line_fresh = True
             self.line = None
         near = self._line_crossed(inp, 'm8_start_line')
+        if near and t is not None and t < p['m8_line_min_turn_deg']:
+            near = False        # 11/20 yubin: 코너를 아직 안 돌았는데 시작선 (054053: 도면 위치가 합류 중 +2.7 m 튀어 코너 앞 x 1.9에서 들어감)
         early = self._m8_early(inp, who)
         if early is not None:
             return early
@@ -1427,7 +1449,9 @@ class MissionFSM:
                     self.cones_gone_t = inp.t
                 gone = inp.t - self.cones_gone_t >= p['cones_gone_sec']
             done = inp.obstacle.get('cones_done', False)
-            end = self._past(inp, 'm8_end_line', p['cones_end_after_mm'])
+            # 11/20 yubin: 도면 위치는 코너 보정으로 1~2 m 앞서 튈 수 있음 (sim_1 063912: 끝선 1.8 m 전 y 2.17에서 M1로 -> M1 코너로 동쪽 이탈).
+            #   앞에 콘이 보이면 도면 끝선은 안 믿음 (콘 안 보임·obstacle done·거리 상한은 그대로)
+            end = self._past(inp, 'm8_end_line', p['cones_end_after_mm']) and not visible
             if gone or done or end or d >= p['cones_zone_mm']:
                 why = ('no cones ahead' if gone else 'obstacle done' if done
                        else 'FALLBACK: end line' if end else f'FALLBACK: distance {d:.0f}mm')

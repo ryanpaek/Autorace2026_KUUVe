@@ -301,3 +301,65 @@ def test_m2_end_keeps_route_when_close():
         d += 10.0
     assert 1600.0 <= d <= 1700.0                      # 도면이 300 mm 앞서 있음 -> 도면대로 (700 안)
     assert not any('distance (route s off)' in m for m in fsm.log)
+
+
+def test_m7_practice_start_sets_axis_for_m2_hold():
+    """11/20 yubin: M7부터 연습 시작이면 M7 첫 yaw = 직선 방향 -> M2 섬 기준이 놓쳤을 때 그 방향 (재생 끝 방향 아님)"""
+    import math as _m
+    fsm = MissionFSM({'start_state': 'M7_OBSTACLE'})
+    fsm.step(Inputs(t=0.1, dist_mm=0.0, yaw=_m.radians(10.0)))
+    assert fsm.axis_yaw == pytest.approx(_m.radians(10.0))
+    fsm.fork_choice = 'A'
+    fsm._goto('M2_FORK', Inputs(t=5.0, dist_mm=4000.0, yaw=_m.radians(31.0)), 'obstacle zone done')
+    cmd = fsm.step(Inputs(t=5.1, dist_mm=4010.0, yaw=_m.radians(31.0), obstacle={'m7_exit': 'A'}))
+    assert cmd.lane['island_ref'] is True and cmd.lane['hold_axis_deg'] == pytest.approx(10.0)
+
+
+def test_m2_merge_plain_runs_s_curve_after_island_ref():
+    """11/20 yubin: m2_merge_plain이면 일반 차선(섬 기준) 뒤에도 합류 강제 S자 (A = 오른쪽으로 옮김 -> yaw_ref 오른쪽 = 음수)"""
+    fsm = _m2_fsm(m2_merge_plain=True)
+    fsm.fork_choice, fsm.axis_yaw = 'A', 0.0
+    modes, d = [], 0.0
+    while d < 3500.0:
+        cmd = fsm.step(Inputs(t=d / 200.0, dist_mm=d, yaw=0.0, lane={'status': 'NONE'}, obstacle={'m7_exit': 'A'}))
+        modes.append((cmd.lane or {}).get('mode'))
+        if cmd.lane.get('mode') == 'heading':
+            assert cmd.lane['yaw_ref'] < 0.0
+        d += 20.0
+    assert modes[0] == 'right_only' and 'heading' in modes
+    assert fsm.m2m is not None
+
+
+def test_m2_merge_starts_by_distance_when_route_lags():
+    """11/20 yubin sim_1 052614: 도면 위치가 2.2 m 뒤처져 S자가 섬 끝 뒤에 시작 -> M2 시작부터 1245 mm면 시작"""
+    fsm = _m2_fsm(m2_merge_plain=True, route_points={'m7_island_tip': 17973.0, 'm2_island_end': 19718.0,
+                                                     'm2_merge_end': 20272.0})
+    fsm.fork_choice, fsm.axis_yaw = 'A', 0.0
+    d = 0.0
+    while getattr(fsm, 'm2m', None) is None and d < 3000.0:
+        fsm.step(Inputs(t=d / 200.0, dist_mm=d, route_s=17000.0 + d, yaw=0.0, lane={'status': 'NONE'},
+                        obstacle={'m7_exit': 'A'}))
+        d += 20.0
+    assert fsm.m2m is not None and 1245.0 <= d <= 1400.0
+
+
+def test_m8_entry_waits_for_merge_and_corner():
+    """11/20 yubin sim_1 7ed1b13: 합류 S자 중이거나 코너를 안 돌았으면(30° 미만) 도면 위치가 시작선을 넘어도 라바콘 시작 안 함"""
+    import math as _m
+    fsm = MissionFSM({'start_state': 'M2_EXIT', 'route_points': {'m8_start_line': 22000.0}})
+    fsm.axis_yaw = 0.0
+    fsm.m2m = {'done': False}
+    assert fsm._cones_entry(Inputs(t=1.0, dist_mm=100.0, route_s=22100.0, yaw=_m.radians(-40.0)), 'M2_EXIT') is None
+    fsm.m2m = {'done': True}
+    assert fsm._cones_entry(Inputs(t=1.1, dist_mm=120.0, route_s=22150.0, yaw=_m.radians(-10.0)), 'M2_EXIT') is None
+
+
+def test_m8_route_end_ignored_while_cones_ahead():
+    """11/20 yubin sim_1 063912: 도면 위치가 끝선을 넘었어도 앞에 콘이 보이면 handover 안 함"""
+    fsm = MissionFSM({'start_state': 'M8_CONES', 'cones_source_ready': True, 'route_points': {'m8_end_line': 25000.0}})
+    fsm._sub('cones', Inputs(t=0.0, dist_mm=0.0), 'test')
+    cmd = fsm.step(Inputs(t=1.0, dist_mm=500.0, route_s=26000.0, yaw=0.0,
+                          obstacle={'cone_any_ahead_mm': 400.0, 'cones_done': False}))
+    assert fsm.sub == 'cones' and cmd.source == 'obstacle'
+    fsm.step(Inputs(t=1.1, dist_mm=520.0, route_s=26000.0, yaw=0.0, obstacle={'cones_done': False}))
+    assert fsm.sub == 'handover'
