@@ -6,10 +6,10 @@ LIMO 드라이버·카메라·라이다를 먼저 띄운 뒤 실행한다 (애�
   ros2 launch orbbec_camera dabai.launch.py
   ros2 launch autorace_bringup autorace.launch.py
   ros2 launch autorace_bringup autorace.launch.py start_state:=M3_PEDESTRIAN use_detector:=false
-  ros2 launch autorace_bringup autorace.launch.py m7_avoid:=true            # M7을 limo_obstacle_avoid로 (기본 m7_impl:=dash)
+  ros2 launch autorace_bringup autorace.launch.py m7_avoid:=true            # M7을 limo_obstacle_avoid로 (기본 m7_impl:=waypoint, 11/20)
   ros2 launch autorace_bringup autorace.launch.py m7_avoid:=true m7_impl:=replay   # 11/17 녹화 재생 방식 (되돌리기)
   ros2 launch autorace_bringup autorace.launch.py m7_avoid:=true m7_impl:=legacy   # 예전 avoid_node 방식
-  ros2 launch autorace_bringup autorace.launch.py m7_avoid:=true m7_impl:=waypoint # 11/19 실험: 정차 LIMO 기준 웨이포인트 (M7만)
+  ros2 launch autorace_bringup autorace.launch.py m7_avoid:=true m7_impl:=dash     # 11/20 점선 기준 회피 + M2 녹화 재생
   ros2 launch autorace_bringup autorace.launch.py m7_avoid:=true m7_dry_run:=true   # 판단만 (바퀴는 차선)
   ros2 launch autorace_bringup autorace.launch.py m7_avoid:=true use_fork_node:=true  # + 갈림길 판단 노드
   ros2 launch autorace_bringup autorace.launch.py yellow_side:=true          # + 노란 선 옆 거리 (/lane/yellow_side, 11/19)
@@ -93,7 +93,7 @@ def generate_launch_description():
     # 재생 방식일 때 obstacle_node(m7_link) 설정: 코너 미리보기(코너 중간 켜기)·표지 보고 끄기 끔 -> 시작선 근처에서 켜고 재생 노드가 끝냄
     replay_link = {'m7_pre_enable': False, 'm7_off_mode': 'none'}
     return LaunchDescription([
-        DeclareLaunchArgument('m7_impl', default_value='dash'),
+        DeclareLaunchArgument('m7_impl', default_value='waypoint'),
         DeclareLaunchArgument('m7_replay_params', default_value=_replay_params()),
         DeclareLaunchArgument('m7_waypoint_params', default_value=_waypoint_params()),
         DeclareLaunchArgument('m7_dash_params', default_value=_dash_params()),
