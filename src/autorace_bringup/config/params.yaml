@@ -129,6 +129,7 @@ mission_node:
     fork_default: A
     floor_need_exit_agree: true            # 11/15: 회피가 끝난 차로(A/B)를 알면 바닥 글자가 같을 때만 씀 (1차선으로 들어갔는데 글자 잘못 읽어 B 쪽 선을 따라가 합류에서 탈선). false = 바닥 글자 우선
     stop_on_green_arrival: false           # 11/14: 도착 때 초록이 확정돼 있으면 서지 않고 통과 (빨강·아무것도 못 봤으면 정지선에서 서서 초록 기다림)
+    m1_go_heading_mm: 300.0                # 11/20 캡틴 실차: 신호등에 섰다가 초록에 출발 안 함 -> 서 있다 출발할 때만 처음 30cm 선 때 방향 유지(차선 모드 heading, 차선 노드 '선 놓침 정지' 초기화). 0 = 끔. 근거: 코드 추정, 실차 확인 전
     # 도면 경로 지도 (route_file은 launch가 config/track_route.yaml로 넣어 줌)
     route_gate_mm: 250.0                   # 흰 선을 도면 선으로 인정하는 오차 (달린 거리만큼 넓어짐)
     route_gain: 0.6
