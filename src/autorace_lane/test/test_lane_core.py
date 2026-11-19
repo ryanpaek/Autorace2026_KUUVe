@@ -412,6 +412,20 @@ def test_hold_unwinds_to_axis(cfg):
     assert out.source == 'hold' and out.kappa < -0.3             # 직선 방향(0°)으로 되돌림 = 오른쪽
 
 
+def test_hold_axis_not_diluted_by_route(cfg):
+    """11/20 yubin: 직선 방향(hold_axis_deg)이 있으면 도면 곡률(직선 0)을 안 섞음 -> 섞으면(0.8) 보정이 20%로 줄어 비스듬히 흘러 이탈"""
+    import math as _m
+    outs = []
+    for w in (0.8, 0.0):
+        f = LaneFollower(cfg, LaneParams(hold_axis_deg=0.0, route_ff_weight_lost=w, lost_never_stop=True))
+        f.route_k = [0.0] * 14
+        f.route_step_mm = 100.0
+        run(f, synth.straight_lane(cfg), yaw=_m.radians(21.0))
+        outs.append(run(f, synth.blank(cfg), frames=12, yaw=_m.radians(21.0)))
+    assert outs[0].source == 'hold' and outs[0].kappa < -1.0
+    assert abs(outs[0].kappa - outs[1].kappa) < 1e-6
+
+
 def test_corner_takes_lane_kappa_when_it_asks_for_more(cfg):
     """코너에서 차선이 코너 방향으로 더 크게 꺾으라고 하면(바깥으로 밀림) 섞지 않고 그 값을 씀"""
     f = LaneFollower(cfg, LaneParams())

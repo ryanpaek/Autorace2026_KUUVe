@@ -642,7 +642,8 @@ def detect_lanes(bev: np.ndarray, cfg: BevConfig, p: LaneParams, mode: str,
 # 슬라이딩 윈도우 추적
 # ---------------------------------------------------------------------------
 def track_fit(tr: Optional[np.ndarray], cfg: BevConfig) -> Optional[Tuple[float, float]]:
-    """track_line 결과를 직선으로 맞춤: (기울기 도, 차 기준점 옆으로 잰 선까지 수직 거리 mm). 오른쪽 +. 점 3개 미만이면 None."""
+    """track_line 결과를 직선으로 맞춤: (기울기 도, 차 기준점 옆으로 잰 선까지 수직 거리 mm). 오른쪽 +. 점 3개 미만이면 None.
+    기울기는 전체와 먼 쪽 절반 중 큰 쪽 (섬 끝에서 꺾이는 선은 전체로 맞추면 덜 기울어 보임)."""
     if tr is None:
         return None
     ok = ~np.isnan(tr[:, 0])
@@ -654,6 +655,11 @@ def track_fit(tr: Optional[np.ndarray], cfg: BevConfig) -> Optional[Tuple[float,
         return 90.0, float(lat.mean())
     slope, icpt = (float(v) for v in np.polyfit(fwd, lat, 1))
     a = math.atan(slope)
+    far = fwd >= np.median(fwd)
+    if int(far.sum()) >= 3 and float(fwd[far].max() - fwd[far].min()) > 1e-6:
+        s_far = float(np.polyfit(fwd[far], lat[far], 1)[0])
+        if abs(s_far) > abs(slope):
+            return math.degrees(math.atan(s_far)), icpt * math.cos(a)
     return math.degrees(a), icpt * math.cos(a)
 
 
@@ -1945,7 +1951,8 @@ class LaneFollower:
                 w = p.route_ff_weight_both if strong else p.route_ff_weight
                 if strong and abs(k_ff - kappa_raw) > p.route_ff_gate:
                     w = 0.0                   # 차선이 확실한데 도면과 크게 다르면 위치 추정이 틀린 것
-            elif source in ('hold', 'route'):
+            elif source == 'route' or (source == 'hold' and abs(p.hold_axis_deg) > 360.0):
+                # 11/20 yubin: 미션이 직선 방향(hold_axis_deg)을 주면 도면(직선 0)을 안 섞음 -> 섞으면 방향 보정이 20%로 줄어 21° 비스듬한 채 6초 흘러 이탈 (sim_1 044536)
                 w = p.route_ff_weight_lost
             kappa_raw = kappa_raw + w * (k_ff - kappa_raw)
         out.source = source

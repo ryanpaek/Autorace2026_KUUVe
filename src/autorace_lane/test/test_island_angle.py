@@ -24,3 +24,11 @@ def test_track_fit_angle_and_side():
     few = straight.copy()
     few[2:, 0] = np.nan
     assert track_fit(few, _Cfg()) is None and track_fit(None, _Cfg()) is None
+
+
+def test_track_fit_sees_bend_in_far_half():
+    """11/20 yubin sim_1 044807: B 끝에서 섬 변이 40° 꺾임 -> 전체 맞춤은 덜 기울어 보여도 먼 쪽 절반으로 잡음"""
+    rows = np.arange(100, 0, -10, dtype=float)
+    x = np.where(rows > 50, 100.0, 100.0 - (50 - rows) * 0.9)              # 가까운 절반 곧게, 먼 절반 왼쪽으로 약 42°
+    ang, _ = track_fit(np.stack([x, rows], axis=1), _Cfg())
+    assert ang < -35.0
