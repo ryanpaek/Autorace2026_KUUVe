@@ -362,6 +362,12 @@ class LaneParams:
     curve_kappa_gain: float = 0.0
     yellow_guard_look_mm: float = 600.0   # 노란 실선까지 거리를 잴 때 이 앞까지만 (400으로 줄이면 M7 1차로 시뮬레이션 흔들림 37 -> 89 mm)
     yellow_guard_min_urg: float = 0.35    # 지킴이 걸리는 순간 최소 세기 (0이면 margin에서 0부터 hard까지 서서히)
+    # 11/19 시뮬레이션: M7은 lookahead 400 < BEV 시작 550이라 near 점이 늘 0개 -> 보이는 노란선 점 전체(앞 2.15 m까지)의
+    #   15/85% 분위로 거리를 재서, 차로 바꾸며 노란선 쪽으로 15~20° 틀면 멀리 있는 노란선이 바로 옆처럼 보임 -> 반대 최대 조향으로
+    #   가장자리 차로 변경을 막음 (y_lim 600이어도 선이 20 cm 밖이면 같음). true = 노란선 점에 직선 맞춰 앞 yellow_guard_fit_at_mm에서의 옆 거리.
+    #   launch m7_impl:=waypoint일 때만 true로 넘어옴 (기본 false = 예전 그대로)
+    yellow_guard_fit: bool = False
+    yellow_guard_fit_at_mm: float = 550.0
     # 11/19 corner_fix (실험, 기본 꺼짐 = 기존 동작). 05·06·08판 분석: 코너 중 조향이 풀리거나 뒤집혀 실패
     keep_kappa_on_heading_switch: bool = False  # normal<->heading 전환 때 조향 명령·코너 판단을 0으로 지우지 않음 (4번 강제 원호 깜빡임)
     corner_lock: bool = False          # 코너 미리보기 중 |도면 곡률| >= corner_ld_on 이면 기존 섞기 결과에 '덜 꺾기 하한'만 건다
@@ -1157,6 +1163,17 @@ def _line_pixels_mm(mask: Optional[np.ndarray], track: Optional[np.ndarray], cfg
     return np.stack([cfg.col_to_x_mm(xs.astype(float)), cfg.row_to_y_mm(ys.astype(float))], axis=1)
 
 
+def _yellow_fit_lat(pts_mm: np.ndarray, at_mm: float) -> Optional[float]:
+    """노란선 점 (x 옆 mm, y 앞 mm)에 직선 x = a + b·y 맞춰 앞 at_mm에서의 옆 위치. 점이 적거나 앞뒤로 너무 짧으면 None."""
+    if pts_mm is None or len(pts_mm) < 5:
+        return None
+    ys = pts_mm[:, 1]
+    if float(ys.max() - ys.min()) < 80.0:
+        return None
+    b, a = np.polyfit(ys, pts_mm[:, 0], 1)
+    return float(a + b * at_mm)
+
+
 def build_centerline(left: Optional[np.ndarray], right: Optional[np.ndarray],
                      det: Detection, cfg: BevConfig, p: LaneParams,
                      fit_order: int, use_circle: bool = True,
@@ -1919,19 +1936,31 @@ class LaneFollower:
                 l_yellow_solid = r_yellow_solid = False          # 일반 1차로 (양쪽 노란 실선): 가운데 맞추기에 맡김
             y_lim = min(look, p.yellow_guard_look_mm)
             dist_l, dist_r = None, None
+            fit_at = p.yellow_guard_fit_at_mm
             if l_yellow_solid and lpix_mm is not None and len(lpix_mm) > 0:
-                near_l = lpix_mm[lpix_mm[:, 1] <= y_lim]
-                pts_l = near_l if len(near_l) >= 3 else lpix_mm
-                dist_l = -float(np.percentile(pts_l[:, 0], 85))
+                lat_l = _yellow_fit_lat(lpix_mm, fit_at) if p.yellow_guard_fit else None
+                if lat_l is not None:
+                    dist_l = -lat_l
+                    out.yellow_f_mm = fit_at
+                else:
+                    near_l = lpix_mm[lpix_mm[:, 1] <= y_lim]
+                    pts_l = near_l if len(near_l) >= 3 else lpix_mm
+                    dist_l = -float(np.percentile(pts_l[:, 0], 85))
+                    out.yellow_f_mm = float(np.median(pts_l[:, 1]))
                 out.yellow_l_mm = dist_l
-                out.yellow_f_mm = float(np.median(pts_l[:, 1]))
             if r_yellow_solid and rpix_mm is not None and len(rpix_mm) > 0:
-                near_r = rpix_mm[rpix_mm[:, 1] <= y_lim]
-                pts_r = near_r if len(near_r) >= 3 else rpix_mm
-                dist_r = float(np.percentile(pts_r[:, 0], 15))
+                lat_r = _yellow_fit_lat(rpix_mm, fit_at) if p.yellow_guard_fit else None
+                if lat_r is not None:
+                    dist_r = lat_r
+                    if out.yellow_f_mm is None:
+                        out.yellow_f_mm = fit_at
+                else:
+                    near_r = rpix_mm[rpix_mm[:, 1] <= y_lim]
+                    pts_r = near_r if len(near_r) >= 3 else rpix_mm
+                    dist_r = float(np.percentile(pts_r[:, 0], 15))
+                    if out.yellow_f_mm is None:
+                        out.yellow_f_mm = float(np.median(pts_r[:, 1]))
                 out.yellow_r_mm = dist_r
-                if out.yellow_f_mm is None:
-                    out.yellow_f_mm = float(np.median(pts_r[:, 1]))
             span = max(p.yellow_guard_margin_mm - p.yellow_guard_hard_mm, 1.0)
             if dist_l is not None and dist_l < p.yellow_guard_margin_mm and (dist_r is None or dist_l <= dist_r):
                 out.yellow_guard = 'L'
