@@ -347,7 +347,7 @@ parking_node:
     fixed_turn_pause_sec: 0.3              # 0이면 멈추지 않고 바로 꺾음 (서보가 늦게 꺾여 원이 커질 수 있음)
     fixed_turn_deg: 87.0                   # 최대 조향 끝 = IMU 87도 (실차는 2~4도 더 돎)
     fixed_turn_mm: 0.0                     # 11/16 캡틴 실차 확정: 끔 (회전은 IMU 87도로 끝). >0이면 이 거리에서도 끝
-    fixed_backrow_mm: 620.0                # 11/19 공지(1·2행 랜덤): 돌고 앞 50cm가 비면 뒷칸으로 62cm 더 직진 (칸 깊이 60 + 선 2, 실차 확인 필요). 0 = 안 봄
+    fixed_backrow_mm: 0.0                  # 11/20 캡틴: 4·5·6번 빈칸 없음, 목표는 항상 1·2·3번 -> 돌고 나서 앞 확인(F_CHECK)·뒷칸 직진(F_STR) 끔. 예전 11/19: 620. 0 = 안 봄
     fixed_back_after_backrow: false        # 뒷칸으로 들어간 뒤에도 5cm 후진할지 (11/19 캡틴: 실차 보고 결정)
     fixed_back_mm: 50.0                    # 11/18 캡틴: 다 돌고 바퀴 펴고 5cm 똑바로 후진한 뒤 완료 (0 = 안 함)
     fixed_back_speed: 0.06
