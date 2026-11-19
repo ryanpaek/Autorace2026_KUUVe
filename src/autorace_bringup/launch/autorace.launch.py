@@ -10,6 +10,7 @@ LIMO 드라이버·카메라·라이다를 먼저 띄운 뒤 실행한다 (애�
   ros2 launch autorace_bringup autorace.launch.py m7_avoid:=true m7_impl:=legacy   # 예전 avoid_node 방식
   ros2 launch autorace_bringup autorace.launch.py m7_avoid:=true m7_dry_run:=true   # 판단만 (바퀴는 차선)
   ros2 launch autorace_bringup autorace.launch.py m7_avoid:=true use_fork_node:=true  # + 갈림길 판단 노드
+  ros2 launch autorace_bringup autorace.launch.py yellow_side:=true          # + 노란 선 옆 거리 (/lane/yellow_side, 11/19)
 출발: ros2 topic pub --once /mission/start std_msgs/msg/Empty
 """
 
@@ -92,6 +93,8 @@ def generate_launch_description():
         # 웹 디버그 화면 (노트북 브라우저 http://<리모IP>:8080). 구독만 함
         DeclareLaunchArgument('debug_view', default_value='true'),
         DeclareLaunchArgument('sys_monitor', default_value='true'),
+        # 11/19: 노란 선 옆 거리 노드 (/lane/yellow_side). 아무도 조향에 안 씀 -> 기록·확인용. 기본 꺼짐
+        DeclareLaunchArgument('yellow_side', default_value='false'),
         # 디버그 화면 미션 조작 버튼 (미션 고르기·건너뛰기·출발). 대회 때 false (비상 정지는 계속 됨)
         DeclareLaunchArgument('debug_control', default_value='true'),
         # 주차 완료 '띠링'을 차 스피커로 (chime_node). 끄려면 chime:=false
@@ -122,6 +125,9 @@ def generate_launch_description():
         # 11/16: 연산량 측정 (/system/usage, 디버깅 화면 '연산량' 패널). 끄기: sys_monitor:=false
         Node(package='autorace_mission', executable='sys_monitor', name='sys_monitor', output='screen',
              condition=IfCondition(LaunchConfiguration('sys_monitor'))),
+        Node(package='autorace_lane', executable='yellow_side_node', name='yellow_side_node',
+             parameters=[params, {'bev_config': bev, 'lane_params_file': params}], output='screen',
+             condition=IfCondition(LaunchConfiguration('yellow_side'))),
         Node(package='autorace_mission', executable='chime_node', name='chime_node',
              output='screen', condition=IfCondition(LaunchConfiguration('chime'))),
         Node(package='autorace_mission', executable='parking_node', name='parking_node',

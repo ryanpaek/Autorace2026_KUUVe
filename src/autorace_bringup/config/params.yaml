@@ -407,3 +407,25 @@ exposure_node:
     roi_top: 0.55                          # 화면 아래 45%만 봄 (바닥)
     settle_s: 3.0
     lock_wb: true                          # 화이트밸런스도 시작 값으로 고정 (색감 유지)
+
+# 11/19 노란 선 옆 거리 (yellow_side_node). launch yellow_side:=true 일 때만 뜸. 아무 노드도 이 값으로 조향 안 함 (기록·확인용)
+# 노란색 임계값은 위 lane_node 값을 그대로 읽음 (launch가 lane_params_file로 이 파일을 넘김)
+# 근거: 05·06·08 프레임 오프라인 (자동 노출 시절). 직선 양쪽 다 보일 때 l+r 중앙값 516~520 mm (도면 515), lane offset_mm과 차이 중앙값 0~10 mm
+yellow_side_node:
+  ros__parameters:
+    image_topic: /camera/color/image_raw
+    every_n: 3                             # 30 fps 중 10 fps만 처리
+    near_from_mm: 800.0                    # 550~750은 화각 밖 (550 mm 앞 옆 폭 -188~+220 mm라 반폭 257 선이 안 보임)
+    near_to_mm: 1000.0
+    row_step: 2
+    min_run_mm: 8.0
+    max_run_mm: 120.0
+    min_rows: 5
+    half_width_mm: 257.5
+    window_s: 0.5
+    max_jump_mm: 50.0
+    lo_mm: 120.0
+    hi_mm: 450.0
+    bridge_mm: 60.0                        # 옅은 노랑 다리 (직전 선 +-60 mm 안만). 05·06·08: 양쪽 다 보임 28~30% -> 39~44%
+    pale_s_min: 20
+    pale_v_min: 200
