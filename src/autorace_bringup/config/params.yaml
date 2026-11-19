@@ -51,10 +51,14 @@ lane_node:
     yellow_guard_one_side_only: true       # 11/15: 양쪽이 다 노란 실선(일반 구간)이면 지킴 안 함 (직선에서 좌우로 왔다갔다 원인). M7 바깥 차로만
     yellow_guard_three_lane_only: true     # 11/15: 지킴은 M7 3차선에서만. 코너 앞(바깥 선이 앞쪽에서 휘어 들어옴)·M2 한쪽 선 모드에서 '붙었다'로 착각해 과하게 꺾던 것
     corner_kappa_gain: 1.1                 # 11/15: 차선이 커브라고 할 때(|곡률|>0.6) 조향 1.1배 (커브마다 아슬아슬). 코너 시뮬레이션: 바깥 36 -> 26 mm, 안쪽 112 -> 120 mm(선까지 17 mm). 1.2면 안쪽 여유 10 mm
+    # 11/19 corner_fix 시험 (docs/CHANGES_20261119_corner_fix.md). 끄려면 false / corner_fix.sh off
+    corner_lock: true                      # 코너 중 덜 꺾기 하한 (|도면 k| - 0.3), 이때 코너 배율 안 곱함
+    keep_kappa_on_heading_switch: true     # 코너 도중 normal<->heading 전환 때 조향 유지
 
 mission_node:
   ros__parameters:
     start_state: WAIT_START                # LANE_ONLY, M3_PEDESTRIAN 등으로 바꿔 미션만 연습
+    m1_lane_back_frames: 5                 # 11/19 corner_fix: 4번 강제 원호 -> 차선 복귀는 선이 5프레임 연속 보일 때만 (1 = 예전)
     odom_topic: /odom                      # TODO 드라이버에 따라 /wheel/odom
     imu_topic: /imu
     tick_hz: 20.0
@@ -386,3 +390,24 @@ ackermann_bridge:
     small_steer_gain: 1.3                  # 0.1 rad 미만 조향 1.3배 (11/02 기능, 예전 기본 1.0 = 꺼짐)
     small_steer_below: 0.10
     steer_trim: 0.015                      # rad, 왼쪽 +. 0.0이면 끔
+
+# 11/19 카메라 노출 (bag 05·06: 1번 코너 앞에서 노란 실선 B 채널까지 포화 -> 흰색으로 보여 차선 NONE).
+# 출발 전에 한 번만: 자동 노출 3초 -> 그 값과 바닥 밝기로 노출 계산 -> 고정 -> 영상 구독 끊음 (주행 중 CPU 0).
+# 단계 저장 (LIMO에서 한 번, 다음 실행부터 계속): ros2 run autorace_bringup cam_level 3   / 확인: cam_level (인자 없이)
+# 우선순위: launch 인자 cam_exp_level:=N (그 실행만) > 저장 파일 ~/.autorace/cam_exp_level > 아래 level. 0 = 자동 노출 그대로.
+#   단계  목표 바닥 V  노란선 픽셀 절반 이상 통과 / 거의 전부 통과  검출(신호등·표지판) 프레임 밝기
+#   1     115          83% / 63%                                x0.86
+#   2     100          96% / 82%                                x0.75
+#   3      90          99% / 95%                                x0.68
+#   4      80         100% / 98%                                x0.60
+#   (05·06 프레임 추정. 자동 노출일 때 출발선 바닥 V 119~132, 주행 중 중앙 137)
+exposure_node:
+  ros__parameters:
+    level: 2                               # 저장 파일이 없을 때만 씀
+    target_floor_v: 0.0                    # 0이 아니면 단계 대신 이 바닥 V
+    fixed_exposure: 0                      # 0이 아니면 계산 없이 이 노출 값 (현장에서 값을 정했을 때)
+    gamma: 2.2                             # 영상 값 ~ 노출^(1/2.2) 가정 (sRGB 근사)
+    max_ratio: 1.5
+    roi_top: 0.55                          # 화면 아래 45%만 봄 (바닥)
+    settle_s: 3.0
+    lock_wb: true                          # 화이트밸런스도 시작 값으로 고정 (색감 유지)
