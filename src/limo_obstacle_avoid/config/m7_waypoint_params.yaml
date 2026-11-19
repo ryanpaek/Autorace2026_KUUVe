@@ -1,0 +1,28 @@
+# M7 정차 LIMO 기준 웨이포인트 노드(m7_waypoint_node, launch에서 이름 avoid_node) 설정. launch m7_impl:=waypoint 일 때만.
+# avoid_params.yaml은 읽지 않음 (이름 겹침). 항목 설명: limo_obstacle_avoid/m7_waypoint_core.py WaypointParams
+# 실행 중 바꾸기: ros2 param set /avoid_node reverse_max 3
+/**:
+  ros__parameters:
+    lane_width: 0.52
+    lidar_x: 0.10
+    robot_front: 0.20
+    robot_rear: 0.16
+    robot_half_width: 0.115
+    end_before: 1.0            # 섬 앞 끝 1.0 m 전에서 끝 -> FSM M2
+    # 정차 LIMO: 가로로 세움 (차로 방향 0.22, 폭 방향 0.32). 세로면 둘을 바꿀 것
+    obs_along: 0.22
+    obs_across: 0.32
+    speed: 0.20
+    offset: 0.50               # 옆 차로 정차 LIMO 중심에서 이만큼 옆으로 지나감
+    change_len: 1.1            # 차로 변경 길이 (길 없을 때만 change_len_short 0.9 m, 75% 속도)
+    change_len_short: 0.9
+    # 안전
+    creep_v: 0.10              # 길 없을 때 지금 차로 따라 천천히 접근
+    creep_stop: 0.30           #   차 폭 안 앞 간격 30 cm에서 정지
+    rollout: true              # 지금 자세로 1 m 굴려 보고 정차 LIMO·노란선에 닿으면 다른 차로 직선 시도, 다 닿으면 정지
+    roll_dist: 1.0
+    reverse_max: 0             # ★ 0 = 후진 없음 (11/19 첫 실차 시험). 켜기: 3
+    yellow_check: true         # /lane/status yellow_l/r_mm 예측 (m7_replay_core._exec_yellow_check와 같은 식)
+    # 예상 배치 (켜는 점 기준 [x1, y1, x2, y2, ...] m, y 왼쪽 +). 비우면 [0.0]
+    # 1차 대회 배치(11/19): [1.08, 0.52, 1.09, 0.0, 4.41, 0.52, 3.27, 0.03, 2.17, 0.48, 2.16, -0.52, 4.42, -0.54]
+    prior_xy: [0.0]
