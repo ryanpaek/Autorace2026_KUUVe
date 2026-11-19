@@ -13,8 +13,12 @@
   2차로 장애물 → 오른쪽 (y ≤ 안쪽 모서리 - 반폭 - clear), 1차로 장애물 → 왼쪽.
   구간 사이는 코사인 S자. 빈 칸이 2 x shift_len보다 짧으면 점선 복귀 없이 바로 반대쪽으로 (연속 회피 1→2→1).
   지금 장애물 옆이면 그 구간 쪽으로는 목표를 안 넘김 (먼저 꺾어 뒤 모서리 긁는 것 방지).
-예외(나중에 채움): 같은 x에 양쪽 막힘 / 점선 위 장애물 → 천천히 다가가 정지. 후진 없음.
-끝: x ≥ end_x → DONE (정지).
+안전: 지금 곡률 + 조향 지연(steer_delay) 동안 낸 곡률로 차 외곽선을 굴려 라이다 점에 닿으면 정지.
+멈추면(recover_wait): 기억 비우고 0.4 s 다시 봄 → 길 있으면 감 / 다른 곡률로 비켜 감(서서 바퀴 먼저) /
+  곧게 후진 15 cm(최대 3번). 같은 자리에서 또 멈추면 계획 여유를 1 cm씩 줄임(clear_min까지, 충돌 검사 여유는 안 줄임).
+  0.5 m 나아가면 원래대로. 비켜 가기는 차체 |y| ≤ 0.44, 방향 ≤ 20° 안에서만 (노란선·3차로 침범 방지).
+예외(나중에 채움): 같은 x에 양쪽 막힘 / 점선 위 장애물 → 다가가 정지 후 재판단 반복.
+끝: 표지판(fork_a/b) 상자 높이 ≥ end_sign_h_px가 end_sign_frames 연속 + x ≥ end_min_x. 못 보면 x ≥ end_x에서 끝.
 """
 import math
 from dataclasses import dataclass
@@ -37,7 +41,7 @@ class DashParams:
     obs_long: float = 0.32
     obs_short: float = 0.22
     # 회피
-    clear: float = 0.04                 # 옆 여유 (장애물 안쪽 모서리 ~ 내 차 옆면)
+    clear: float = 0.05                 # 옆 여유 (장애물 안쪽 모서리 ~ 내 차 옆면)
     clear_x: float = 0.03               # 앞뒤 여유
     hold_rear: float = 0.05             # 장애물 뒤 모서리 지나 이만큼 더 가야 옆 유지 끝 (차 기준점 기준, 뒤 오버행 일부)
     shift_len: float = 0.70             # 점선 <-> 비킴 S자 길이
@@ -45,8 +49,16 @@ class DashParams:
     # 주행
     speed: float = 0.20
     tight_speed: float = 0.14           # S자 빈 칸이 shift_len보다 짧을 때
-    lookahead: float = 0.35
+    lookahead: float = 0.25
+    latency: float = 0.2                # 조향 지연 보상: 이만큼(s) 뒤 위치로 pure pursuit
     max_curv: float = 1.0 / 0.53
+    max_y: float = 0.25                 # |추정 y| 상한 (차 옆면 0.365 < 노란선·3차로 경계 0.52)
+    # 끝: 표지판(fork_a/b) 상자 높이 >= end_sign_h_px 가 end_sign_frames 연속, x >= end_min_x 일 때.
+    #     end_x = 거리 상한 (표지판 못 봐도 여기서 끝)
+    end_by_sign: bool = True
+    end_sign_h_px: float = 60.0         # 실측해서 맞출 것 (/m7dash/state sign_h 보고)
+    end_sign_frames: int = 3
+    end_min_x: float = 2.5
     end_x: float = 4.6
     # 라이다
     cluster_gap: float = 0.08
@@ -69,10 +81,26 @@ class DashParams:
     yellow_gain: float = 0.05
     yellow_gate: float = 0.10
     yellow_r_y: float = -0.52           # 오른쪽 노란선(안쪽 모서리) y — 실측으로 맞출 것
-    # 안전
-    stop_gap: float = 0.08              # 차 폭 안 앞 간격 이보다 작으면 정지
+    # 안전: 지금 곡률로 차 외곽선을 굴려(arc) 라이다 점에 닿는 거리
+    stop_gap: float = 0.08              # 굴린 경로 이 거리 안에 닿으면 정지
+    path_margin: float = 0.015
     creep_v: float = 0.10
     creep_stop: float = 0.30
+    # 멈추면 재판단 → 다시 감
+    recover_wait: float = 0.8           # 이만큼 멈춰 있으면 재판단 (기억 비우고 다시 봄)
+    escape_need: float = 0.30           # 다른 곡률로 이만큼 안 닿고 갈 수 있으면 그 곡률로 천천히
+    escape_dist: float = 0.30
+    recover_rev_max: int = 3            # 그래도 못 가면 곧게 후진 (0 = 후진 안 함)
+    recover_rev_dist: float = 0.15
+    recover_rev_v: float = 0.10
+    relax_step: float = 0.01            # 같은 자리에서 재판단할 때마다 여유를 이만큼 줄임
+    clear_min: float = 0.015            # 줄여도 이 아래로는 안 감 (옆·앞뒤 여유)
+    stop_gap_min: float = 0.05
+    resume_extra: float = 0.03          # 멈춘 뒤 다시 가려면 stop_gap + 이만큼 비어야 (떨림 방지)
+    steer_delay: float = 0.35           # 조향 반응 지연: 이 시간 동안 낸 곡률 전부로 굴려 봄, 비키기·후진 전엔 이만큼 서서 바퀴 먼저
+    progress_reset: float = 0.5         # 이만큼 나아가면 여유·후진 횟수 원래대로
+    esc_max_deg: float = 20.0           # 비켜 갈 때 방향 상한
+    body_max_y: float = 0.44            # 비켜 간 뒤 차체 모서리 |y| 상한 (노란선·3차로 경계 0.52 - 8 cm)
 
 
 def dash_points(bev_white, cfg, pred_mm, gate_mm, max_f_mm=800.0, band_px=6, max_w_mm=45.0):
@@ -110,8 +138,25 @@ class M7Dash:
         self.holds: List[Tuple[float, float, float, int]] = []    # (a, b, y, side)
         self.block_x: Optional[float] = None
         self.front_gap = math.inf
+        self.pts: List[Tuple[float, float]] = []
         self.n_scan = 0
         self.last_v = 0.0
+        self.last_k = 0.0
+        self.t_last = None
+        self.stop_t = 0.0
+        self.esc = None                           # {'k', 'left'} 탈출 곡률 주행 중
+        self.rev = None                           # 남은 후진 거리
+        self.rev_wait = 0.0
+        self.n_rev = 0
+        self.relax = 0
+        self.k_hist: List[Tuple[float, float]] = []
+        self.halted = False
+        self.rj_x = None                          # 마지막 재판단 위치
+        self.n_rejudge = 0
+        self.sign_h = None
+        self.sign_n = 0
+        self.end_why = ''
+        self.rj_t = None
         self.lane_msg, self.lane_t = None, None
         self.why = ''
         self.n_fix = {'snap': 0, 'psi': 0, 'dash': 0, 'yellow': 0}
@@ -146,7 +191,9 @@ class M7Dash:
         self.fu.s = self.fu.dist = 0.0
         self.offset = (0.0, start_y, math.radians(start_heading_deg) - self.fu.yaw)
         self.state = 'RUN'
-        self.events.append(f'시작: 점선 기준, 끝 x={self.p.end_x:.2f} m, 옆 여유 {100 * self.p.clear:.0f} cm')
+        p = self.p
+        self.events.append('시작: 점선 기준, 끝 = ' + (f'표지판 {p.end_sign_h_px:.0f} px (x {p.end_min_x:.1f} m 뒤) / ' if p.end_by_sign else '')
+                           + f'거리 {p.end_x:.2f} m, 옆 여유 {100 * p.clear:.0f} cm')
 
     def stop(self):
         self.state = 'IDLE'
@@ -158,8 +205,8 @@ class M7Dash:
             return
         p = self.p
         self.n_scan += 1
-        self.front_gap = min([x - p.robot_front for x, y, _ in pts
-                              if abs(y) < p.robot_half_width + 0.03 and x > p.robot_front], default=math.inf)
+        self.pts = [(x, y) for x, y, _ in pts if -0.6 < x < 1.0 and abs(y) < 0.7]
+        self.front_gap = self.arc_clear(0.0)
         ex, ey, epsi = self.pose()
         edge = math.radians(p.edge_deg)
         cl = [c for c in cluster(pts, p.cluster_gap)
@@ -214,10 +261,11 @@ class M7Dash:
             if m is None:
                 m = {'side': side, 'x0': d['x0'], 'x1': d['x1'], 'y0': d['y0'], 'y1': d['y1'], 'w': 0.0, 'n': 0, 'seen': t}
                 self.mem.append(m)
-            m['x0'] = min(m['x0'], d['x0'])
+            # 앞면이 보이면 최신값 (odom 배율 오차가 min으로 쌓이지 않게), 옆·뒤에서 보면 앞면 아님 → 기존 유지
+            m['x0'] = d['x0'] if d['x0'] > ex + p.robot_front else min(m['x0'], d['x0'])
             m['x1'] = max(m['x1'], d['x1'])
-            m['y0'] = min(m['y0'], d['y0']) if m['n'] else d['y0']
-            m['y1'] = max(m['y1'], d['y1']) if m['n'] else d['y1']
+            # 옆 모서리는 최신값: 지금 위치 추정과 같은 기준이라 위치 오차가 상쇄됨 (min 누적하면 순간 오차가 굳어 과하게 비킴)
+            m['y0'], m['y1'] = d['y0'], d['y1']
             if d['x0'] > ex + p.robot_front:      # 앞면 폭 = 가로/세로 판단
                 m['w'] = max(m['w'], w)
             m['n'] += 1
@@ -226,8 +274,13 @@ class M7Dash:
         self._replan()
 
     # ---------- 계획 ----------
+    def _eff(self, v, lo):
+        return max(lo, v - self.relax * self.p.relax_step) if v > lo else v
+
     def _hold_of(self, o):
         p = self.p
+        clear, clear_x, hold_rear = (self._eff(p.clear, p.clear_min), self._eff(p.clear_x, 0.0),
+                                     self._eff(p.hold_rear, 0.0))
         half = p.lane_width / 2
         if o['w'] < 0.15:                         # 앞면 못 봄 → 둘 다 긴 쪽으로 (보수)
             across = along = p.obs_long
@@ -236,14 +289,14 @@ class M7Dash:
         else:                                     # 앞면 넓음 = 가로로 놓임
             across, along = p.obs_long, p.obs_short
         x1 = max(o['x1'], o['x0'] + along)
-        a = o['x0'] - p.robot_front - p.clear_x
-        b = x1 + p.hold_rear + p.clear_x
+        a = o['x0'] - p.robot_front - clear_x
+        b = x1 + hold_rear + clear_x
         if o['side'] > 0:
             edge = min(o['y0'], half - across / 2)
-            y = edge - p.robot_half_width - p.clear
+            y = edge - p.robot_half_width - clear
         else:
             edge = max(o['y1'], -half + across / 2)
-            y = edge + p.robot_half_width + p.clear
+            y = edge + p.robot_half_width + clear
         return a, b, max(-p.max_offset, min(p.max_offset, y))
 
     def _replan(self):
@@ -361,45 +414,182 @@ class M7Dash:
             self.n_fix['yellow'] += 1
         self.lane_msg = None                      # 한 메시지는 한 번만
 
+    # ---------- 표지판 (끝) ----------
+    def on_sign(self, h_px: Optional[float]):
+        """detector 한 프레임: fork_a/fork_b 상자 높이(px) 최대값, 못 봤으면 None."""
+        self.sign_h = h_px
+        self.sign_n = self.sign_n + 1 if h_px is not None and h_px >= self.p.end_sign_h_px else 0
+
+    # ---------- 굴려 보기: 곡률 k로 앞으로 갈 때 처음 닿는 거리 ----------
+    def arc_clear(self, k: float, dist: float = 0.6) -> float:
+        p = self.p
+        m = p.path_margin
+        f, r, hw = p.robot_front + m, p.robot_rear + m, p.robot_half_width + m
+        best = math.inf
+        for px, py in self.pts:
+            if -r <= px <= f and abs(py) <= hw:
+                if px > p.robot_front - 0.02:     # 이미 앞 범퍼에 걸림
+                    return 0.0
+                continue                          # 옆·뒤에 이미 붙은 점은 앞으로 가도 안 나아짐 -> 무시
+            s = 0.02
+            while s <= min(dist, best):
+                th = k * s
+                if abs(k) < 1e-6:
+                    cx, cy = s, 0.0
+                else:
+                    cx, cy = math.sin(th) / k, (1 - math.cos(th)) / k
+                c, sn = math.cos(th), math.sin(th)
+                u, v = (px - cx) * c + (py - cy) * sn, -(px - cx) * sn + (py - cy) * c
+                if -r <= u <= f and abs(v) <= hw:
+                    best = s
+                    break
+                s += 0.02
+        return best
+
+    def _escape(self, x, y, psi):
+        """멈춘 자리에서 안 닿고 escape_need 이상 갈 수 있는 곡률 중 계획 y에 가장 가까운 것."""
+        p = self.p
+        d = p.escape_dist
+        best = None
+        for i in range(11):
+            k = -p.max_curv + 2 * p.max_curv * i / 10
+            if self.arc_clear(k, p.escape_need + 0.05) < p.escape_need:
+                continue
+            ye = y + (d * math.sin(psi) if abs(k) < 1e-6 else (math.cos(psi) - math.cos(psi + k * d)) / k)
+            th = psi + k * d
+            body = abs(ye) + p.robot_half_width * math.cos(th) + p.robot_front * abs(math.sin(th))
+            if abs(ye) > p.max_y or abs(th) > math.radians(p.esc_max_deg) or body > p.body_max_y:
+                continue
+            sc = abs(ye - self.y_ref(x + d))
+            if best is None or sc < best[0]:
+                best = (sc, k)
+        return None if best is None else best[1]
+
     # ---------- 주기 (20 Hz) ----------
     def step(self, t: float) -> Tuple[float, float]:
         p = self.p
+        dt = 0.05 if self.t_last is None else max(1e-3, min(0.2, t - self.t_last))
+        self.t_last = t
         if self.state != 'RUN':
             return 0.0, 0.0
         self._yellow_fix(t)
         x, y, psi = self.pose()
-        if x >= p.end_x:
+        if p.end_by_sign and x >= p.end_min_x and self.sign_n >= p.end_sign_frames:
+            self.end_why = f'표지판 가까움 (상자 {self.sign_h:.0f} px)'
+        elif x >= p.end_x:
+            self.end_why = '거리 상한' + (' (표지판 못 봄)' if p.end_by_sign else '')
+        if self.end_why:
             self.state = 'DONE'
-            self.events.append(f'[x={x:.2f}] 끝')
+            self.events.append(f'[x={x:.2f}] 끝: {self.end_why}')
             return self._out(0.0, 0.0, '끝')
         if self.n_scan < 2:
             return self._out(0.0, 0.0, '라이다 기다림')
-        v = p.tight_speed if self._tight(x + 0.3) else p.speed
-        why = '점선 주행' if abs(self.y_ref(x + p.lookahead)) < 0.01 else '회피'
-        # 예외: 길 없음 → 다가가서 정지
-        if self.block_x is not None and self.block_x - x < 1.2:
-            if self.front_gap > p.creep_stop:
-                v, why = p.creep_v, '길 없음 -> 천천히'
+        # 재판단 중: 기억 비우고 0.4 s 새로 봄 (그동안 정지)
+        if self.rj_t is not None:
+            if t - self.rj_t < 0.4:
+                return self._out(0.0, 0.0, '재판단: 다시 보는 중')
+            self.rj_t = None
+            self.stop_t = 0.0
+            v, k, why = self._plan_cmd(x, y, psi)
+            if v > 0:
+                self.events.append(f'[x={x:.2f}] 재판단: 길 있음 -> 다시 감')
+            elif self.block_x is not None and self.block_x - x < 1.2:
+                self.events.append(f'[x={x:.2f}] 재판단: 양쪽 막힘 그대로 -> {p.recover_wait:.1f} s 뒤 또 봄')
             else:
-                v, why = 0.0, '길 없음 -> 정지'
+                ke = self._escape(x, y, psi)
+                if ke is not None:
+                    self.esc = {'k': ke, 'left': p.escape_dist, 'wait': p.steer_delay}
+                    self.events.append(f'[x={x:.2f}] 재판단: 곡률 {ke:+.2f}로 {100 * p.escape_dist:.0f} cm 비켜 감')
+                elif self.n_rev < p.recover_rev_max:
+                    self.rev = p.recover_rev_dist
+                    self.rev_wait = p.steer_delay
+                    self.n_rev += 1
+                    self.events.append(f'[x={x:.2f}] 재판단: 비킬 곳 없음 -> 곧게 후진 {100 * p.recover_rev_dist:.0f} cm '
+                                       f'({self.n_rev}/{p.recover_rev_max})')
+                else:
+                    self.events.append(f'[x={x:.2f}] 재판단: 후진 다 씀 -> 대기 후 또 봄')
+        # 후진 (곧게, 지나온 길)
+        if self.rev is not None:
+            if self.rev_wait > 0:                 # 바퀴 먼저 곧게
+                self.rev_wait -= dt
+                return self._out(0.0, 0.0, '후진 준비 (바퀴 곧게)')
+            self.rev -= p.recover_rev_v * dt
+            if self.rev <= 0:
+                self.rev = None
+                self._rejudge(t, '후진 끝')
+            return self._out(-p.recover_rev_v, 0.0, '후진')
+        # 탈출 곡률
+        if self.esc is not None:
+            if self.esc['wait'] > 0:              # 서서 바퀴 먼저 돌림
+                self.esc['wait'] -= dt
+                return self._out(0.0, self.esc['k'], '비켜 가기 준비 (바퀴 먼저)')
+            if self.arc_clear(self.esc['k']) < self._eff(p.stop_gap, p.stop_gap_min):
+                self.esc = None
+            else:
+                k = self.esc['k']
+                self.esc['left'] -= p.creep_v * dt
+                if self.esc['left'] <= 0:
+                    self.esc = None
+                return self._out(p.creep_v, k, '비켜 가는 중')
+        if self.rj_x is not None and x > self.rj_x + p.progress_reset:
+            self.events.append(f'[x={x:.2f}] {100 * p.progress_reset:.0f} cm 나아감 -> 여유·후진 횟수 원래대로')
+            self.rj_x, self.relax, self.n_rev = None, 0, 0
+        v, k, why = self._plan_cmd(x, y, psi)
+        self.stop_t = self.stop_t + dt if v <= 0 else 0.0
+        if self.stop_t >= p.recover_wait:
+            self._rejudge(t, why)
+        return self._out(v, k, why)
+
+    def _rejudge(self, t, why):
+        x, _, _ = self.pose()
+        self.n_rejudge += 1
+        if self.rj_x is not None and x < self.rj_x + self.p.progress_reset:
+            self.relax += 1
+        self.rj_x = x if self.rj_x is None else max(self.rj_x, x)
+        why += f', 여유 -{self.relax} cm' if self.relax else ''
+        self.mem, self.holds, self.block_x = [], [], None
+        self.rj_t = t
+        self.stop_t = 0.0
+        self.events.append(f'[x={x:.2f}] 재판단 {self.n_rejudge} ({why}): 기억 비우고 다시 봄')
+
+    def _plan_cmd(self, x, y, psi):
+        p = self.p
+        d = self.last_v * p.latency               # 조향 지연 보상: latency 뒤 위치에서 pure pursuit
+        if d > 0:
+            x += d * math.cos(psi + self.last_k * d / 2)
+            y += d * math.sin(psi + self.last_k * d / 2)
+            psi += self.last_k * d
+        v = p.tight_speed if self._tight(x + 0.3) else p.speed
         yt = self.y_ref(x + p.lookahead)
+        why = '점선 주행' if abs(yt) < 0.01 else '회피'
         for a, b, yh, side in self.holds:        # 장애물 옆이면 그쪽으로 안 꺾음
             if a <= x <= b:
                 yt = min(yt, yh) if side > 0 else max(yt, yh)
+        yt = max(-p.max_offset, min(p.max_offset, yt))
         dx, dy = p.lookahead, yt - y
         c, s = math.cos(psi), math.sin(psi)
         xr, yr = dx * c + dy * s, -dx * s + dy * c
-        k = 2 * yr / (xr * xr + yr * yr)
-        if self.front_gap < p.stop_gap and v > 0:
-            v, why = 0.0, f'앞 {100 * self.front_gap:.0f} cm 정지'
-        return self._out(v, max(-p.max_curv, min(p.max_curv, k)), why)
+        k = max(-p.max_curv, min(p.max_curv, 2 * yr / (xr * xr + yr * yr)))
+        ks = [kk for tt, kk in self.k_hist if self.t_last is not None and self.t_last - tt <= p.steer_delay]
+        gap = min(self.arc_clear(kk) for kk in {k, min(ks + [k]), max(ks + [k])})
+        self.front_gap = gap
+        if self.block_x is not None and self.block_x - x < 1.2:    # 예외: 길 없음 -> 다가가서 정지
+            v, why = (p.creep_v, '길 없음 -> 천천히') if gap > p.creep_stop else (0.0, '길 없음 -> 정지')
+        sg = self._eff(p.stop_gap, p.stop_gap_min) + (p.resume_extra if self.halted else 0.0)
+        self.halted = gap < sg
+        if self.halted:
+            v, why = 0.0, f'굴려 보니 {100 * gap:.0f} cm 뒤 닿음 -> 정지'
+        return v, k, why
 
     def _out(self, v, k, why):
         if why != self.why:
             x, y, _ = self.pose()
             self.events.append(f'[x={x:.2f} y={100 * y:+.0f}cm] {why}')
         self.why = why
-        self.last_v = v
+        self.last_v, self.last_k = v, k
+        self.k_hist.append((self.t_last or 0.0, k))
+        if len(self.k_hist) > 12:
+            self.k_hist.pop(0)
         return v, k
 
     def status(self) -> dict:
@@ -412,4 +602,5 @@ class M7Dash:
                 'mem': [[round(o['x0'], 2), round(o['x1'], 2), round(o['y0'], 2), round(o['y1'], 2), o['side'], o['n']]
                         for o in self.mem],
                 'front_gap_mm': None if not math.isfinite(self.front_gap) else round(1000 * self.front_gap),
-                'fix': dict(self.n_fix)}
+                'fix': dict(self.n_fix), 'sign_h': self.sign_h, 'sign_n': self.sign_n, 'end': self.end_why,
+                'n_rejudge': self.n_rejudge, 'n_rev': self.n_rev, 'relax_cm': self.relax}

@@ -34,7 +34,7 @@ def test_lane2_goes_right_lane1_goes_left():
     (a1, b1, y1, _), (a2, b2, y2, _) = c.holds
     assert y1 < 0 < y2
     # 옆 여유: 안쪽 모서리(0.26-0.16=0.10) - 반폭 - clear
-    assert abs(y1 - (0.10 - 0.115 - 0.04)) < 1e-9
+    assert abs(y1 - (0.10 - 0.115 - c.p.clear)) < 1e-9
     assert abs(y2 + y1) < 1e-9
     assert c.y_ref((a1 + b1) / 2) == y1
     assert a2 - b1 >= 2 * c.p.shift_len and c.y_ref(b1 + c.p.shift_len + 0.01) == 0.0   # 빈 칸 길면 점선 복귀
@@ -57,7 +57,7 @@ def test_lengthwise_obstacle_less_offset_more_length():
     _obs(c, +1, 1.0, w=0.22)       # 세로: 폭 좁고 길이 김
     c._replan()
     a, b, y, _ = c.holds[0]
-    assert abs(y - (0.26 - 0.11 - 0.115 - 0.04)) < 1e-9
+    assert abs(y - (0.26 - 0.11 - 0.115 - c.p.clear)) < 1e-9
     assert abs(b - (1.0 + 0.32 + c.p.hold_rear + c.p.clear_x)) < 1e-9
 
 
@@ -122,3 +122,63 @@ def test_sim_first_competition_layout():
         r = run(1, orient, jitter=0.0)
         assert r['success'], r['why']
         assert r['gap_cm'] > 3.0
+
+
+def test_sign_ends_only_after_min_x_and_frames():
+    c = _core(end_sign_h_px=60.0, end_sign_frames=3, end_min_x=2.5)
+    c.n_scan = 5
+    for _ in range(3):
+        c.on_sign(80.0)
+    c.step(0.0)
+    assert c.state == 'RUN'                    # 2.5 m 전엔 표지판 봐도 안 끝남
+    c.offset = (3.0, 0.0, 0.0)
+    c.on_sign(None)                            # 끊기면 다시 셈
+    c.on_sign(80.0)
+    c.step(0.05)
+    assert c.state == 'RUN'
+    c.on_sign(80.0)
+    c.on_sign(80.0)
+    c.step(0.1)
+    assert c.state == 'DONE' and '표지판' in c.end_why
+
+
+def test_distance_cap_ends_without_sign():
+    c = _core(end_x=4.6)
+    c.n_scan = 5
+    c.offset = (4.7, 0.0, 0.0)
+    c.step(0.0)
+    assert c.state == 'DONE' and '거리' in c.end_why
+
+
+def test_arc_clear_sees_obstacle_on_turn_not_beside():
+    c = _core()
+    c.pts = [(0.0, 0.14)]                       # 바로 옆 2.5 cm -> 직진도, 그쪽으로 꺾어도(회전 안쪽) 안 닿음
+    assert c.arc_clear(0.0) == math.inf and c.arc_clear(1.8) == math.inf
+    c.pts = [(0.35, 0.20)]                      # 앞 왼쪽: 직진은 비켜 감, 왼쪽으로 꺾으면 닿음
+    assert c.arc_clear(0.0) == math.inf
+    assert c.arc_clear(1.8) < 0.3
+    c.pts = [(0.35, 0.0)]                       # 앞 15 cm
+    assert abs(c.arc_clear(0.0) - 0.14) < 0.03
+
+
+def test_stop_then_rejudge_relaxes_and_resumes():
+    c = _core(recover_wait=0.2)
+    c.n_scan = 5
+    c.pts = [(0.25, 0.0)]                       # 바로 앞 5 cm -> 정지
+    t = 0.0
+    for _ in range(6):
+        t += 0.05
+        c.step(t)
+    assert c.n_rejudge == 1 and c.rj_t is not None
+    c.pts = []                                  # 다시 보니 비었음
+    for _ in range(10):
+        t += 0.05
+        v, _ = c.step(t)
+    assert v > 0                                # 다시 감
+    c.pts = [(0.25, 0.0)]
+    for _ in range(30):
+        t += 0.05
+        c.step(t)
+    assert c.relax >= 1                         # 같은 자리 재판단 -> 여유 줄임
+    c.relax = 10
+    assert c._eff(c.p.clear, c.p.clear_min) == c.p.clear_min

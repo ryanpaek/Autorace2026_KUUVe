@@ -41,7 +41,7 @@ def segments(obs):
     return segs + [(-1, 1.3 + SHIFT, 8, 1.3 + SHIFT), (-1, -1.3 + SHIFT, 8, -1.3 + SHIFT)]
 
 
-def run(seed, orient='side', jitter=1.0, overrides=None, gain=0.74 * 1.2, bias=-0.051 + 0.075, t_max=60.0, trace=False):
+def run(seed, orient='side', jitter=1.0, overrides=None, start_deg=1.5, dash_drop=0.5, gain=0.74 * 1.2, bias=-0.051 + 0.075, t_max=60.0, trace=False):
     rng = random.Random(seed * 104729 + 7)
     obs = layout(seed, orient, jitter)
     segs = segments(obs)
@@ -51,7 +51,7 @@ def run(seed, orient='side', jitter=1.0, overrides=None, gain=0.74 * 1.2, bias=-
         setattr(p, k, v)
     p.end_x = 5.0
     core = M7Dash(p)
-    X, Y, PSI, K = 0.0, rng.uniform(-0.02, 0.02), math.radians(rng.uniform(-1.5, 1.5)), 0.0
+    X, Y, PSI, K = 0.0, rng.uniform(-0.02, 0.02), math.radians(rng.uniform(-start_deg, start_deg)), 0.0
     odo_scale, gyro_scale, gyro_bias = 1 + rng.gauss(0, 0.03), 1 + rng.gauss(0, 0.03), math.radians(rng.gauss(0, 0.05))
     ox = oy = 0.0
     oyaw = rng.uniform(-math.pi, math.pi)
@@ -67,6 +67,7 @@ def run(seed, orient='side', jitter=1.0, overrides=None, gain=0.74 * 1.2, bias=-
     next_scan = next_ctl = next_cam = t
     t0 = t
     gap_min, depart, contact = 9.9, False, False
+    y_hi, y_lo = -9.9, 9.9
     tr = []
     while t - t0 < t_max:
         if t >= next_scan:
@@ -76,7 +77,7 @@ def run(seed, orient='side', jitter=1.0, overrides=None, gain=0.74 * 1.2, bias=-
             next_cam += 0.1
             pts = []
             for f in (0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70):
-                if rng.random() < 0.5:
+                if rng.random() < dash_drop:
                     continue
                 l = -(Y + f * math.sin(PSI)) / math.cos(PSI)
                 pts.append((1000 * f, -1000 * l + rng.gauss(0, 10)))
@@ -112,9 +113,14 @@ def run(seed, orient='side', jitter=1.0, overrides=None, gain=0.74 * 1.2, bias=-
         contact = contact or g < 0
         wr = [Y + ax * s - 0.09 * c for ax in (0.1, -0.1)]
         depart = depart or max(wr) < -LW - 0.01
+        body = [Y + a * s + b * c for a in (p.robot_front, -p.robot_rear) for b in (p.robot_half_width, -p.robot_half_width)]
+        y_hi, y_lo = max(y_hi, max(body)), min(y_lo, min(body))
     reached = core.state == 'DONE'
-    return {'seed': seed, 'reached': reached, 'contact': contact, 'depart': depart,
-            'success': reached and not contact and not depart, 'gap_cm': round(100 * gap_min, 1),
+    lane3 = y_hi > LW                      # 차체가 2|3차로 점선(+0.52)을 넘음
+    return {'seed': seed, 'reached': reached, 'contact': contact, 'depart': depart, 'lane3': lane3,
+            'body_hi_cm': round(100 * y_hi, 1), 'body_lo_cm': round(100 * y_lo, 1),
+            'n_rejudge': core.n_rejudge, 'n_rev': core.n_rev,
+            'success': reached and not contact and not depart and not lane3, 'gap_cm': round(100 * gap_min, 1),
             't': round(t - t0, 1), 'why': core.why, 'y_err_cm': round(100 * (core.pose()[1] - Y), 1),
             'trace': tr, 'status': core.status()}
 

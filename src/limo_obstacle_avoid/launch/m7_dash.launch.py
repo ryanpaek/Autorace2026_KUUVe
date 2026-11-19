@@ -3,6 +3,7 @@
   ros2 launch limo_obstacle_avoid m7_dash.launch.py                 # 브리지 + m7_dash_node
   ros2 launch limo_obstacle_avoid m7_dash.launch.py lane:=true      # + lane_node (노란선 보조, /lane/cmd_vel은 아무도 안 받음)
   ros2 launch limo_obstacle_avoid m7_dash.launch.py dry_run:=true   # 바퀴 안 움직임 (/cmd_vel_preview)
+  ros2 launch limo_obstacle_avoid m7_dash.launch.py detector:=false # 표지판 인식 끔 -> 거리(end_x)로만 끝
   시작: ros2 topic pub --once /m7dash/enable std_msgs/Bool "{data: true}"
   정지: ros2 topic pub --once /m7dash/enable std_msgs/Bool "{data: false}"
 """
@@ -27,11 +28,16 @@ def generate_launch_description():
         DeclareLaunchArgument('lane', default_value='false'),
         DeclareLaunchArgument('bridge', default_value='true'),
         DeclareLaunchArgument('dry_run', default_value='false'),
+        DeclareLaunchArgument('detector', default_value='true'),
+        # 원본 YOLO 표지판 인식 (fork_a/fork_b 상자 -> 표지판 가까우면 끝). 설정은 params.yaml detector_node 그대로
+        Node(package='autorace_perception', executable='detector_node', name='detector_node',
+             parameters=[params], output='screen', condition=IfCondition(LaunchConfiguration('detector'))),
         Node(package='autorace_mission', executable='ackermann_bridge', name='ackermann_bridge',
              parameters=[params], output='screen', condition=IfCondition(LaunchConfiguration('bridge'))),
         Node(package='autorace_lane', executable='lane_node', name='lane_node',
              parameters=[params, {'bev_config': bev}], output='screen', condition=IfCondition(LaunchConfiguration('lane'))),
         Node(package='limo_obstacle_avoid', executable='m7_dash_node', name='m7_dash_node', output='screen',
              parameters=[dash, {'bev_config': bev,
-                                'dry_run': ParameterValue(LaunchConfiguration('dry_run'), value_type=bool)}]),
+                                'dry_run': ParameterValue(LaunchConfiguration('dry_run'), value_type=bool),
+                                'end_by_sign': ParameterValue(LaunchConfiguration('detector'), value_type=bool)}]),
     ])

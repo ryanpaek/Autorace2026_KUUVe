@@ -6,6 +6,7 @@ mission_node 없이 돈다: /cmd_vel 직접 (ackermann_bridge가 /limo/ack_cmd�
 
 입력  /m7dash/enable (Bool)  true = 지금 자리·방향을 기준으로 시작, false = 정지
       /scan, /odom, /imu, image_topic (Image 또는 .../compressed), /lane/status (있으면 노란선 보조)
+      /perception/detections (String JSON, 원본 detector_node) fork_a/fork_b 상자 높이 -> 표지판 가까우면 끝
 출력  cmd_topic (Twist, 기본 /cmd_vel), /m7dash/state (String JSON), /m7dash/done (Bool)
 """
 import json
@@ -40,7 +41,9 @@ class M7DashNode(Node):
                           ('cmd_topic', '/cmd_vel'), ('bev_config', ''), ('white_v_min', 180), ('white_s_max', 60),
                           ('cam_hz', 10.0), ('odom_timeout', 0.3), ('scan_timeout', 0.5), ('range_min', 0.10),
                           ('range_max', 3.0), ('scan_yaw_offset_deg', 0.0), ('scan_flip', False),
-                          ('start_y', 0.0), ('start_heading_deg', 0.0), ('dry_run', False)):
+                          ('start_y', 0.0), ('start_heading_deg', 0.0), ('dry_run', False),
+                          ('det_topic', '/perception/detections'), ('sign_classes', ['fork_a', 'fork_b']),
+                          ('sign_conf', 0.5)):
             self.declare_parameter(name, val)
         self._read_params()
         self.core = M7Dash(self.p)
@@ -63,6 +66,7 @@ class M7DashNode(Node):
         self.create_subscription(Odometry, self.gp('odom_topic'), self.on_odom, qos_profile_sensor_data)
         self.create_subscription(Imu, self.gp('imu_topic'), self.on_imu, qos_profile_sensor_data)
         self.create_subscription(String, self.gp('lane_status_topic'), self.on_lane, 10)
+        self.create_subscription(String, self.gp('det_topic'), self.on_det, 10)
         img = self.gp('image_topic')
         if self.cfg is not None:
             if img.endswith('/compressed'):
@@ -77,7 +81,9 @@ class M7DashNode(Node):
         self.n_ev = 0
         self.create_timer(0.05, self.loop)
         self.get_logger().info(f'[M7 점선] 준비: 출력 {out}{" (dry_run)" if self.dry else ""}, 속도 {self.p.speed}, '
-                               f'옆 여유 {100 * self.p.clear:.0f} cm, 끝 x {self.p.end_x} m, '
+                               f'옆 여유 {100 * self.p.clear:.0f} cm, 끝 = '
+                               + (f'표지판 상자 {self.p.end_sign_h_px:.0f} px 이상 {self.p.end_sign_frames}번 (x {self.p.end_min_x} m 뒤) / ' if self.p.end_by_sign else '')
+                               + f'거리 {self.p.end_x} m, '
                                f'점선 {"켬" if self.cfg is not None else "끔"}. 시작: ros2 topic pub --once /m7dash/enable std_msgs/Bool "{{data: true}}"')
 
     def gp(self, name):
@@ -131,6 +137,25 @@ class M7DashNode(Node):
             self.core.on_lane(json.loads(m.data), time.monotonic())
         except (ValueError, TypeError, AttributeError):
             pass
+
+    def on_det(self, m):
+        """detector_node 형식 {"detections":[{"cls","conf","bbox":[x,y,w,h]}]} -> 표지판 상자 높이 최대값."""
+        if not self.active:
+            return
+        try:
+            dets = json.loads(m.data).get('detections', []) or []
+        except (ValueError, AttributeError):
+            return
+        cls, conf = set(self.gp('sign_classes')), float(self.gp('sign_conf'))
+        hs = []
+        for d in dets:
+            try:
+                b = d.get('bbox') or []
+                if d.get('cls') in cls and float(d.get('conf', 0.0)) >= conf and len(b) == 4:
+                    hs.append(float(b[3]))
+            except (AttributeError, TypeError, ValueError):
+                continue
+        self.core.on_sign(max(hs) if hs else None)
 
     def on_image(self, m):
         if self._cam_due():
@@ -218,7 +243,8 @@ class M7DashNode(Node):
         if done:
             self.pub_done.publish(Bool(data=True))
         self.core.stop()
-        self.get_logger().info(f'■ [M7 점선] {why} (보정 횟수 {st["fix"]}, 점선 본 프레임 {self.n_dash})')
+        self.get_logger().info(f'■ [M7 점선] {why}: {st["end"]} (보정 {st["fix"]}, 점선 본 프레임 {self.n_dash}, '
+                               f'재판단 {st["n_rejudge"]}, 마지막 표지판 상자 {st["sign_h"]} px)')
 
 
 def main(args=None):
