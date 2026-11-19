@@ -185,6 +185,7 @@ DEFAULT_PARAMS = {
     'fork_normal_after_mm': 300.0,
     'fork_normal_after_dist_mm': 700.0,   #   도면 위치가 없으면 갈림길 시작부터 이 거리 뒤
     'm2_merge': True,
+    'm2_merge_lane_first': True,       # 11/20 yubin: false = S자 동안 차선 조향 안 섞음 (sim_1: 차선이 갈래 직선을 붙잡아 S자가 늦고 45°로 따라잡다 넘침)
     'm2_merge_plain': False,           # 11/20 yubin: m2_plain_lane에서도 합류 강제 S자 (params.yaml에서 켬). sim_1: 직선 그대로 가 합류 사선 바깥선을 넘음
     'm2_merge_before_end_mm': 500.0,   # 섬 왼쪽 끝(m2_island_end)보다 이만큼 앞에서 시작 (자기 차로 안에서 먼저 안쪽으로)
     'm2_merge_from_tip_mm': 1245.0,    # 도면 위치가 없을 때: M2 시작(섬 앞 끝 근처)부터 이만큼 가서 시작 (섬 길이 1745 - 500)
@@ -1241,7 +1242,7 @@ class MissionFSM:
         head = max(-lim, min(lim, head))
         yaw_ref = m['axis'] + head
         yaw_ref = math.atan2(math.sin(yaw_ref), math.cos(yaw_ref))
-        if self._lane_first(inp):
+        if p.get('m2_merge_lane_first', True) and self._lane_first(inp):
             # 선이 보이면 S자 위치 계산은 계속(선을 놓치면 이어서 씀)하고 조향은 차선으로
             return Command('lane', self._lane(self._m2x_speed(p['approach_speed']), **self._m2x_kw()),
                            note=f'M2 merge {u:.0f}/{L:.0f}mm by lane (y {m["y"]:+.0f}mm)')
@@ -1275,12 +1276,17 @@ class MissionFSM:
         1순위: 시작 흰 선을 앞바퀴가 지나는 순간 (서지 않음). 2순위: 도면 위치. 3순위: 거리.
         좌하단 코너를 IMU로 다 돌기 전에는 카메라로 시작선을 넘은 것만 받는다."""
         p = self.p
+        m = getattr(self, 'm2m', None)
+        if m is not None and not m['done']:
+            return None         # 11/20 yubin: 합류 S자 중 (A는 코너 쪽으로 46°까지 틀어 '코너 돎'으로 잘못 봄, sim_1 7ed1b13 A 3판 코너 안쪽 이탈)
         t = self._m8_turn_deg(inp) if p.get('m8_line_trigger', True) else None
         if t is not None and t >= p['m8_line_min_turn_deg'] and not getattr(self, '_m8_line_fresh', False):
             # 11/19: 코너를 돌기 시작한 뒤 본 선만 (그 전에 잡은 다른 흰 선 때문에 진짜 시작선을 '다른 선'으로 버리지 않게)
             self._m8_line_fresh = True
             self.line = None
         near = self._line_crossed(inp, 'm8_start_line')
+        if near and t is not None and t < p['m8_line_min_turn_deg']:
+            near = False        # 11/20 yubin: 코너를 아직 안 돌았는데 시작선 (054053: 도면 위치가 합류 중 +2.7 m 튀어 코너 앞 x 1.9에서 들어감)
         early = self._m8_early(inp, who)
         if early is not None:
             return early

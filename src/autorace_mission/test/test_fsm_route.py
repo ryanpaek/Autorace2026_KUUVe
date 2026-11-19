@@ -341,3 +341,14 @@ def test_m2_merge_starts_by_distance_when_route_lags():
                         obstacle={'m7_exit': 'A'}))
         d += 20.0
     assert fsm.m2m is not None and 1245.0 <= d <= 1400.0
+
+
+def test_m8_entry_waits_for_merge_and_corner():
+    """11/20 yubin sim_1 7ed1b13: 합류 S자 중이거나 코너를 안 돌았으면(30° 미만) 도면 위치가 시작선을 넘어도 라바콘 시작 안 함"""
+    import math as _m
+    fsm = MissionFSM({'start_state': 'M2_EXIT', 'route_points': {'m8_start_line': 22000.0}})
+    fsm.axis_yaw = 0.0
+    fsm.m2m = {'done': False}
+    assert fsm._cones_entry(Inputs(t=1.0, dist_mm=100.0, route_s=22100.0, yaw=_m.radians(-40.0)), 'M2_EXIT') is None
+    fsm.m2m = {'done': True}
+    assert fsm._cones_entry(Inputs(t=1.1, dist_mm=120.0, route_s=22150.0, yaw=_m.radians(-10.0)), 'M2_EXIT') is None
