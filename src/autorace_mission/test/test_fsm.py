@@ -1128,3 +1128,44 @@ def old_m2(monkeypatch):
     """11/18 이전 M2 동작(한쪽 선 모드·폭 460·합류 S자) 테스트: m2_plain_lane 끔."""
     from autorace_mission import fsm as fsm_mod
     monkeypatch.setitem(fsm_mod.DEFAULT_PARAMS, 'm2_plain_lane', False)
+
+
+# ---------------------------------------------------------------- 11/19 라바콘 뒤 코너: 출발 차로로 나감
+def _m1_forced_fsm(**kw):
+    import math as _m
+    fsm = MissionFSM(dict({'start_state': 'M8_CONES', 'm1_corner_start_mm': 280.0,
+                           'route_points': {'m1_corner_start': 24506.0}}, **kw))
+    fsm.axis_yaw = -fsm.p['m7_corner_dir'] * _m.pi / 2.0
+    return fsm
+
+
+def test_m1_corner_start_ignores_lagging_route():
+    """1119_09: 도면 위치가 3 m 뒤처져 코너 시작을 3150 mm 앞으로 잡음 -> 라바콘 끝 기준 280 mm로"""
+    fsm = _m1_forced_fsm()
+    fsm._goto('M1_TRAFFIC', Inputs(t=0.0, dist_mm=0.0, yaw=0.0, lane={}, route_s=24506.0 - 3150.0), 'cones done')
+    assert fsm.m1fc['xs'] == pytest.approx(280.0)
+    assert any('from route ignored' in m for m in fsm.log)
+    ok = _m1_forced_fsm()
+    ok._goto('M1_TRAFFIC', Inputs(t=0.0, dist_mm=0.0, yaw=0.0, lane={}, route_s=24506.0 - 400.0), 'cones done')
+    assert ok.m1fc['xs'] == pytest.approx(400.0)              # 도면과 120 mm 차이는 도면 그대로
+
+
+def test_m1_corner_lane_underturn_uses_forced_arc():
+    """1119_09: 코너 안에서 바깥 선만 보며 k -0.4~-0.8 (원호 -1.56) -> 강제 원호. 차선이 충분히 꺾으면 차선 주행"""
+    fsm = _m1_forced_fsm()
+    fsm._goto('M1_TRAFFIC', Inputs(t=0.0, dist_mm=0.0, yaw=0.0, lane={}), 'cones done')
+    weak = {'status': 'L', 'kappa': -0.5}
+    cmd = None
+    for i in range(10):                                        # 코너 시작 전 직선: 차선 주행
+        cmd = fsm.step(Inputs(t=0.05 * i, dist_mm=10.0 * i, yaw=0.0, confirmed_classes=set(), lane=weak))
+    assert cmd.lane['mode'] != 'heading'
+    for i in range(10, 20):                                    # 원호 구간 (s >= 280 - 100)
+        cmd = fsm.step(Inputs(t=0.05 * i, dist_mm=200.0 + 10.0 * i, yaw=0.0, confirmed_classes=set(), lane=weak))
+    assert cmd.lane['mode'] == 'heading'
+    assert any('turns too little' in m for m in fsm.log)
+    good = _m1_forced_fsm()
+    good._goto('M1_TRAFFIC', Inputs(t=0.0, dist_mm=0.0, yaw=0.0, lane={}), 'cones done')
+    for i in range(20):
+        cmd = good.step(Inputs(t=0.05 * i, dist_mm=20.0 * i, yaw=0.0, confirmed_classes=set(),
+                               lane={'status': 'BOTH', 'kappa': -1.5}))
+    assert cmd.lane['mode'] != 'heading'

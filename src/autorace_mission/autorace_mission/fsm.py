@@ -151,6 +151,14 @@ DEFAULT_PARAMS = {
     'm1_force_ld_mm': 350.0,
     'm1_force_end_deg': 85.0,
     'm1_force_tol_mm': 70.0,
+    # 11/19 공식 연습 1~4차 '라바콘 뒤 코너에서 출발 차로를 내 차로로 보고 감':
+    #   (1) 도면 위치 s가 M7 전후진·방향 판정 오류로 수 m 뒤처져 코너 시작을 3150 mm(09)·11650 mm(08) 앞으로 잡음 -> 원호가 늦게 시작.
+    #       도면으로 잡은 코너까지 거리가 m1_corner_start_mm 와 이보다 더 다르면 도면을 버리고 m1_corner_start_mm (라바콘 끝 기준).
+    #   (2) lane_first라 선이 보이면 차선 주행 -> 바깥 선만 보며 k -0.38~-0.76으로 덜 꺾어(원호는 -1.56) 출발 차로 쪽으로 나감.
+    #       원호 구간에서 차선 조향이 원호 곡률의 m1_lane_min_turn 배보다 덜 꺾으면 강제 원호(IMU heading)로. 0 = 예전 lane_first 그대로
+    'm1_corner_start_max_dev_mm': 700.0,
+    'm1_lane_min_turn': 0.7,
+    'm1_lane_min_hold': 6,           #   한 번 원호로 바꾸면 최소 이만큼 틱(20 Hz) 원호 유지 (왔다갔다 방지)
     'lane_first': True,              # 11/16: 강제 경로(합류 S자·라바콘 뒤 원호)는 선을 놓쳤을 때만, 선이 보이면 차선 주행
     'lane_first_lost_frames': 5,     #   이만큼 연속으로 선을 놓쳐야 강제 경로로
     # 11/18: M2 CSV 재생이 끝나면 그냥 일반 차선 주행. 한쪽 선 모드(left/right_only)·좁은 폭(460)·직선 방향 붙잡기·
@@ -519,9 +527,15 @@ class MissionFSM:
                 cs = self._rp('m1_corner_start')
                 start = (max(0.0, cs - inp.route_s) if cs is not None and inp.route_s is not None
                          else self.p['m1_corner_start_mm'])
+                dev = self.p.get('m1_corner_start_max_dev_mm', 0.0)
+                if dev > 0 and abs(start - self.p['m1_corner_start_mm']) > dev:
+                    self.log.append(f'M1 corner start {start:.0f}mm from route ignored (route s off) -> '
+                                    f'{self.p["m1_corner_start_mm"]:.0f}mm')
+                    start = self.p['m1_corner_start_mm']
                 self.m7c = (yaw0, inp.dist_mm, 'M1_TRAFFIC', start)
                 self.m1_inner_on = False
                 self.m1fc = None
+                self._m1_arc_hold, self._m1_under_logged = 0, False
                 if self.p.get('m1_force_corner', True):
                     off = (inp.lane or {}).get('offset_mm')
                     y0 = (-float(off) if off is not None and (inp.lane or {}).get('status') not in (None, 'NONE')
@@ -1408,9 +1422,31 @@ class MissionFSM:
         yaw_ref = m['axis'] + math.atan2(ty - m['y'], tx - m['x'])
         yaw_ref = math.atan2(math.sin(yaw_ref), math.cos(yaw_ref))
         v = min(speed, p.get('m1_corner_speed', speed)) if m['s'] >= m['xs'] - 300.0 else speed
-        if self._lane_first(inp):
+        if self._lane_first(inp) and not self._m1_lane_underturn(inp, m, R, d, arc_end):
             return self._lane(v)                      # 11/16: 선이 보이면 차선 주행 (원호 위치 계산은 계속)
         return self._lane(v, 'heading', yaw_ref=round(yaw_ref, 4))
+
+    def _m1_lane_underturn(self, inp, m: dict, R: float, d: float, arc_end: float) -> bool:
+        """11/19: 원호 구간인데 차선 조향이 원호보다 크게 덜 꺾음 (m1_lane_min_turn 설명) -> True면 강제 원호"""
+        p = self.p
+        r = p.get('m1_lane_min_turn', 0.0)
+        hold = getattr(self, '_m1_arc_hold', 0)
+        if r <= 0.0:
+            return False
+        if hold > 0:
+            self._m1_arc_hold = hold - 1
+            return True
+        if not (m['xs'] - 100.0 <= m['s'] <= arc_end):
+            return False
+        lk = (inp.lane or {}).get('kappa')
+        need = r * 1000.0 / R
+        if lk is None or float(lk) * d < need:
+            if not getattr(self, '_m1_under_logged', False):
+                self._m1_under_logged = True
+                self.log.append(f'M1 corner: lane turns too little (k {lk}) -> forced arc')
+            self._m1_arc_hold = int(p.get('m1_lane_min_hold', 6))
+            return True
+        return False
 
     def _m1_lane(self, inp, speed: float) -> dict:
         """M1: 라바콘 뒤 코너를 다 돌 때까지 안쪽 선 + 천천히 + 바깥쪽 비켜 가기 (그 뒤 보통 차선)"""
