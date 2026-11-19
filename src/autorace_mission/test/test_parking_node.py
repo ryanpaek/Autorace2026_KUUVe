@@ -903,3 +903,23 @@ def test_fixed_rejects_crosswalk_line_then_parks_at_real_line():
 def test_fixed_need_occ_zero_keeps_old_behavior():
     lg, stops = _fixed_two_lines(fake_at=400.0, real_at=2300.0, need=0)
     assert len(stops) == 1 and getattr(lg, 'rejects', 0) == 0
+
+
+# ---- 11/19 공지: 1·2행 랜덤 -> 뒷칸 되살림 ----
+@pytest.mark.parametrize('front,back', [(1, 4), (2, 5), (3, 6)])
+def test_fixed_back_row_target(front, back):
+    parked = [i for i in range(1, 7) if i not in (front, back)]
+    out, log = {}, []
+    n_in, hit, res = drive(parked, back, FIXED, y0=290.0, r_min=590.0, out=out, log=log)
+    lg = out['logic']
+    assert lg.fixed_cell == front and lg.row == 'back'
+    assert res == 'PARKED_FIXED_BACK' and n_in == 4 and not hit
+    assert 'F_BACK' not in [i['phase'] for i in log]          # 뒷칸은 5cm 후진 안 함 (보류)
+
+
+def test_fixed_front_row_still_backs_5cm():
+    out, log = {}, []
+    n_in, hit, res = drive([1, 3, 4, 5, 6], 2, FIXED, y0=290.0, r_min=590.0, out=out, log=log)
+    ph = [i['phase'] for i in log]
+    assert out['logic'].row == 'front' and res == 'PARKED_FIXED' and n_in == 4 and not hit
+    assert ph.index('F_CHECK') < ph.index('F_BACK')

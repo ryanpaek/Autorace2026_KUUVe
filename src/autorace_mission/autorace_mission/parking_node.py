@@ -1261,7 +1261,8 @@ class ParkingV2:
     # ③ F_MOVE   멈춘 자리부터 오도메트리 fixed_move_mm 직진 (멈출 때 방향 유지)
     # ④ F_TPAUSE fixed_turn_pause_sec 정지 + 끝 presteer_sec 동안 오른쪽 최대 조향 미리 꺾기
     # ⑤ F_TURN   오른쪽 최대 조향 전진. fixed_turn_deg(IMU) 돌거나 fixed_turn_mm(>0이면) 가면 끝
-    # ⑥ F_BPAUSE·F_BACK  멈추고 바퀴 펴서 fixed_back_mm(5cm) 똑바로 후진 (11/18 캡틴, 0이면 건너뜀)
+    # ⑥ F_CHECK  앞 50cm 확인 (11/19 1·2행 랜덤): 있으면 앞칸 / 없으면 F_STR 뒷칸으로 fixed_backrow_mm 직진
+    # ⑦ F_BPAUSE·F_BACK  멈추고 바퀴 펴서 fixed_back_mm(5cm) 똑바로 후진 (11/18 캡틴, 앞칸만. 뒷칸은 fixed_back_after_backrow)
     # ⑦ DONE     PARKED_FIXED (11/18 공지: 2행 주차 없음). ③·⑤ 중 앞범퍼 front_stop_mm 안에 물체 -> ③은 기다림, ⑤는 그 자리 정지(PARKED_FIXED_BLOCKED)
     # ------------------------------------------------------------------
     def _step_fixed(self, inp):
@@ -1374,15 +1375,48 @@ class ParkingV2:
             if by_deg or by_mm:
                 self.stop_how = 'deg' if by_deg else 'mm'
                 self.err = ('turned', round(deg, 1), round(moved))
-                if p['fixed_back_mm'] > 0:                 # 11/18 캡틴: 바퀴 펴고 5cm 후진 뒤 완료
-                    self.d_back0 = inp['dist_mm']
-                    self._enter('F_BPAUSE', inp)
+                self.yaw_str0 = inp['yaw']
+                if p['fixed_backrow_mm'] > 0:              # 11/19 공지: 2행도 나옴 -> 앞 50cm 확인 (뒷칸이 비었나)
+                    self._enter('F_CHECK', inp)
                     return self._out(0.0, 0.0)
-                return self._done('PARKED_FIXED', inp)     # 11/18 공지: 2행 주차 없음 -> 돌고 바로 끝
+                return self._finish_front(inp)
             if inp['blocked']:
                 self.err = ('blocked', round(deg, 1), round(moved))
                 return self._done('PARKED_FIXED_BLOCKED', inp)
             return self._out(p['fixed_turn_speed'], KAPPA_FULL_RIGHT)
+
+        if self.phase == 'F_CHECK':
+            # 11/19 (11/18 9a79315 되살림): 돌고 나서 앞범퍼 앞 fixed_check_mm(50cm), 차 폭 띠에 물체가 있으면 앞칸 완료.
+            # 없으면 뒷칸이 빈 칸(그 앞칸도 비워 둠) -> fixed_backrow_mm(62cm) 더 직진
+            if not hasattr(self, 'chk_hits') or self.chk_hits is None:
+                self.chk_hits, self.chk_frames = 0, 0
+            bump = p['front_bumper_from_axle_mm']
+            n = sum(1 for x, y in inp.get('points_far', [])
+                    if bump < x <= bump + p['fixed_check_mm'] and abs(y) <= p['fixed_check_half_mm'])
+            self.chk_hits += 1 if n >= p['fixed_check_min_pts'] else 0
+            self.chk_frames += 1
+            if inp['t'] - self.t_phase < p['fixed_check_sec']:
+                return self._out(0.0, 0.0)
+            ahead = self.chk_hits * 2 >= self.chk_frames      # 절반 넘는 장면에서 보이면 '있음'
+            self.row = 'front' if ahead else 'back'
+            if ahead:
+                return self._finish_front(inp)
+            self._enter('F_STR', inp)
+            return self._out(0.0, 0.0)
+
+        if self.phase == 'F_STR':                          # 뒷칸으로 더 직진 (돈 끝 방향 유지)
+            if moved >= p['fixed_backrow_mm'] - p['fixed_brake_mm']:
+                if p['fixed_back_after_backrow'] and p['fixed_back_mm'] > 0:
+                    self.d_back0 = inp['dist_mm']
+                    self._enter('F_BPAUSE', inp)
+                    return self._out(0.0, 0.0)
+                return self._done('PARKED_FIXED_BACK', inp)
+            if inp['blocked']:
+                return self._done('PARKED_FIXED_BLOCKED', inp)
+            k = 0.0
+            if inp['yaw'] is not None and getattr(self, 'yaw_str0', None) is not None:
+                k = max(-1.0, min(1.0, -p['fixed_heading_gain'] * wrap(inp['yaw'] - self.yaw_str0)))
+            return self._out(p['fixed_move_speed'], k)
 
         if self.phase == 'F_BPAUSE':
             # 11/18 캡틴: 돈 자리에서 멈춤 -> 끝 presteer_sec 동안 아주 천천히 뒤로 굴리며 바퀴를 똑바로 폄
@@ -1473,6 +1507,14 @@ class ParkingV2:
         occ = [self.cell_occ[c] * 2 >= frames or avg[c] >= p['fixed_occ_min_pts'] for c in range(3)]
         self.occ_n = sum(occ)
         return self.occ_n < p['fixed_need_occ']
+
+    def _finish_front(self, inp):
+        """앞칸 끝: fixed_back_mm > 0이면 바퀴 펴고 후진(F_BPAUSE), 아니면 완료."""
+        if self.p['fixed_back_mm'] > 0:                   # 11/18 캡틴: 바퀴 펴고 5cm 후진 뒤 완료
+            self.d_back0 = inp['dist_mm']
+            self._enter('F_BPAUSE', inp)
+            return self._out(0.0, 0.0)
+        return self._done('PARKED_FIXED', inp)
 
     def _fixed_move(self):
         p, c = self.p, getattr(self, 'fixed_cell', None)
@@ -1647,6 +1689,12 @@ DEFAULTS = {
     'fixed_turn_deg': 87.0,    # 오른쪽 최대 조향을 이만큼(IMU) 돌면 끝. 실차는 펴라 한 뒤 2~4도 더 돎 -> 약 90도
     'fixed_turn_mm': 0.0,      # >0이면 최대 조향으로 이만큼 가면 끝 (각도와 먼저 닿는 쪽). 11/16 캡틴 실차 확정: 0 (87도로 끝)
     'fixed_turn_speed': 0.12,
+    'fixed_backrow_mm': 620.0,     # 11/19 공지(1·2행 랜덤): 돌고 앞 50cm가 비면 뒷칸으로 이만큼 더 직진 (칸 깊이 600 + 선 20, 실차 확인 필요). 0 = 안 봄
+    'fixed_check_mm': 500.0,       #   돌고 나서 앞범퍼 앞 이 거리 안에 물체 -> 앞칸 완료
+    'fixed_check_half_mm': 130.0,  #   검사 띠 반폭 (차 폭 220/2 + 2cm, 양옆 리모는 약 15cm 옆)
+    'fixed_check_min_pts': 3,      #   한 장면에 점이 이만큼 있으면 '있음'
+    'fixed_check_sec': 0.5,        #   확인 시간 (절반 넘는 장면에서 보이면 있음)
+    'fixed_back_after_backrow': False,   # 뒷칸으로 들어간 뒤에도 5cm 후진할지 (11/19 캡틴: 실차 보고 결정, 보류)
     'fixed_back_mm': 50.0,         # 11/18 캡틴: 다 돌고 바퀴 펴고 이만큼 똑바로 후진한 뒤 완료 (0 = 안 함)
     'fixed_back_pause_sec': 0.5,   #   후진 전 멈춤 (끝 presteer_sec 동안 바퀴 펴기)
     'fixed_back_speed': 0.06,

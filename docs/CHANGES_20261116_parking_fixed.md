@@ -81,3 +81,9 @@
 - 선에서 1초 라이다로 1·2·3번을 본 뒤, 막힌 칸(A 덩어리 또는 B 장면당 점 2개 이상)이 `fixed_need_occ` 2개 밑이면 가짜 선
   → 그 선 버리고 F_LINE으로 (다시 출발해 다음 선). 3번 버리면(`fixed_max_rejects`) 그다음 선은 확인 없이 주차.
 - /parking/state: rejects, occ_n. `fixed_need_occ: 0`이면 예전 그대로.
+
+## 11/19 공지: 1·2행 랜덤 → 뒷칸 단계 되살림 (11/18 9a79315 방식, 지금 main 위에)
+- 87도 돈 뒤 F_CHECK 0.5초: 앞범퍼 앞 50cm·차 폭 띠(±13cm)에 물체 → 앞칸 (그대로 5cm 후진 → PARKED_FIXED)
+  / 없음 → 뒷칸이 빈 칸 → F_STR 돈 끝 방향 유지하며 `fixed_backrow_mm` 620 직진 → PARKED_FIXED_BACK.
+- 뒷칸 뒤 5cm 후진은 `fixed_back_after_backrow` (기본 false, 캡틴 실차 보고 결정).
+- 시험: 뒷칸 4·5·6(앞칸도 빔) 모두 칸 안·충돌 없음. 앞칸은 그대로 5cm 후진. PR #134(가짜 선) 위에 만듦. mission 388 통과.
