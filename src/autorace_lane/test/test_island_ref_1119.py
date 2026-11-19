@@ -77,3 +77,11 @@ def test_outer_line_crossing_ahead_is_not_island_edge():
     t = math.tan(math.radians(21.0))
     draw_polyline_mm(img, cfg, -250.0 / math.cos(math.radians(21.0)) + ys * t, ys)
     assert lf.process_bev(img, blank(cfg), speed=0.2).status == 'NONE'
+
+
+def test_single_line_slightly_on_wrong_side_is_not_island_edge():
+    """11/20 yubin sim_1 055926: B에서 섬 변이 화면 밖, 차 오른쪽 100 mm 바깥선만 -> 섬 변 아님 (예전 130 mm 기준은 통과)"""
+    cfg, lf = _lf()
+    assert lf.process_bev(_scene(cfg, [100.0]), blank(cfg), speed=0.2).status == 'NONE'
+    cfg, lf = _lf()
+    assert lf.process_bev(_scene(cfg, [-200.0]), blank(cfg), speed=0.2).status == 'L'    # 맞는 쪽은 그대로

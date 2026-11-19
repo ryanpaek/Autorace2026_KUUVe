@@ -550,6 +550,9 @@ def detect_lanes(bev: np.ndarray, cfg: BevConfig, p: LaneParams, mode: str,
             if pick is None:
                 expect = vc - exp_w / 2.0 if mode == 'left_only' else vc + exp_w / 2.0
                 pick = min(xs, key=lambda x: abs(x - expect))
+                # 11/20 yubin: 섬 변 근거(글자·바깥선 쌍) 없이 가까운 선만으로 골랐는데 차 반대편이면 바깥선 (sim_1 055926 B: 차 오른쪽 100 mm 바깥선을 섬 변으로 -> 오른쪽 이탈)
+                if (pick - vc) * (1.0 if mode == 'right_only' else -1.0) < -0.1 * exp_w:
+                    return det
             if mode == 'left_only':
                 det.left_x0, det.status = pick, 'L'
             else:
