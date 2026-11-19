@@ -987,12 +987,15 @@ def test_fixed_need_occ_zero_keeps_old_behavior():
     assert len(stops) == 1 and getattr(lg, 'rejects', 0) == 0
 
 
-# ---- 11/19 공지: 1·2행 랜덤 -> 뒷칸 되살림 ----
+# ---- 11/19 공지: 1·2행 랜덤 -> 뒷칸 되살림 (11/20 캡틴: 뒷줄 빈칸 없음 -> 기본 끔. 켜면 예전처럼) ----
+BACKROW_ON = dict(FIXED, fixed_backrow_mm=620.0)
+
+
 @pytest.mark.parametrize('front,back', [(1, 4), (2, 5), (3, 6)])
 def test_fixed_back_row_target(front, back):
     parked = [i for i in range(1, 7) if i not in (front, back)]
     out, log = {}, []
-    n_in, hit, res = drive(parked, back, FIXED, y0=290.0, r_min=590.0, out=out, log=log)
+    n_in, hit, res = drive(parked, back, BACKROW_ON, y0=290.0, r_min=590.0, out=out, log=log)
     lg = out['logic']
     assert lg.fixed_cell == front and lg.row == 'back'
     assert res == 'PARKED_FIXED_BACK' and n_in == 4 and not hit
@@ -1001,7 +1004,32 @@ def test_fixed_back_row_target(front, back):
 
 def test_fixed_front_row_still_backs_5cm():
     out, log = {}, []
-    n_in, hit, res = drive([1, 3, 4, 5, 6], 2, FIXED, y0=290.0, r_min=590.0, out=out, log=log)
+    n_in, hit, res = drive([1, 3, 4, 5, 6], 2, BACKROW_ON, y0=290.0, r_min=590.0, out=out, log=log)
     ph = [i['phase'] for i in log]
     assert out['logic'].row == 'front' and res == 'PARKED_FIXED' and n_in == 4 and not hit
     assert ph.index('F_CHECK') < ph.index('F_BACK')
+
+
+# ---- 11/20 캡틴: 4·5·6번 빈칸 없음, 목표는 항상 1·2·3번 -> 돌고 나서 앞 확인 안 함 ----
+def test_backrow_off_by_default():
+    assert pn.DEFAULTS['fixed_backrow_mm'] == 0.0
+
+
+@pytest.mark.parametrize('cell', [1, 2, 3])
+def test_fixed_front_cell_no_check_no_backrow(cell):
+    """뒷줄 4·5·6 모두 차 -> 돌고 바로 앞칸 완료 + 5cm 후진. F_CHECK·F_STR 안 거침."""
+    parked = [i for i in range(1, 7) if i != cell]
+    out, log = {}, []
+    n_in, hit, res = drive(parked, cell, FIXED, y0=290.0, r_min=590.0, out=out, log=log)
+    ph = [i['phase'] for i in log]
+    assert res == 'PARKED_FIXED' and n_in == 4 and not hit
+    assert 'F_CHECK' not in ph and 'F_STR' not in ph and 'F_BACK' in ph
+    assert out['logic'].fixed_cell == cell
+
+
+def test_fixed_front_cell_finishes_even_if_ahead_looks_empty():
+    """앞(뒷칸 자리)에 아무것도 안 보여도(리모 인식 실패 등) 뒷칸으로 더 가지 않고 앞칸에서 끝."""
+    out, log = {}, []
+    n_in, hit, res = drive([1, 3], 2, FIXED, y0=290.0, r_min=590.0, out=out, log=log)
+    ph = [i['phase'] for i in log]
+    assert res == 'PARKED_FIXED' and 'F_STR' not in ph and out['logic'].row != 'back'
