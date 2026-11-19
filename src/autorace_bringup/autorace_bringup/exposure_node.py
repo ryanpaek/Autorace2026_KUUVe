@@ -6,10 +6,11 @@
 순서:
   1. 카메라 자동 노출이 settle_s 초 동안 자리 잡게 둠
   2. 그때 노출·게인·화이트밸런스를 읽고, 자동 노출·자동 화이트밸런스를 끔 (게인·WB는 그 값으로 고정)
-  3. period_s 마다 화면 아래쪽(바닥) 밝기를 보고 target_floor_v 가 되게 /camera/set_color_exposure
+  3. period_s 마다 화면 아래쪽에서 노란선 B 채널을 보고, 포화 직전이면 그만큼만 노출을 내림
+     (노란선이 안 보이면 바닥 밝기 상한으로). 자세한 규칙은 exposure_core.py
 서비스가 없거나 실패하면 아무것도 안 바꾸고 카메라 자동 노출 그대로 둠 (주행에는 영향 없음).
 
-/camera/exposure_state (String JSON, 1 Hz): {"state", "exp", "gain", "wb", "floor_v", "target"}
+/camera/exposure_state (String JSON, 1 Hz): {"state", "exp", "gain", "wb", "floor_v", "yellow_b", "yellow_px"}
 -> bag에 넣으면 다음부터 노출 값을 로그로 볼 수 있음 (11/19 bag에는 노출 값이 없었음).
 """
 import json
@@ -24,7 +25,7 @@ from sensor_msgs.msg import Image
 from std_msgs.msg import String
 from std_srvs.srv import SetBool
 
-from autorace_bringup.exposure_core import ExposureController, ExposureParams, floor_v
+from autorace_bringup.exposure_core import ExposureController, ExposureParams, measure
 
 try:
     from orbbec_camera_msgs.srv import GetInt32, SetInt32
@@ -55,17 +56,18 @@ class ExposureNode(Node):
         self.declare_parameter('settle_s', 3.0)
         self.declare_parameter('period_s', 0.5)
         self.declare_parameter('lock_wb', True)
-        for k in ('target_floor_v', 'deadband_v', 'gamma', 'kp', 'max_up', 'max_down', 'roi_top', 'roi_side'):
+        fk = ('yellow_b_max', 'yellow_b_min', 'floor_v_max', 'floor_v_min', 'gamma', 'kp', 'max_up', 'max_down',
+              'roi_top')
+        ik = ('yellow_s_min', 'yellow_min_px', 'min_exposure', 'max_exposure')
+        for k in fk:
             self.declare_parameter(k, float(getattr(d, k)))
-        self.declare_parameter('min_exposure', d.min_exposure)
-        self.declare_parameter('max_exposure', d.max_exposure)
+        for k in ik:
+            self.declare_parameter(k, int(getattr(d, k)))
         g = lambda k: self.get_parameter(k).value
-        self.p = ExposureParams(**{k: g(k) for k in (
-            'target_floor_v', 'deadband_v', 'gamma', 'kp', 'max_up', 'max_down', 'roi_top', 'roi_side',
-            'min_exposure', 'max_exposure')})
+        self.p = ExposureParams(**{k: g(k) for k in fk + ik})
 
         self.state = 'off' if not g('enable') else 'wait_image'
-        self.fv = None
+        self.m = None
         self.exp = self.gain = self.wb = None
         self.ctrl = None
         self.busy = False
@@ -97,14 +99,14 @@ class ExposureNode(Node):
         qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, history=HistoryPolicy.KEEP_LAST, depth=1)
         self.create_subscription(Image, g('image_topic'), self._on_image, qos)
         self.create_timer(float(g('period_s')), self._tick)
-        self.get_logger().info(f'exposure_node: 바닥 V 목표 {self.p.target_floor_v:.0f}, 자동 노출 {self.settle_s:.0f}초 뒤 잠금')
+        self.get_logger().info(f'exposure_node: 노란선 B {self.p.yellow_b_max:.0f} 넘으면 노출 내림, 자동 노출 {self.settle_s:.0f}초 뒤 잠금')
 
     # ---------- 입력 ----------
     def _on_image(self, msg):
         bgr = image_to_bgr(msg)
         if bgr is None:
             return
-        self.fv = floor_v(bgr, self.p)
+        self.m = measure(bgr, self.p)
         if self.t_first is None:
             self.t_first = time.monotonic()
 
@@ -149,8 +151,8 @@ class ExposureNode(Node):
                 self.state = 'read'
                 self._call('get_exp', None, self._got_exp)
             return
-        if self.state == 'control' and self.fv is not None:
-            new = self.ctrl.next_exposure(self.fv, self.exp)
+        if self.state == 'control' and self.m is not None:
+            new = self.ctrl.next_exposure(self.m, self.exp)
             if new is not None:
                 self._call('set_exp', new, lambda r, n=new: self._set_exp_done(n))
 
@@ -167,7 +169,7 @@ class ExposureNode(Node):
 
     def _got_wb(self, r):
         self.wb = int(r.data)
-        self.get_logger().info(f'자동 노출이 고른 값: 노출 {self.exp} 게인 {self.gain} WB {self.wb} (바닥 V {self.fv:.0f})')
+        self.get_logger().info(f'자동 노출이 고른 값: 노출 {self.exp} 게인 {self.gain} WB {self.wb} (바닥 V {self.m.floor_v:.0f}, 노란선 B {self.m.yellow_b})')
         self._call('ae', False, lambda r: self._call('set_exp', self.exp, lambda r: self._call(
             'set_gain', self.gain, lambda r: self._lock_wb())))
 
@@ -180,18 +182,20 @@ class ExposureNode(Node):
     def _start_control(self):
         self.ctrl = ExposureController(self.p, self.exp)
         self.state = 'control'
-        self.get_logger().info(f'잠금 완료. 노출 {self.p.min_exposure}~{self.ctrl.max_exp} 범위에서 바닥 V {self.p.target_floor_v:.0f}로 맞춤')
+        self.get_logger().info(f'잠금 완료. 노출 {self.p.min_exposure}~{self.ctrl.max_exp}, 노란선 B {self.p.yellow_b_min:.0f}~{self.p.yellow_b_max:.0f} 유지')
 
     def _set_exp_done(self, new):
-        self.get_logger().info(f'노출 {self.exp} -> {new} (바닥 V {self.fv:.0f}, 목표 {self.p.target_floor_v:.0f})',
+        yb = self.m.yellow_b
+        self.get_logger().info(f'노출 {self.exp} -> {new} (노란선 B {"-" if yb is None else f"{yb:.0f}"}, 바닥 V {self.m.floor_v:.0f})',
                                throttle_duration_sec=1.0)
         self.exp = new
 
     def _publish(self):
         m = String()
         m.data = json.dumps({'state': self.state, 'exp': self.exp, 'gain': self.gain, 'wb': self.wb,
-                             'floor_v': None if self.fv is None else round(self.fv, 1),
-                             'target': self.p.target_floor_v})
+                             'floor_v': None if self.m is None else round(self.m.floor_v, 1),
+                             'yellow_b': None if self.m is None or self.m.yellow_b is None else round(self.m.yellow_b, 1),
+                             'yellow_px': None if self.m is None else self.m.yellow_px})
         self.pub.publish(m)
 
 

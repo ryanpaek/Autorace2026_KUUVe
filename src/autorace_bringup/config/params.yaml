@@ -16,7 +16,7 @@ lane_node:
     seg_model_path: '/home/wego/autorace_ws/models/lane_seg_1031.onnx'   # 10/31 학습 (2클래스). 쓰려면 lane_mask_source: model
     seg_threshold: 0.5
     lane_color: yellow                     # 모의 맵 차선 노란색 확인 (10/30). 정지선은 흰색 마스크로 따로 찾음
-    white_v_min: 140                       # 11/19 180 -> 140: exposure_node가 바닥 V 85로 노출을 낮춤 (06 프레임 추정: 180이면 흰 픽셀 23%만 남음, 140이면 약 50%대). 되돌리려면 180 + cam_ae:=false
+    white_v_min: 180
     white_s_max: 60
     yellow_h_min: 15
     yellow_h_max: 40
@@ -387,19 +387,22 @@ ackermann_bridge:
     small_steer_below: 0.10
     steer_trim: 0.015                      # rad, 왼쪽 +. 0.0이면 끔
 
-# 11/19 카메라 노출 (bag 05·06: 노란 실선이 흰색으로 포화 -> M6 직선 차선 NONE).
-# 카메라 자동 노출은 3초 동안만 쓰고 잠근 뒤, 화면 아래쪽(바닥) 밝기 V가 target_floor_v가 되게 노출을 직접 맞춤.
+# 11/19 카메라 노출 (bag 05·06: 1번 코너 앞에서 노란 실선 B 채널까지 포화 -> 흰색으로 보여 차선 NONE).
+# 자동 노출은 3초만 쓰고 잠근 뒤, 화면 아래쪽의 노란선 B 채널이 포화 직전이면 그만큼만 노출을 내림.
+# 다른 색(흰선·신호등·표지판)은 원래 포화 근처라 거의 그대로: 검출 프레임 밝기 중앙 0.91배 (바닥 V 85 고정 방식은 0.64배).
 # 끄기: ros2 launch ... cam_ae:=false  (카메라 자동 노출 그대로)
 exposure_node:
   ros__parameters:
     enable: true
-    target_floor_v: 85.0                   # 05·06 프레임: 노란선 B/바닥 V 상위10% 1.77 -> 바닥 85면 노란 S 약 105 (yellow_s_min 80). 대회 때 바닥 V 중앙 120, 1번 코너 앞 150~190이었음
-    deadband_v: 8.0
+    yellow_b_max: 160.0                    # 노란선 B 상위10% 이 위면 내림 (R·G 포화 시 S = 255-B = 95 > yellow_s_min 80). 05: 인식되던 1000~1140 프레임 190~214 (경계), 실패 1160~ 255
+    yellow_b_min: 120.0                    # 이 밑이면 올림 (원래 밝기 쪽으로)
+    floor_v_max: 110.0                     # 노란선이 안 보일 때만 쓰는 바닥 V 상한 (05 실패 구간 141~166)
+    floor_v_min: 60.0
     gamma: 2.2                             # 영상 값 ~ 노출^(1/2.2) 가정 (실제 곡선 모름, kp로 천천히)
     kp: 0.6
-    max_up: 1.3
-    max_down: 0.6
-    roi_top: 0.55                          # 화면 아래 45%만 봄 (벽·관중석 제외)
+    max_up: 1.25
+    max_down: 0.7
+    roi_top: 0.55                          # 화면 아래 45%만 봄 (벽·천장·관중석 제외)
     settle_s: 3.0
     period_s: 0.5
-    lock_wb: true                          # 화이트밸런스도 시작 값으로 고정
+    lock_wb: true                          # 화이트밸런스도 시작 값으로 고정 (색감 유지)
