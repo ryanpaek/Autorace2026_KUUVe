@@ -339,8 +339,7 @@ parking_node:
     fixed_back_mm: 50.0                    # 11/18 캡틴: 다 돌고 바퀴 펴고 5cm 똑바로 후진한 뒤 완료 (0 = 안 함)
     fixed_back_speed: 0.06
     fixed_line_max_mm: 4000.0              # 선을 못 보고 이만큼 가면 FAIL_NO_LINE (정지)
-    fixed_line_confirm_mm: 30.0            # 11/20 시뮬: 처음 주차선은 3 cm 가는 동안 예상 자리(±6 cm)에 다시 보여야 잡음 (순간이동 전 낡은 선 1636 mm를 잡고 주차장 한가운데서 섬). 0 = 바로 잡음
-    fixed_line_confirm_tol_mm: 60.0
+    fixed_line_fresh_n: 2                  # 11/20 시뮬: 주차 모드 켜진 뒤 새 /lane/status 2개부터 처음 선을 잡음 (켜기 전 낡은 선 1636 mm를 잡고 주차장 한가운데서 섬). 0 = 바로
     fixed_line_creep: true                 # 11/20 시뮬: 선을 잡은 뒤 주차 구역에서 차선이 선을 놓쳐 속도 0 -> F_LINE 영원히 정지. 선 잡았으면 0.10 m/s로 방향 유지하며 선까지
     fixed_line_creep_min_v: 0.03           #   차선 속도가 이보다 작으면 '차선 멈춤'으로 봄 (m/s)
                                            #   목표 l5 = 5번 중심(없으면 1·3번 중점), Q(뒷바퀴) = l5 - arc_radius_mm. (target = 꼭짓점 기준 꺾기)

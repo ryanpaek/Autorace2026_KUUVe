@@ -866,14 +866,32 @@ def test_fixed_stale_line_at_arm_is_not_caught():
     d, stop_d = 0.0, None
     for i in range(3000):
         t = i * 0.05
+        # 0.4초 동안 새 메시지 없음(번호 그대로, 낡은 선) -> 그 뒤 메시지마다 번호 +1, 진짜 선 400 mm
         ls = [1636.0] if t < 0.4 else sorted(x for x in [400.0 - d] if 60.0 <= x <= 700.0)
+        seq = 10 if t < 0.4 else 10 + i
         v, k, info = lg.step({'t': t, 'dist_mm': d, 'yaw': 0.0, 'lane_v': 0.18, 'lane_w': 0.0,
-                              'stoplines_mm': ls, 'clusters': [], 'blocked': False})
+                              'stoplines_mm': ls, 'clusters': [], 'blocked': False, 'lane_seq': seq})
         if lg.phase == 'F_PAUSE':
             stop_d = d
             break
         d += v * 50.0
     assert stop_d == pytest.approx(400.0 - 56.0, abs=15.0)
+
+
+def test_fixed_practice_line_caught_while_standing():
+    """런 가이드 자리(선 352 mm, 카메라 아래 한계 근처): 서 있는 동안 새 메시지 2개면 바로 잡음 (움직일 필요 없음)."""
+    lg = pn.ParkingV2(dict(pn.DEFAULTS, **FIXED))
+    d, stop_d = 0.0, None
+    for i in range(400):
+        rel = 352.0 - d
+        ls = [rel] if rel >= 340.0 else []                  # 1 cm만 가도 카메라 밖
+        v, k, info = lg.step({'t': i * 0.05, 'dist_mm': d, 'yaw': 0.0, 'lane_v': 0.0 if i < 4 else 0.18, 'lane_w': 0.0,
+                              'stoplines_mm': ls, 'clusters': [], 'blocked': False, 'lane_seq': i})
+        if lg.phase == 'F_PAUSE':
+            stop_d = d
+            break
+        d += v * 50.0
+    assert stop_d == pytest.approx(352.0 - 56.0, abs=15.0)
 
 
 def test_fixed_no_line_seen_lane_stop_does_not_creep():
