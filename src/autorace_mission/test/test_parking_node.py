@@ -821,6 +821,88 @@ def test_fixed_full_run_skips_crosswalk_end_line():
     assert stop_d == pytest.approx(1950.0 - 56.0, abs=15.0)
 
 
+def _fixed_lane_lost(line_at, lost_below, over=None, blocked_until=-1.0):
+    """11/20 simcheck M4: 선이 lost_below(mm)보다 가까워지면 차선 노드가 선을 놓쳐 lane_v = 0 (선도 카메라 밖).
+    이때도 주차선 fixed_line_target_mm 앞에서 서야 함. blocked_until(초)까지는 앞에 물체."""
+    lg = pn.ParkingV2(dict(pn.DEFAULTS, **FIXED, **(over or {})))
+    d, info, stop_d, th = 0.0, None, None, 0.0
+    for i in range(3000):
+        rel = line_at - d
+        ls = [rel] if lost_below <= rel <= 700.0 else []
+        lane_v = 0.18 if rel > lost_below else 0.0
+        v, k, info = lg.step({'t': i * 0.05, 'dist_mm': d, 'yaw': th, 'lane_v': lane_v, 'lane_w': 0.0,
+                              'stoplines_mm': ls, 'clusters': [], 'blocked': i * 0.05 < blocked_until})
+        if lg.phase == 'F_PAUSE' and stop_d is None:
+            stop_d = d
+            break
+        d += v * 50.0
+        th += (k or 0.0) * v * 0.05 if v else 0.0
+        if info['done']:
+            break
+    return lg, stop_d
+
+
+def test_fixed_lane_lost_after_line_still_reaches_line():
+    """시뮬 재현: 선 380 mm 앞에서 차선이 멈춤(속도 0) -> 예전엔 F_LINE에서 영원히 정지. 이제 선까지 감."""
+    lg, stop_d = _fixed_lane_lost(616.0, 380.0)
+    assert stop_d == pytest.approx(616.0 - 56.0, abs=15.0)
+    assert lg._info()['creep_n'] >= 1
+
+
+def test_fixed_lane_lost_creep_off_keeps_old_behaviour():
+    lg, stop_d = _fixed_lane_lost(616.0, 380.0, over={'fixed_line_creep': False})
+    assert stop_d is None and lg.phase == 'F_LINE'
+
+
+def test_fixed_lane_lost_creep_waits_for_front_object():
+    """선 놓친 뒤 앞에 물체(라이다 blocked)면 기다렸다가 사라지면 감."""
+    lg, stop_d = _fixed_lane_lost(616.0, 380.0, blocked_until=8.0)
+    assert stop_d == pytest.approx(616.0 - 56.0, abs=15.0)
+
+
+def test_fixed_stale_line_at_arm_is_not_caught():
+    """시뮬 재현: 켜지는 순간 낡은 선 1636 mm가 0.4초 남아 있다가 사라지고, 진짜 선은 400 mm 앞 -> 진짜 선에서 섬."""
+    lg = pn.ParkingV2(dict(pn.DEFAULTS, **FIXED))
+    d, stop_d = 0.0, None
+    for i in range(3000):
+        t = i * 0.05
+        # 0.4초 동안 새 메시지 없음(번호 그대로, 낡은 선) -> 그 뒤 메시지마다 번호 +1, 진짜 선 400 mm
+        ls = [1636.0] if t < 0.4 else sorted(x for x in [400.0 - d] if 60.0 <= x <= 700.0)
+        seq = 10 if t < 0.4 else 10 + i
+        v, k, info = lg.step({'t': t, 'dist_mm': d, 'yaw': 0.0, 'lane_v': 0.18, 'lane_w': 0.0,
+                              'stoplines_mm': ls, 'clusters': [], 'blocked': False, 'lane_seq': seq})
+        if lg.phase == 'F_PAUSE':
+            stop_d = d
+            break
+        d += v * 50.0
+    assert stop_d == pytest.approx(400.0 - 56.0, abs=15.0)
+
+
+def test_fixed_practice_line_caught_while_standing():
+    """런 가이드 자리(선 352 mm, 카메라 아래 한계 근처): 서 있는 동안 새 메시지 2개면 바로 잡음 (움직일 필요 없음)."""
+    lg = pn.ParkingV2(dict(pn.DEFAULTS, **FIXED))
+    d, stop_d = 0.0, None
+    for i in range(400):
+        rel = 352.0 - d
+        ls = [rel] if rel >= 340.0 else []                  # 1 cm만 가도 카메라 밖
+        v, k, info = lg.step({'t': i * 0.05, 'dist_mm': d, 'yaw': 0.0, 'lane_v': 0.0 if i < 4 else 0.18, 'lane_w': 0.0,
+                              'stoplines_mm': ls, 'clusters': [], 'blocked': False, 'lane_seq': i})
+        if lg.phase == 'F_PAUSE':
+            stop_d = d
+            break
+        d += v * 50.0
+    assert stop_d == pytest.approx(352.0 - 56.0, abs=15.0)
+
+
+def test_fixed_no_line_seen_lane_stop_does_not_creep():
+    """선을 아직 못 잡았으면(end_d 없음) 차선이 멈출 때 같이 멈춤 (아무 데로나 가지 않음)."""
+    lg = pn.ParkingV2(dict(pn.DEFAULTS, **FIXED))
+    for i in range(40):
+        v, k, info = lg.step({'t': i * 0.05, 'dist_mm': 0.0, 'yaw': 0.0, 'lane_v': 0.0, 'lane_w': 0.0,
+                              'stoplines_mm': [], 'clusters': [], 'blocked': False})
+    assert v == 0.0 and lg.phase == 'F_LINE'
+
+
 # ---- 11/17 공지: 빈 칸 랜덤 (한 칸만 비움) -> 선에서 라이다로 빈 칸 찾기 ----
 @pytest.mark.parametrize('empty', [1, 2, 3])
 @pytest.mark.parametrize('r_min', [590.0, 620.0])

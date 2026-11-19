@@ -319,6 +319,7 @@ class ParkingV2:
         self.side_seen = False
         self.side_line = None      # 양옆 옆면으로 구한 선 (깊이에만 씀)     # 꺾은 뒤 양옆 리모로 칸 가운데 선을 한 번이라도 구했나
         self.end_d = self.end_at = None   # 칸 끝 선(카메라): 마지막으로 본 거리, 그때 누적 거리
+        self.line_seq0 = None             # 11/20 fixed: F_LINE 들어올 때 차선 메시지 번호
         self.stop_how = None       # 'side' | 'memory' | 'camera' | 'cap' (어떻게 멈췄나, 디버그)
         self.err = None            # 마지막 재정렬 판단 값 (옆 mm, 방향 도)
         # 11/13 실차: 양옆 리모 정중앙 맞추기 + 앞뒤 바꿀 때 멈춤 + 옆 감시에 걸리면 끝내지 말고 후진 뒤 다시
@@ -1271,6 +1272,7 @@ class ParkingV2:
             self.trigger = 'fixed'
             self.turn_ref_used = 'fixed'
             self.lane_cfg = {'target_offset_mm': p['target_offset_mm']}   # (publish_lane_cfg일 때만 보냄. 보통 미션 노드가 50 보냄)
+            self.line_seq0 = inp.get('lane_seq')
             self._enter('F_LINE', inp)
         moved = inp['dist_mm'] - self.d_phase
 
@@ -1283,6 +1285,12 @@ class ParkingV2:
                     #   set_state)은 선이 약 35cm 앞이라 잡는다. (예전 ignore_mm 300은 연습 때 선을 버려 지나쳤음)
                     far = [d for d in lines if d >= p['fixed_first_min_mm']]
                     cand = far[0] if far else None
+                    # 11/20 시뮬: 주차 모드가 켜지는 순간 /lane/status가 예전 자리(순간이동 전)의 선 1636 mm를 들고 있어
+                    #   그 '없는 선'을 잡고 주차장 한가운데서 섬. -> F_LINE에 들어온 뒤 새로 받은 차선 메시지가
+                    #   fixed_line_fresh_n개 넘어야 처음 선을 잡음 (켜기 전 메시지는 안 씀. lane_seq 없으면 그냥 씀)
+                    seq, seq0 = inp.get('lane_seq'), getattr(self, 'line_seq0', None)
+                    if seq is not None and seq0 is not None and seq - seq0 < p['fixed_line_fresh_n']:
+                        cand = None
                 else:                                     # 이미 잡은 선과 가까운 것만 (다른 선으로 안 갈아탐)
                     pred = self.end_d - (inp['dist_mm'] - self.end_at)
                     near = [d for d in lines if abs(d - pred) < 150.0]
@@ -1299,6 +1307,23 @@ class ParkingV2:
                 self._enter('F_PAUSE', inp)
                 return self._out(0.0, 0.0)
             v = inp['lane_v']
+            # 11/20 시뮬(simcheck M4): 선을 잡은 뒤(남은 380 mm) 주차 구역에서 차선 노드가 선을 놓쳐 /lane/cmd_vel = 0
+            #   -> 그 속도를 그대로 따라 F_LINE에서 영원히 정지(116 s). 선을 잡았으면 차선 속도가 0이어도
+            #   fixed_slow_speed로 '선 잡을 때까지 차선이 가던 방향'(IMU)을 지키며 남은 거리만큼 감. 앞에 물체면 기다림.
+            if p['fixed_line_creep'] and v < p['fixed_line_creep_min_v']:
+                if inp['blocked']:
+                    return self._out(0.0, 0.0)
+                if not getattr(self, 'creep_on', False):
+                    self.creep_on = True
+                    self.creep_n = getattr(self, 'creep_n', 0) + 1
+                k = 0.0
+                if inp['yaw'] is not None and getattr(self, 'creep_yaw', None) is not None:
+                    k = -p['fixed_heading_gain'] * wrap(inp['yaw'] - self.creep_yaw)
+                    k = max(-1.0, min(1.0, k))
+                return self._out(p['fixed_slow_speed'], k)
+            self.creep_on = False
+            if inp['yaw'] is not None:
+                self.creep_yaw = inp['yaw']                   # 차선이 살아 있을 때 방향 (선 놓치면 이 방향 유지)
             if remain < p['fixed_line_target_mm'] + 250.0:
                 v = min(v, p['fixed_slow_speed'])          # 선 25cm 앞부터 천천히 (밀림 줄임)
             return self._out(v, None)
@@ -1332,6 +1357,7 @@ class ParkingV2:
                     self.rejects = getattr(self, 'rejects', 0) + 1
                     self.reject_log = getattr(self, 'reject_log', []) + [{'occ': self.occ_n, 'avg': self.cell_avg}]
                     self.end_d, self.end_at, self.cell_cnt, self.detect_extra = None, None, None, False
+                    self.line_seq0 = inp.get('lane_seq')
                     self._enter('F_LINE', inp)
                     return self._out(inp['lane_v'], None)
                 cell = self._pick_cell()
@@ -1641,7 +1667,8 @@ class ParkingV2:
         return {'phase': self.phase, 'done': self.phase == 'DONE', 'result': self.result,
                 'backs': self.backs, 'realigns': self.realigns, 'last_err': self.err,
                 'back_mm': getattr(self, 'back_done_mm', None), 'rejects': getattr(self, 'rejects', 0), 'occ_n': getattr(self, 'occ_n', None), 'cell': getattr(self, 'fixed_cell', None), 'cell_src': getattr(self, 'cell_src', None), 'cell_a': getattr(self, 'cell_a', None), 'cell_b': getattr(self, 'cell_b', None), 'cell_avg': getattr(self, 'cell_avg', None), 'row': self.row, 'stop_how': self.stop_how, 'trigger': self.trigger, 'turn_ref': self.turn_ref_used, 'corner_s': None if self.corner_s is None else round(self.corner_s), 'corner_n': self.corner_n, 'turn_at': self.turn_at, 'target_s': None if self.target_s is None else round(self.target_s), 'target_src': self.target_src, 'n_c5': len(self.tgt_c5), 'n_pm': len(self.tgt_pm), 'q_s': self.q_s, 'r_meas': None if self.r_meas is None else round(self.r_meas), 'fix_n': self.fix_n, 'fix_pred': self.fix_pred,
-                'end_mm': None if self.end_d is None else round(self.end_d)}
+                'end_mm': None if self.end_d is None else round(self.end_d),
+                'creep': getattr(self, 'creep_on', False), 'creep_n': getattr(self, 'creep_n', 0)}
 
 
 DEFAULTS = {
@@ -1681,6 +1708,9 @@ DEFAULTS = {
     'fixed_brake_mm': 0.0,     #   정지 명령 뒤 밀리는 거리 (미측정 -> 0). 실차에서 지나치면 그만큼 넣기
     'fixed_slow_speed': 0.10,  #   선 25cm 앞부터 이 속도 이하
     'fixed_line_max_mm': 4000.0,   # 주차 모드 시작 뒤 이만큼 가도 선을 못 보면 FAIL_NO_LINE (정지)
+    'fixed_line_fresh_n': 2,       # 11/20: F_LINE에 들어온 뒤 새 /lane/status가 이만큼 와야 처음 선을 잡음 (켜기 전 낡은 선 무시). 0 = 바로
+    'fixed_line_creep': True,      # 11/20: 선을 잡은 뒤 차선 속도가 0(선 놓침)이어도 fixed_slow_speed로 방향 유지하며 선까지 감
+    'fixed_line_creep_min_v': 0.03,   #   차선 속도가 이보다 작으면 '차선이 멈춤'으로 봄 (m/s)
     'fixed_pause_sec': 0.3,    # 선에서 멈추는 시간
     'fixed_move_mm': 870.0,    # 멈춘 자리부터 직진 거리 (11/16 캡틴 실차 확정)
     'fixed_move_speed': 0.10,
@@ -1889,6 +1919,7 @@ def main(args=None):
             """/lane/status에서 흰 선 거리 목록만 꺼낸다."""
             try:
                 d = json.loads(m.data)
+                self.lane_seq = getattr(self, 'lane_seq', 0) + 1     # 11/20: 메시지 번호 (켜기 전 낡은 선 구분)
                 self.stoplines = [float(x) for x in d.get('stoplines_mm', [])]
                 # 칸 끝 선: 흰·노란 가로선 (옛 lane 노드면 흰 선만)
                 self.end_lines = [float(x) for x in d.get('end_lines_mm', d.get('stoplines_mm', []))]
@@ -1953,6 +1984,7 @@ def main(args=None):
                 v, k, info = self.logic.step({
                     't': time.monotonic(), 'dist_mm': self.dist_mm, 'yaw': self.yaw,
                     'lane_v': self.lane_v, 'lane_w': self.lane_w, 'stoplines_mm': self.stoplines,
+                    'lane_seq': getattr(self, 'lane_seq', 0),
                     'end_lines_mm': self.end_lines, 'armed': bool(self.mstate.get('parking_armed', True)),
                     'clusters': clusters, 'blocked': blocked, 'points': points, 'points_far': points_far, 'clusters_pair': clusters_pair, 'clusters_single': clusters_single,
                     'clusters_box': clusters_box})
