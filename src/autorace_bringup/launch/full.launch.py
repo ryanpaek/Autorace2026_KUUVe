@@ -10,6 +10,7 @@
   debug_control:=false  디버그 화면 미션 조작 버튼 끄기 (대회 때. 비상 정지 버튼은 계속 됨)
   chime:=false          주차 완료 '띠링'(차 스피커) 끄기
   cam_exp_level:=0~4    카메라 노출 단계를 이번 실행만 바꿈 (평소엔 비워 둠 -> ros2 run autorace_bringup cam_level N 으로 저장한 값. 11/19)
+  yellow_side:=true     노란 선 옆 거리 노드 켜기 (/lane/yellow_side, 조향 안 함, 11/19)
   manual:=true          위치 확인용 수동 주행. mission_node가 /cmd_vel을 안 냄 -> teleop으로 조종 (11/11)
 카메라는 컬러만 켠다 (depth·ir를 켜고 전체 녹화하면 드라이버가 죽은 적 있음, 11/09).
 """
@@ -34,7 +35,7 @@ def _inc(pkg, *path, args=None, condition=None):
 def generate_launch_description():
     sensors = IfCondition(LaunchConfiguration('sensors'))
     passed = ('start_state', 'parking', 'm7_avoid', 'm7_impl', 'use_fork_node', 'use_detector', 'use_class_commands',
-              'manual', 'chime', 'debug_control')
+              'manual', 'chime', 'debug_control', 'yellow_side')
     return LaunchDescription([
         DeclareLaunchArgument('sensors', default_value='true'),
         DeclareLaunchArgument('cam_exp_level', default_value='saved'),
@@ -48,6 +49,7 @@ def generate_launch_description():
         DeclareLaunchArgument('manual', default_value='false'),
         DeclareLaunchArgument('chime', default_value='true'),
         DeclareLaunchArgument('debug_control', default_value='true'),
+        DeclareLaunchArgument('yellow_side', default_value='false'),   # 11/19 노란 선 옆 거리 노드 (기록용)
         _inc('limo_base', 'launch', 'limo_base_ackerman.launch.py', condition=sensors),
         _inc('ydlidar_ros2_driver', 'launch', 'ydlidar.launch.py', condition=sensors),
         _inc('orbbec_camera', 'launch', 'dabai.launch.py',

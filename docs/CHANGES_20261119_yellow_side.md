@@ -7,7 +7,7 @@ lane_node의 `yellow_l_mm/yellow_r_mm`은 3차선 모드에서만 계산되고, 
 
 ## 무엇
 - `autorace_lane/yellow_side.py` (계산), `yellow_side_node.py` (ROS), `test/test_yellow_side.py` (20개)
-- launch `yellow_side:=true`일 때만 뜸 (기본 false). params.yaml 맨 끝 `yellow_side_node` 칸
+- launch `yellow_side:=true`일 때만 뜸 (기본 false). full.launch.py, autorace.launch.py 둘 다 됨 params.yaml 맨 끝 `yellow_side_node` 칸
 - 노란색 임계값은 params.yaml의 lane_node 값을 그대로 읽음 (두 노드 값이 어긋나지 않게)
 
 ## 흐름
