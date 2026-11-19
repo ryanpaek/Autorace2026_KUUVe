@@ -67,6 +67,11 @@ DEFAULT_PARAMS = {
     # 카메라 사각지대(앞바퀴 약 350mm 안) 직전부터는 뒤따르는 횡단보도 블록을 정지선으로 다시 잡기 쉽다 (11/09)
     'stop_freeze_mm': 450.0,
     'stop_route_gate_mm': 300.0,  # 처음 잡는 선이 도면 예측과 이만큼 넘게 다르면 버림 (끝선 540mm 뒤)
+    # 11/19 1119_08·09: 빨간불 확정(PAUSE_UNTIL_GREEN)인데 도면 위치가 3~22 m 틀려 정지선을 도면 기준으로만 계산 -> 안 섬.
+    #   카메라는 횡단보도 정지선을 1.3~1.8 m 앞에서 보고 있었는데 stop_route_gate_mm(300)로 버려짐.
+    #   M1 정지 준비(빨간불·초록·도면 근처) 뒤에는 도면과 상관없이 카메라 횡단보도 선(이 거리 안, 3프레임 연속)을 정지선으로 씀.
+    #   카메라가 선을 보는 동안은 도면 위치로 서지 않음. 카메라에 선이 없을 때만 예전처럼 도면. 0 = 끔
+    'm1_red_camera_max_mm': 2200.0,
     'stop_camera_first': False,   # 11/15: True면 도면 예측과 달라도 같은 횡단보도 선이 3프레임 연속이면 카메라 선을 씀
                                   #   (1114 리플레이: 코너 끝 가짜 횡단보도 선을 잡아 0.7 m 일찍 섬 -> 끔. 도면 위치는 코너 맞추기로 정확)
     'stop_pretrack': True,        # 11/15: M6·M1 준비 전부터 횡단보도 정지선을 카메라로 따라감
@@ -339,6 +344,9 @@ class StopApproach:
         self.camera_first = camera_first
         self.persist_frames = 3
         self.allow_route_start = True   # False: 카메라로 못 봤으면 도면 위치로 출발점을 잡지 않음 (준비 전 따라가기용)
+        self.camera_force_mm = 0.0      # 11/19: >0이면 도면 무시, 이 거리 안 카메라 선을 3프레임 연속이면 씀 (M1 빨간불)
+        self.camera_drop_mm = 550.0     #   그때 가짜 선 거르기: 이보다 멀리 있어야 할 선이
+        self.camera_drop_after_mm = 150.0   #   이만큼 달리는 동안 안 보이면 버림
 
     def _route_pred(self, inp: Inputs) -> Optional[float]:
         if self.route_line_s is None or inp.route_s is None:
@@ -353,6 +361,36 @@ class StopApproach:
             lines = inp.lane.get('stoplines_mm') or []
         frozen = (self.freeze_mm > 0.0 and self.seen_d is not None
                   and self._predicted(inp) < self.freeze_mm)
+        if self.camera_force_mm > 0.0 and lines and (self.seen_d is None or self.how != 'camera'):
+            # 11/19: 아직 카메라로 못 잡았거나(도면만) 도면으로 시작했으면, 가장 가까운 카메라 선이 3프레임 연속일 때 그 선으로
+            near = min(lines)
+            if 0.0 < near <= self.camera_force_mm:
+                c = self._camera_persist(near, inp)
+                if c is not None:
+                    self.seen_d, self.seen_at, self.how = c, inp.dist_mm, 'camera'
+                    self.forced = True
+                else:
+                    return near                         # 확정 전(1~2프레임)에도 도면 대신 카메라 거리로 판단
+        if self.camera_force_mm > 0.0 and self.how == 'camera':
+            # 카메라로 잡은 뒤에는 도면 예측과 비교해 갈아타지 않음 (아래 route gate 갈아타기 건너뜀)
+            matched = False
+            if lines and not frozen:
+                ref = self._predicted(inp)
+                cand = min(lines, key=lambda d: abs(d - ref))
+                if abs(cand - ref) < 150.0:
+                    self.seen_d, self.seen_at = cand, inp.dist_mm
+                    matched = True
+            # 가짜 선 거르기 (도면 없이): 진짜 선은 화면 아래(약 350 mm)까지 보이다 사라진다.
+            #   아직 멀리(> camera_drop_mm) 있어야 할 선이 camera_drop_after_mm 넘게 안 보이면 버리고 다시 잡는다
+            if (not matched and not frozen and self._predicted(inp) > self.camera_drop_mm
+                    and inp.dist_mm - self.seen_at > self.camera_drop_after_mm):
+                self.seen_d = self.seen_at = self.how = None
+                self._rej = None
+                return None
+            travelled = inp.dist_mm - self.seen_at
+            if travelled > self.seen_d + self.lost_ok_mm:
+                return None
+            return self.seen_d - travelled
         if lines and not frozen and self.seen_d is not None and self.route_gate_mm > 0.0:
             # 11/15: 처음 잡은 선이 가짜(횡단보도 막대로 잘못 표시된 다른 선)였으면, 도면 예측 gate 안에 있고
             #   지금 따라가는 선과는 gate 넘게 다른 카메라 선이 보일 때 그 선으로 갈아탄다 (1114_04 리플레이: 코너 끝 가짜 선)
@@ -701,6 +739,10 @@ class MissionFSM:
             self.stop = self._new_stop(line)
         self.pre_stop, self.pre_stop_name = None, None
         self.stop_line_name = line
+        cf = self.p.get('m1_red_camera_max_mm', 0.0)
+        if line == 'm1_stop_line' and cf > 0 and self.stop is not None:
+            self.stop.camera_force_mm = cf               # 11/19: 신호등 정지선은 카메라 우선 (도면 무시)
+            self.log.append(f'M1: camera stop line first (within {cf:.0f}mm, route ignored)')
 
     def _pretrack_stop(self, inp: Inputs) -> None:
         """신호등 정지 준비 전부터 횡단보도 정지선을 카메라로 따라간다 (M1 준비 전 -> M1 정지선)."""

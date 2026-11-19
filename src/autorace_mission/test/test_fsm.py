@@ -1169,3 +1169,30 @@ def test_m1_corner_lane_underturn_uses_forced_arc():
         cmd = good.step(Inputs(t=0.05 * i, dist_mm=20.0 * i, yaw=0.0, confirmed_classes=set(),
                                lane={'status': 'BOTH', 'kappa': -1.5}))
     assert cmd.lane['mode'] != 'heading'
+
+
+# ---------------------------------------------------------------- 11/19 빨간불이면 카메라 정지선 우선
+@pytest.mark.parametrize('route_off', [17000.0, -3000.0, 0.0])
+def test_m1_red_stops_at_camera_line_even_if_route_is_off(route_off):
+    """1119_08·09: 빨간불 확정인데 도면 위치가 틀려(정지선 17~22 m 앞으로 계산) 카메라 정지선을 버리고 안 섬"""
+    line_s = 27176.0
+    fsm = MissionFSM({'start_state': 'M1_TRAFFIC', 'stop_brake_mm': 0.0,
+                      'route_points': {'m1_stop_line': line_s}})
+    sim = Sim(fsm, dt=0.02)
+    line_at = 1800.0                                     # 진짜 정지선: 출발 1.8 m 앞
+    s0 = line_s - line_at - route_off                    # 도면 위치 (route_off만큼 틀림)
+    stopped_at = None
+    for i in range(1500):
+        remaining = line_at - sim.dist
+        lane = {'crosswalk_lines_mm': [remaining] if 120 < remaining < 1900 else [],
+                'stoplines_mm': [remaining] if 120 < remaining < 1900 else []}
+        sim.tick(detections={'red': 0.9}, lane=lane, route_s=s0 + sim.dist)
+        if fsm.sub == 'stopped' and stopped_at is None:
+            stopped_at = remaining
+        if stopped_at is not None and sim.t > 20.0:
+            break
+    assert stopped_at is not None, fsm.log[-5:]
+    assert abs(stopped_at - fsm.p['stop_target_mm']) <= 60.0     # 목표(150) ±6 cm 안에서 정지 명령
+    assert fsm.sub == 'stopped'
+    if route_off:
+        assert any('camera stop line first' in m for m in fsm.log)
