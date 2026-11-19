@@ -251,6 +251,7 @@ class LaneParams:
     lost_search_deg: float = 30.0
     lost_search_mm: float = 350.0
     lost_search_speed: float = 0.6     # 찾는 동안 속도 비율
+    lost_never_stop: bool = False      # 11/20 yubin: 찾기까지 다 해도 못 찾으면 정지 대신 직선 방향 유지(천천히). 미션 노드가 M2·합류에서만 켬
     hold_axis_deg: float = 999.0       # 놓쳤을 때 붙잡을 직선 방향 (IMU yaw, deg). 999 = 없음 (마지막 차선 방향)
     corner_inner_line: bool = True
     corner_inner_ahead_mm: float = 600.0
@@ -1873,6 +1874,12 @@ class LaneFollower:
                 sk = self._lost_search(yaw, dist_mm, speed) if p.lost_search else None
                 if sk is not None:
                     source, kappa_raw = 'search', sk
+                    out.speed_scale = p.lost_search_speed
+                elif p.lost_never_stop:
+                    # 멈추면 15초 Time-out으로 미션 실패 -> 붙잡은 직선 방향으로 천천히 계속 (선이 다시 보이면 차선으로)
+                    ref = math.radians(p.hold_axis_deg) if abs(p.hold_axis_deg) <= 360.0 else self.hold_yaw_ref
+                    source = 'hold'
+                    kappa_raw = self._heading_kappa(yaw, ref, speed) if (yaw is not None and ref is not None) else 0.0
                     out.speed_scale = p.lost_search_speed
                 else:
                     source, kappa_raw = 'stop', 0.0

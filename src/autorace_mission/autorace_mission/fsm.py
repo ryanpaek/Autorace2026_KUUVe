@@ -1100,9 +1100,11 @@ class MissionFSM:
                 return Command('lane', self._lane(self.p['base_speed']))
             if self.p.get('m2_island_ref', True) and self.fork_choice in ('A', 'B'):
                 mode = 'right_only' if self.fork_choice == 'A' else 'left_only'
+                # 11/20 yubin: 선을 놓치면 정지(15초 Time-out -> M2 실패) 대신 직선 방향 유지 (lost_never_stop)
                 return Command('lane', self._lane(self.p['approach_speed'], mode, island_ref=True,
-                                                  lane_width_mm=self.p.get('m2_island_lane_width_mm', 520.0)))
-            return Command('lane', self._lane(self.p['approach_speed']))
+                                                  lane_width_mm=self.p.get('m2_island_lane_width_mm', 520.0),
+                                                  lost_never_stop=True))
+            return Command('lane', self._lane(self.p['approach_speed'], lost_never_stop=True))
         mode = 'left_only' if self.fork_choice == 'A' else 'right_only'
         if self.p.get('fork_normal', True):
             # 11/16: 섬 앞 끝을 지나 갈래 안에 들어오면 양쪽 선(바깥선 + 섬 선)을 다 보는 보통 차선 모드.
@@ -1243,6 +1245,7 @@ class MissionFSM:
         """M2_EXIT 동안만: 코너 앞(미리보기 0)은 차선 그대로 (m2x_zero_lane), 코너 lookahead (corner_preview_lookahead_mm)"""
         kw = {}
         if self.state == 'M2_EXIT':
+            kw['lost_never_stop'] = True                # 11/20 yubin: 합류 끝 ~ 라바콘 시작선에서 선 놓쳐도 정지 안 함
             if self.p.get('m2x_zero_lane', True):
                 kw['route_corner_zero_lane'] = True
             kw.update(self._corner_look())          # 11/19: 합류 끝 ~ 라바콘 시작선 (코너 뒤 짧은 직선까지 같은 값)
