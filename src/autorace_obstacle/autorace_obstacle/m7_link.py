@@ -71,6 +71,11 @@ class M7LinkParams:
     retry_sec: float = 0.5
     # 켤 때까지 갈림길 표지를 못 읽었으면: 'auto'(회피 노드가 고름) | 'A' | 'B'
     fork_fallback: str = 'auto'
+    # 11/19 실차 요청: M7을 건너뛰고(실패 뒤 M2 바로 앞에 놓고) M2_FORK로 시작하면 갈림길 녹화 재생을 아무도 안 해 직진 -> 표지판에 박음.
+    #   FSM이 M7이 아닌 상태에서 M2_FORK로 들어오고 이번 판 M7 끝 차로가 없으면: 'M7은 m2only_lane_no 차선에서 끝남'을
+    #   /m7/exit_lane으로 먼저 보내고, 회피 노드를 M2만 모드(m2_test_start)로 켜 갈림길 녹화를 재생 -> 끝난 갈래를 다시 보고
+    m2only_enable: bool = True
+    m2only_lane_no: int = 2             # 1 / 2 / 3차선 (기본 2차선 = 가운데)
     # 정지 유지: 회피 노드는 실행 중 /avoid/active true를 20 Hz로 낸다
     active_timeout_sec: float = 1.0     # 이보다 오래 안 오면 죽은 것으로 보고 정지 (11/10 0.5 -> 1.0: CPU가 바빠 잠깐 늦는 것까지 멈춤으로 봤음)
     hold_resume: bool = True            # 소식 끊김으로 멈췄는데 active true가 다시 오면(노드가 잠깐 느렸던 것) 멈춤을 풀고 계속
@@ -412,6 +417,7 @@ class M7Link:
         self.avoid_running = False
         self.avoid_target = None
         self.avoid_lane = None       # 회피 노드가 지금 있다고 보는 차로 (/avoid/state now_lane)
+        self.avoid_end_lane = None   # 회피 노드가 M2 갈림길 재생을 시작했으면 끝나는 차로 (/avoid/state end_lane)
         self.front_mm = None         # 라이다 -> 앞 차로 안 가장 가까운 장애물 (mm), obstacle_node가 넣어 줌
         self.sign_buf = deque(maxlen=max(1, int(self.p.off_sign_window)))
         self.sign_seen = False       # 표지를 확실히 봤나
@@ -422,6 +428,9 @@ class M7Link:
         self.sign_pass_dist = None   # '지나감'을 안 순간의 달린 거리 (mm)
         self.off_by = None           # 'sign' | 'avoid_done'
         self.report = None           # M7이 끝날 때 한 번 내보낼 차로 (exit_report), obstacle_node가 pop
+        self.last_report_lane = None  # 마지막으로 보고한 끝 차로 (DONE 상태로 다시 정할 때 비교)
+        self.m2only = False           # M7 없이 M2만 회피 노드로 재생 중(또는 끝)
+        self.prev_state = None        # 지난 /mission/state state (M2로 어디서 들어왔나)
         # 지금 몇 차선인지 (늘): 회피 중이면 회피 노드 차로(카메라 선 종류로 이미 맞춘 값), 아니면 차선 노드 lane_id 투표
         self.cam_ids = deque(maxlen=7)
         self.cam_lane = None         # 차선 노드 lane_id 를 7번 중 5번 같으면 확정 (+1/0/-1)
@@ -471,12 +480,24 @@ class M7Link:
             self.avoid_dy = abs(float(st['y']) - 0.52 * float(st['target']))
         if 'lane_why' in st:
             self.avoid_why = st.get('lane_why') or {}
+        if st.get('end_lane') in LANE_NUMBER:
+            self.avoid_end_lane = st.get('end_lane')
         if 'now_lane' in st:
             self.avoid_lane = st.get('now_lane')
             if self.phase in ('armed', 'running') and self.avoid_lane in LANE_NUMBER:
                 self.last_lane = (self.avoid_lane, 'avoid')   # 회피가 끝난 직후에도 그 차로를 기억
         if self.avoid_running and self.phase == 'armed':
             self.phase = 'running'
+        if st.get('state') == 'DONE' and self.phase == 'done' and self.off_by == 'avoid_done':
+            # 11/19 bag 보고서: /avoid/done을 마지막 /avoid/state(DONE)보다 먼저 처리하면 직전 RUN 값으로 끝 차로를 정했다
+            #   -> 마지막 상태가 오면 그 값으로 다시 정하고, 다르면 다시 보고
+            lane = self._end_lane()
+            fork = lane_to_fork(lane)
+            if fork != self.exit_fork or (self.last_report_lane is not None and lane != self.last_report_lane):
+                self.events.append(f'회피 끝 상태로 끝 차로 고침: {self.last_report_lane} -> {lane} ({self.exit_fork} -> {fork})')
+                self.exit_fork = fork
+                self.report = exit_report(lane, 'avoid_done')
+                self.last_report_lane = lane
 
     def on_scan_points(self, pts) -> None:
         """라이다 한 바퀴 (차 기준점 좌표 mm 점들). 코너를 도는 동안(켜기 전)만 미리보기에 쌓는다."""
@@ -524,6 +545,8 @@ class M7Link:
             self.sign_near = True
 
     def _end_lane(self):
+        if self.avoid_end_lane is not None:          # M2 갈림길 재생: 재생이 끝나는 갈래 차로 (시작 차로 아님)
+            return self.avoid_end_lane
         return self.avoid_lane if self.avoid_lane is not None else self.avoid_target
 
     def pop_report(self) -> Optional[dict]:
@@ -534,9 +557,12 @@ class M7Link:
         if done and self.phase in ('armed', 'running'):
             self.off_by = 'avoid_done'
             self.phase = 'done'
-            self.report = exit_report(self._end_lane(), 'avoid_done')
-            self.exit_fork = lane_to_fork(self.avoid_target)
-            self.events.append(f'회피 완료 (마지막 차로 {self.avoid_target} -> {self.exit_fork})')
+            lane = self._end_lane()
+            self.report = exit_report(lane, 'avoid_done')
+            self.last_report_lane = lane
+            # 끝 보고(/m7/exit_lane)와 m7_exit(A/B)가 같은 차로를 쓰게 (예전: m7_exit만 target, 보고는 now_lane)
+            self.exit_fork = lane_to_fork(lane if self.avoid_end_lane is not None else self.avoid_target)
+            self.events.append(f'회피 완료 (마지막 차로 {lane} -> {self.exit_fork})')
 
     # --- 지금 몇 차선 (늘) ------------------------------------------------------
     def watch_lane_id(self, lane: dict) -> None:
@@ -605,6 +631,25 @@ class M7Link:
         self.watch_lane_id(lane)
         state = mission.get('state')
         dist = float(mission.get('dist_mm') or 0.0)
+        prev, self.prev_state = self.prev_state, state
+
+        if state == 'M2_FORK' and self.p.m2only_enable:
+            if (prev != 'M2_FORK' and prev != M7_STATE and mission.get('m7_exit_lane') is None
+                    and self.phase not in ('armed', 'running')):
+                self._start_m2only(t, out)
+            if self.m2only:
+                fork = mission.get('fork_choice')
+                if fork in ('A', 'B') and fork != self.fork_sent:
+                    out.append(('fork', fork))
+                    self.fork_sent = fork
+                if self.phase in ('armed', 'running'):
+                    self._check_hold(t)
+                return out
+        if self.m2only and self.phase in ('armed', 'running') and state != 'M2_FORK':
+            out.append(('disable',))
+            self.events.append(f'FSM이 M2를 벗어남({state}) -> M2 녹화 재생 중단')
+            self.phase = 'aborted'
+            self.m2only = False
 
         if state != M7_STATE:
             if self.in_m7 and self.phase in ('armed', 'running'):
@@ -617,6 +662,7 @@ class M7Link:
 
         if not self.in_m7:                      # M7에 새로 들어옴
             self.in_m7 = True
+            self.m2only = False
             if self.cam_lane is None:
                 self.last_lane = (0, 'start')   # 3차선 구간은 가운데로 들어감 -> 카메라가 확정하기 전에도 2차선 (지난 판 값은 버림)
             self.phase = 'idle'
@@ -819,6 +865,25 @@ class M7Link:
             return None
         return why
 
+    def _start_m2only(self, t: float, out: list) -> None:
+        """M7을 건너뛰고 M2로 시작: 'M7 끝 = m2only_lane_no 차선' 보고 + 회피 노드를 M2만 모드로 켬."""
+        n = int(self.p.m2only_lane_no) if int(self.p.m2only_lane_no) in (1, 2, 3) else 2
+        k = {1: 1, 2: 0, 3: -1}[n]
+        self.m2only = True
+        self.phase = 'armed'
+        self.claimed = self.hold = False
+        self.hold_kind = None
+        self.active_t = self.release_t = None
+        self.off_by = None
+        self.avoid_target = self.avoid_lane = self.avoid_end_lane = None
+        self.exit_fork = None
+        self.fork_sent = None
+        self.report = exit_report(k, 'm2_start')
+        self.last_report_lane = k
+        self.enable_t = t
+        out.append(('enable_m2', k))
+        self.events.append(f'M7 없이 M2로 시작 -> M7은 {n}차선에서 끝났다고 보고, 회피 노드 M2만 모드로 갈림길 녹화 재생')
+
     def _check_hold(self, t: float) -> None:
         if self.hold or not self.claimed or self.phase != 'running':
             return
@@ -916,7 +981,11 @@ class M7Link:
                 'm7_lane_src': (self.lane_now() or {}).get('src'),
                 'm7_line_d_mm': None if self.line is None else round(self.line[0]),
                 'm7_heading_forced': self.heading_forced,
-                'm7_pre': self._pre_state()}
+                'm7_pre': self._pre_state(),
+                # M7 없이 M2만 재생 (FSM M2_FORK가 이 동안 회피 노드 명령을 씀)
+                'm2_replay_active': self.m2only and self.phase in ('armed', 'running') and not self.hold,
+                'm2_replay_hold': self.m2only and (self.hold or (self.phase == 'running' and self.release_t is not None)),
+                'm2_replay_done': self.m2only and self.phase == 'done'}
 
     def _pre_state(self) -> Optional[dict]:
         d = self.pre.decision

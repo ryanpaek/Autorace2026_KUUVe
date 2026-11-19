@@ -1196,3 +1196,13 @@ def test_m1_red_stops_at_camera_line_even_if_route_is_off(route_off):
     assert fsm.sub == 'stopped'
     if route_off:
         assert any('camera stop line first' in m for m in fsm.log)
+def test_m2_only_replay_uses_avoid_node_then_follows_branch():
+    """11/19: M7 없이 M2로 시작 -> obstacle_node가 M2만 재생을 켬. 그동안 회피 노드 명령(직진 차선 주행 아님), 끊기면 정지,
+    끝나면 들어간 갈래(m7_exit)를 따름"""
+    fsm = MissionFSM({'start_state': 'M2_FORK'})
+    cmd = fsm.step(Inputs(t=0.0, dist_mm=0.0, obstacle={'m2_replay_active': True}))
+    assert cmd.source == 'obstacle' and 'M7 skipped' in cmd.note
+    cmd = fsm.step(Inputs(t=0.1, dist_mm=10.0, obstacle={'m2_replay_hold': True}))
+    assert cmd.source == 'stop'
+    cmd = fsm.step(Inputs(t=5.0, dist_mm=1300.0, obstacle={'m2_replay_done': True, 'm7_exit': 'B'}))
+    assert fsm.state == 'M2_FORK' and fsm.fork_choice == 'B' and cmd.source == 'lane'

@@ -276,8 +276,9 @@ class MissionNode(Node):
     def _obstacle_input(self) -> dict:
         """M2에서 /obstacle/state에 m7_exit가 없으면(obstacle_node 재시작 등) /m7/exit_lane 값으로 채운다."""
         ob = self.obstacle
-        if getattr(self, 'practice_m2', False) and self.fsm.state == 'M2_FORK':
+        if getattr(self, 'practice_m2', False) and self.fsm.state == 'M2_FORK' and not (ob or {}).get('m2_replay_done'):
             # 연습으로 M2에 바로 들어옴: 지난 주행의 M7 종료 차로(obstacle_node가 계속 내는 m7_exit)는 쓰지 않는다
+            #   (11/19: 이번에 M7 없이 M2만 재생을 끝냈으면 m2_replay_done -> 그 갈래는 이번 판 값이라 씀)
             return {k: v for k, v in (ob or {}).items() if k != 'm7_exit'}
         ex = getattr(self, 'm7_exit_lane', None) or {}
         if self.fsm.state == 'M2_FORK' and ob.get('m7_exit') not in ('A', 'B') and ex.get('fork') in ('A', 'B'):

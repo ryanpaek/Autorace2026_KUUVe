@@ -71,7 +71,7 @@ def test_safety_still_stops_right_before_sign():
 
 
 def test_center_lane_with_sign_starts_m2_instead_of_stopping():
-    m = _at(0.0)
+    m = _at(0.0, m2_wait_sign_s=0.0)   # 표지 모름 대기(11/19)는 test_m2_wait_sign에서
     m.offset = (m.m2_x() - 0.01, 0.0, 0.0)
     _scan_world(m, _pole(m.p.section_length - 0.03))
     m.step(1.0)
@@ -79,7 +79,7 @@ def test_center_lane_with_sign_starts_m2_instead_of_stopping():
 
 
 def test_late_m2_backs_up_to_start_when_path_hits_now():
-    m = _at(0.0)
+    m = _at(0.0, m2_wait_sign_s=0.0)   # 표지 모름 대기(11/19)는 test_m2_wait_sign에서
     x_m2 = m.m2_x()
     m.offset = (x_m2 + 0.35, 0.0, 0.0)                      # 늦게 옴 (late_max 0.40 안)
     # 지금 자리에 붙인 녹화 길에만 닿는 물체: 지금 자리 기준 앞 0.6 m, 왼쪽 0.20 m (녹화 시작 자리 기준이면 이미 더 왼쪽으로 지나감)
@@ -110,3 +110,134 @@ def test_late_m2_backs_up_to_start_when_path_hits_now():
     assert m.state in ('CRUISE', 'EXEC')
     m.step(3.1)
     assert m.state == 'EXEC' and m.m2_run == key
+
+
+def test_m2_replay_reports_branch_as_target_from_start():
+    """11/19 bag 4차: 재생 중 target·끝 보고가 '재생 시작 차로'였다 -> 시작하자마자 갈래 차로"""
+    m = _at(0.0, lane=1)
+    m.set_exit('B')
+    m.offset = (m.m2_x() - 0.01, 0.52, 0.0)
+    _scan_world(m, [])
+    m.step(1.0)
+    assert m.state == 'EXEC' and m.m2_run == (1, 'B')
+    st = m.status()
+    assert st['target'] == -1 and st['end_lane'] == -1 and st['now_lane'] == 1
+
+
+def test_m2_wait_sign_then_default_or_sign():
+    """11/19: M2 시작 자리에서 A/B를 모르면 한 번 m2_wait_sign_s까지 서서 기다림 -> 오면 그 갈래, 안 오면 기본"""
+    m = _at(0.0)
+    m.offset = (m.m2_x() - 0.01, 0.0, 0.0)
+    _scan_world(m, [])
+    v, _ = m.step(1.0)
+    assert v == 0.0 and m.state == 'CRUISE' and '표지 기다림' in m.why
+    m.set_exit('B')
+    m.step(1.5)
+    assert m.state == 'EXEC' and m.m2_run == (0, 'B')
+    m = _at(0.0)
+    m.offset = (m.m2_x() - 0.01, 0.0, 0.0)
+    _scan_world(m, [])
+    m.step(1.0)
+    m.step(2.0)
+    assert m.state == 'CRUISE'
+    m.step(3.05)                                          # 2초 지남 -> 기본 A
+    assert m.state == 'EXEC' and m.m2_run == (0, 'A')
+
+
+def test_sign_slow_when_fork_sign_seen():
+    """섬 앞 2.5 m 안에서 표지가 보이는데 아직 A/B 모름 -> 천천히. 정해지면 원래 속도"""
+    m = _at(2.0)
+    m.p.speed = 0.17
+    _scan_world(m, [])
+    v, _ = m.step(1.0)
+    assert abs(v - 0.17) < 1e-9
+    m.on_detections(1.1, [{'cls': 'fork_b', 'conf': 0.8}])
+    v, _ = m.step(1.2)
+    assert abs(v - m.p.sign_slow_speed) < 1e-9 and m.status()['sign_slow']
+    v, _ = m.step(2.5)                                    # 1초 넘게 안 보임 -> 원래 속도
+    assert abs(v - 0.17) < 1e-9
+    m.on_detections(3.0, [{'cls': 'fork_a', 'conf': 0.3}])  # 낮은 신뢰도는 안 셈
+    v, _ = m.step(3.1)
+    assert abs(v - 0.17) < 1e-9
+    m.on_detections(3.2, [{'cls': 'fork_a', 'conf': 0.9}])
+    m.set_exit('A')                                       # 정해짐 -> 원래 속도
+    v, _ = m.step(3.3)
+    assert abs(v - 0.17) < 1e-9
+    m2 = _at(0.5)                                         # 섬에서 멂 -> 보여도 안 늦춤
+    m2.p.speed = 0.17
+    _scan_world(m2, [])
+    m2.on_detections(1.0, [{'cls': 'fork_b', 'conf': 0.9}])
+    v, _ = m2.step(1.1)
+    assert abs(v - 0.17) < 1e-9
+
+
+def test_sign_anchor_moves_tip_to_isolated_pole():
+    """라이다 표지판 막대가 도면 꼭짓점보다 20 cm 앞에 3스캔 -> 꼭짓점 = 막대 자리"""
+    m = _at(3.0)
+    tip0 = m.p.section_length
+    for _ in range(3):
+        _scan_world(m, _pole(tip0 - 0.20))
+    assert abs(m.p.section_length - (tip0 - 0.20)) < 0.02, m.events
+    assert any('표지판으로 섬 앞 꼭짓점 고침' in e for e in m.events)
+
+
+def test_sign_anchor_ignores_limo_piece_and_far_or_big_moves():
+    m = _at(3.0)
+    tip0 = m.p.section_length
+    limo = [(tip0 - 0.30 + 0.02 * i, -0.30 + 0.023 * j) for i in range(16) for j in range(8)]   # 막대 옆에 LIMO
+    for _ in range(3):
+        _scan_world(m, _pole(tip0 - 0.20, 0.0) + [q for q in limo if q[1] < -0.10])
+    assert m.p.section_length == tip0                     # 둘레에 다른 물체 -> 안 씀
+    m2 = _at(1.0)
+    for _ in range(3):
+        _scan_world(m2, _pole(tip0 - 0.20))               # 3 m 넘게 멂 -> 안 씀
+    assert m2.p.section_length == tip0
+
+
+def _m2only(pole_gap, lane=0):
+    """M7 없이 M2만(m2_test_start): 켤 때 자리 = 녹화 시작 자리라고 가정. 실제 표지판은 라이다 pole_gap 앞."""
+    m = M7Replay(ReplayParams(m2_test_start=True, start_lane_no=2), default_change(1), default_change(-1))
+    m.set_m2(_m2_paths(), {k: 't' for k in _m2_paths()})
+    m.start()
+    m.scan_t = 0.0
+    m.set_exit('B')
+    x, _, _ = m.pose()
+    return m, x + m.p.lidar_x + pole_gap
+
+
+def _run_m2only(m, pole_x, n=30, dt=0.05):
+    t = 1.0
+    for _ in range(n):
+        _scan_world(m, _pole(pole_x))
+        v, _ = m.step(t)
+        dx, dy, dpsi = m.offset
+        m.offset = (dx + v * dt, dy, dpsi)
+        t += dt
+        if m.state in ('EXEC', 'BACKUP'):
+            break
+    return m
+
+
+def test_m2_only_pole_closer_than_recorded_start_backs_up():
+    """녹화 시작 = 앞범퍼~꼭짓점 1.0 m (라이다~막대 0.9 m)인데 막대가 0.6 m -> 꼭짓점 고치고 0.3 m 후진"""
+    m, pole_x = _m2only(0.60)
+    _run_m2only(m, pole_x)
+    assert m.sign_anchored is not None and abs(m.p.section_length - pole_x) < 0.03
+    assert m.state == 'BACKUP' and m.backup['to_x'] == m.m2_x()
+
+
+def test_m2_only_pole_farther_drives_up_slowly_then_replays_branch():
+    m, pole_x = _m2only(1.40)
+    m.on_detections(1.0, [{'cls': 'fork_b', 'conf': 0.9}])
+    _run_m2only(m, pole_x, n=200)
+    assert abs(m.p.section_length - pole_x) < 0.03
+    assert m.state == 'EXEC' and m.m2_run == (0, 'B') and m.status()['end_lane'] == -1
+    x, _, _ = m.pose()
+    assert abs(x - m.m2_x()) < 0.06                      # 녹화 시작 자리에서 시작
+
+
+def test_m2_only_waits_for_pole_before_replay():
+    m, pole_x = _m2only(0.90)
+    _scan_world(m, [])
+    v, _ = m.step(1.0)
+    assert v == 0.0 and '표지판 찾는 중' in m.why

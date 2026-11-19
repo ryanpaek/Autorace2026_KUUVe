@@ -7,6 +7,7 @@
                                 start_heading_deg, start_y 를 파라미터로 넣어 준다 (예전 avoid_node와 같음)
       /fork_direction (String)  A | B (FSM 갈림길 투표)
       /scan, /odom, /imu, /lane/status (String JSON)
+      /perception/detections (String JSON)  갈림길 표지(fork_a/fork_b)가 보이면 차로 따라가기 속도를 줄임 (sign_slow)
 출력  /avoid/cmd_vel (Twist)    launch에서 /obstacle/cmd_vel로 remap -> mission_node가 M7 동안 고름
       /avoid/active (Bool)      실행 중 20 Hz true (m7_link가 끊기면 정지시킴)
       /avoid/done (Bool)        끝 (m7_link -> FSM M2)
@@ -53,7 +54,8 @@ class M7ReplayNode(Node):
         self.declare_parameter('path_left', os.path.join(d, 'm7_left.csv') if d else '')
         self.declare_parameter('path_right', os.path.join(d, 'm7_right.csv') if d else '')
         for name, val in (('scan_topic', '/scan'), ('odom_topic', '/odom'), ('imu_topic', '/imu'),
-                          ('lane_status_topic', '/lane/status'), ('odom_timeout', 0.3), ('scan_timeout', 0.5),
+                          ('lane_status_topic', '/lane/status'), ('det_topic', '/perception/detections'),
+                          ('odom_timeout', 0.3), ('scan_timeout', 0.5),
                           ('range_min', 0.10), ('range_max', 3.0), ('scan_yaw_offset_deg', 0.0), ('scan_flip', False),
                           ('dry_run', False)):
             self.declare_parameter(name, val)
@@ -94,6 +96,7 @@ class M7ReplayNode(Node):
         self.create_subscription(Odometry, self.gp('odom_topic'), self.on_odom, qos_profile_sensor_data)
         self.create_subscription(Imu, self.gp('imu_topic'), self.on_imu, qos_profile_sensor_data)
         self.create_subscription(String, self.gp('lane_status_topic'), self.on_lane, 10)
+        self.create_subscription(String, self.gp('det_topic'), self.on_det, 10)   # 갈림길 표지 보이면 천천히 (sign_slow)
         self.t_odom = self.t_scan = None
         self.active = False
         self.k = 0
@@ -148,6 +151,14 @@ class M7ReplayNode(Node):
             return
         try:
             self.core.on_lane(json.loads(m.data), time.monotonic())
+        except (ValueError, TypeError, AttributeError):
+            pass
+
+    def on_det(self, m):
+        if not self.active:
+            return
+        try:
+            self.core.on_detections(time.monotonic(), json.loads(m.data).get('detections', []))
         except (ValueError, TypeError, AttributeError):
             pass
 
