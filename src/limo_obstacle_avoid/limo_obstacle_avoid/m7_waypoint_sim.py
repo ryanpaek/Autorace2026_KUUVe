@@ -3,7 +3,8 @@
   python3 -m limo_obstacle_avoid.m7_waypoint_sim --runs 40 --entry straight
   python3 -m limo_obstacle_avoid.m7_waypoint_sim --runs 40 --entry wide --reverse 3
 
-세계: 3차선(차로 0.52 m, 바깥 노란선 ±0.78), 정차 LIMO 7대(가로 0.22 x 0.32), 벽 ±1.3 m.
+세계: 3차선(차로 0.52 m, 바깥 노란선 ±0.78), 정차 LIMO 7대(차로 방향 0.32 x 폭 0.22, 11/19 실차. --cross면 예전 0.22 x 0.32), 벽 ±1.3 m.
+--ped: 3차로(-1)에 사람 다리(지름 0.12 m)가 0.07 m/s로 앞으로 걷다 5 s 뒤 사라짐 (11/19 13번 판)
 1차 대회 배치(11/19)를 앞뒤 ±0.2 m·옆 ±3 cm·각도 ±4°, 전체 ±0.15 m 흔들어 씀. M2 방향 무작위.
 라이다 240°·1°·10 Hz·노이즈 8 mm, 조향: 명령 0.3 s 지연 → 실제 곡률 = gain x 명령 + bias, 반응 0.1 s, |곡률| <= 1.6.
 odom 거리 배율 오차, IMU 자이로 배율·편향 → PoseFusion 그대로.
@@ -19,7 +20,9 @@ from limo_obstacle_avoid.m7_waypoint_core import M7Waypoint, WaypointParams, rec
 BASE = [(1.08, 1, 0, 0), (1.09, 0, 0, 1), (4.41, 1, 0, 3), (3.27, 0, 3, 1), (2.17, 1, -4, 0), (2.16, -1, 0, 0), (4.42, -1, -2, 2)]
 ENTRY = {'straight': (0.0, 0.04, 0.0, 1.5), 'normal': (0.05, 0.08, 5.0, 3.0),
          'wide': (0.15, 0.08, 10.0, 3.0), 'inside': (-0.52, 0.06, 0.0, 4.0)}
-LW, ALONG, ACROSS, LINE = 0.52, 0.22, 0.32, 0.78
+LW, LINE = 0.52, 0.78
+ALONG, ACROSS = 0.32, 0.22
+PED_S = 5.0
 
 
 def layout(seed):
@@ -30,8 +33,12 @@ def layout(seed):
     return obs, ('A' if r.random() < 0.5 else 'B')
 
 
-def segments(obs):
+def segments(obs, ped=None):
     segs = []
+    if ped is not None:
+        px, py, r = ped
+        sq = [(px + r, py + r), (px - r, py + r), (px - r, py - r), (px + r, py - r)]
+        segs += [(sq[i][0], sq[i][1], sq[(i + 1) % 4][0], sq[(i + 1) % 4][1]) for i in range(4)]
     for x, y, th in obs:
         c = rect(x, y, th, ALONG, ACROSS)
         segs += [(c[i][0], c[i][1], c[(i + 1) % 4][0], c[(i + 1) % 4][1]) for i in range(4)]
@@ -61,7 +68,7 @@ def raycast(x, y, psi, segs, lidar_x, rng, rmax=3.0):
     return out
 
 
-def run(seed, entry='straight', overrides=None, gain=0.74 * 1.2, bias=-0.051 + 0.075, t_max=120.0):
+def run(seed, entry='straight', overrides=None, gain=0.74 * 1.2, bias=-0.051 + 0.075, t_max=120.0, ped=False, core_cls=None):
     rng = random.Random(seed * 104729 + 7)
     obs, fork = layout(seed)
     segs = segments(obs)
@@ -73,7 +80,7 @@ def run(seed, entry='straight', overrides=None, gain=0.74 * 1.2, bias=-0.051 + 0
     p.section_length = 5.6 + p.end_before
     if entry == 'inside':
         p.start_lane = -1
-    core = M7Waypoint(p)
+    core = (core_cls or M7Waypoint)(p)
     core.set_exit(fork)
     # 위치를 다 알 때 통과 가능한가 (같은 계획기)
     k0 = -1 if entry == 'inside' else 0
@@ -102,7 +109,10 @@ def run(seed, entry='straight', overrides=None, gain=0.74 * 1.2, bias=-0.051 + 0
     while t - t0 < t_max:
         if t >= next_scan:
             next_scan += 0.1
-            core.on_scan(t, raycast(X, Y, PSI, segs, p.lidar_x, rng), math.radians(-120), math.radians(120))
+            sg = segs
+            if ped and t - t0 < PED_S:
+                sg = segs + segments([], (1.0 + 0.07 * (t - t0), -LW, 0.06))
+            core.on_scan(t, raycast(X, Y, PSI, sg, p.lidar_x, rng), math.radians(-120), math.radians(120))
         if t >= next_ctl:
             next_ctl += 0.05
             v, k_cmd = core.step(t)
@@ -126,6 +136,10 @@ def run(seed, entry='straight', overrides=None, gain=0.74 * 1.2, bias=-0.051 + 0
         me = rect_ref(X, Y, PSI, p.robot_front, p.robot_rear, p.robot_half_width)
         if any(sat_overlap(me, r) for r in rects):
             contact = True
+        if ped and t - t0 < PED_S:
+            px = 1.0 + 0.07 * (t - t0)
+            if sat_overlap(me, rect(px, -LW, 0.0, 0.12, 0.12)):
+                contact = True
         c, s = math.cos(PSI), math.sin(PSI)
         wl = [Y + ax * s + ay * c for ax, ay in ((0.1, 0.09), (-0.1, 0.09))]
         wr = [Y + ax * s + ay * c for ax, ay in ((0.1, -0.09), (-0.1, -0.09))]
@@ -146,11 +160,18 @@ def main():
     ap.add_argument('--roll', type=float, default=1.0)
     ap.add_argument('--prior', action='store_true', help='1차 대회 배치를 예상 배치로 넣음')
     ap.add_argument('--start', type=int, default=0)
+    ap.add_argument('--ped', action='store_true', help='3차로에 걸어가는 사람 (5 s)')
+    ap.add_argument('--cross', action='store_true', help='정차 LIMO 예전 가로 0.22 x 0.32')
     a = ap.parse_args()
+    if a.cross:
+        global ALONG, ACROSS
+        ALONG, ACROSS = 0.22, 0.32
     ov = {'reverse_max': a.reverse, 'roll_dist': a.roll}
+    if a.cross:
+        ov.update(obs_along=0.22, obs_across=0.32)
     if a.prior:
         ov['prior_xy'] = [v for x, k, lat, _ in BASE for v in (x, k * LW + lat / 100)]
-    rs_all = [run(a.start + i, a.entry, ov) for i in range(a.runs)]
+    rs_all = [run(a.start + i, a.entry, ov, ped=a.ped) for i in range(a.runs)]
     rs = [r for r in rs_all if r['feasible']]
     print(f'위치를 다 알아도 못 지나가는 배치 {len(rs_all) - len(rs)}/{len(rs_all)} 제외')
     n = max(1, len(rs))
