@@ -10,17 +10,20 @@
 
 ## 1. 처음 한 번: 코드 받고 빌드 (LIMO에 ssh 접속 후 통째로 붙여넣기)
 
+PR #145가 main에 merge된 뒤에 실행 (LIMO를 최신 main으로 맞추고 `autorace_bringup`만 빌드).
+
 ```bash
 source /opt/ros/humble/setup.bash
 PKG=$(find ~ -maxdepth 5 -type d -path "*/src/autorace_bringup" -not -path "*/install/*" -not -path "*/build/*" 2>/dev/null | head -1)
 REPO=$(git -C "$PKG" rev-parse --show-toplevel)
 WS="$PKG"; while [ "$WS" != "/" ] && [ ! -d "$WS/install" ]; do WS=$(dirname "$WS"); done
 echo "레포: $REPO / 워크스페이스: $WS"
-cd "$REPO" && if [ -n "$(git status --porcelain --untracked-files=no)" ]; then echo "!! LIMO에 저장 안 된 수정이 있어서 멈춤 (아래 목록 확인)"; git status --short --untracked-files=no; else git fetch origin claude/camera-exposure-1119 && git checkout claude/camera-exposure-1119 && git reset --hard origin/claude/camera-exposure-1119 && git log -1 --oneline && cd "$WS" && colcon build --packages-select autorace_bringup && source install/setup.bash && ros2 pkg executables autorace_bringup; fi
+cd "$REPO" && if [ -n "$(git status --porcelain --untracked-files=no)" ]; then echo "!! LIMO에 저장 안 된 수정이 있어서 멈춤 (아래 목록 확인)"; git status --short --untracked-files=no; else git fetch origin main && git checkout main && git merge --ff-only origin/main && git log -1 --oneline && cd "$WS" && colcon build --packages-select autorace_bringup && source install/setup.bash && ros2 pkg executables autorace_bringup; fi
 ```
 
 - 성공하면 마지막 줄에 `autorace_bringup cam_level`과 `autorace_bringup exposure_node`가 보임
 - `저장 안 된 수정이 있어서 멈춤`이 나오면: LIMO에서 누가 고친 파일이 있다는 뜻. 아무것도 안 바뀌었으니 그 목록을 담당자에게 전달
+- `Not possible to fast-forward`가 나오면: LIMO main에 push 안 된 커밋이 있다는 뜻. 역시 아무것도 안 바뀜, 담당자에게 전달
 
 ---
 
