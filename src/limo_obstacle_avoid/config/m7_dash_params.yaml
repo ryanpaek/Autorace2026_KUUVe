@@ -1,0 +1,32 @@
+# M7 점선 기준 회피 + M2 갈림길 진입 (m7_dash_node). 팀 주행: autorace.launch.py m7_impl:=dash(기본) / 단독: m7_dash.launch.py
+# 실행 중 바꾸기: ros2 param set /avoid_node <이름> <값> (다음 /avoid/enable true 때 반영)
+# 실수 값은 꼭 소수점까지 (ROS2가 정수/실수 타입을 구분함)
+# 회피 값은 시뮬 탐색으로 고름 (lookahead 0.25~0.45 x latency 0~0.3 x shift_len 0.5~0.9 x 속도 x 옆 여유)
+/**:
+  ros__parameters:
+    speed: 0.20
+    tight_speed: 0.14            # 연속 회피 빈 칸이 짧을 때
+    lookahead: 0.25              # 0.45는 코너를 깎아 멈춤 잦음. 실차에서 좌우로 떨면 0.30
+    latency: 0.2                 # 조향 지연 보상 (s)
+    shift_len: 0.70
+    clear: 0.05                  # 장애물 옆 여유. 같은 자리 재판단 때 1 cm씩 줄여 최소 clear_min까지
+    clear_min: 0.015
+    clear_x: 0.03
+    hold_rear: 0.05
+    start_shift_len: 0.9         # 켠 자리(가운데 차로 중심) -> 점선으로 옮기는 길이
+    # M2: 섬 앞 꼭짓점 - m2_start_gap - 앞범퍼에서 m2_{2|3}-{A|B}.csv 재생 (replay와 같은 녹화·같은 시작 거리)
+    m2_replay: true
+    m2_start_gap: 1.00
+    m2_pre_len: 0.80             # M2 시작 이만큼 전부터 갈래 쪽 차로 중심으로 (A = 가운데, B = 오른쪽)
+    m2_late_max: 0.40
+    m2_fork_default: 'A'
+    m2_speed: 0.20
+    # 멈추면: 0.8 s 뒤 재판단(기억 비우고 다시 봄) -> 길 있으면 감 / 다른 곡률로 비켜 감 / 후진 20 cm(머리 목표 쪽으로 돌며, 최대 4번)
+    recover_wait: 0.8
+    recover_rev_max: 4           # 0 = 후진 안 함
+    yellow_r_y: -0.52            # 오른쪽 노란선 안쪽 모서리 (점선 기준) — 실측
+    white_v_min: 180             # params.yaml lane_node와 같은 값
+    white_s_max: 60
+    # 단독 시험에서 M2를 끄면(m2_replay: false): end_by_sign true -> 표지판 상자 높이로 끝
+    end_by_sign: false
+    end_sign_h_px: 60.0          # ★ 실측: 멈추고 싶은 자리에서 ros2 topic echo /avoid/state 의 sign_h 값
