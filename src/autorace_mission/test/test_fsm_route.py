@@ -313,3 +313,18 @@ def test_m7_practice_start_sets_axis_for_m2_hold():
     fsm._goto('M2_FORK', Inputs(t=5.0, dist_mm=4000.0, yaw=_m.radians(31.0)), 'obstacle zone done')
     cmd = fsm.step(Inputs(t=5.1, dist_mm=4010.0, yaw=_m.radians(31.0), obstacle={'m7_exit': 'A'}))
     assert cmd.lane['island_ref'] is True and cmd.lane['hold_axis_deg'] == pytest.approx(10.0)
+
+
+def test_m2_merge_plain_runs_s_curve_after_island_ref():
+    """11/20 yubin: m2_merge_plain이면 일반 차선(섬 기준) 뒤에도 합류 강제 S자 (A = 오른쪽으로 옮김 -> yaw_ref 오른쪽 = 음수)"""
+    fsm = _m2_fsm(m2_merge_plain=True)
+    fsm.fork_choice, fsm.axis_yaw = 'A', 0.0
+    modes, d = [], 0.0
+    while d < 3500.0:
+        cmd = fsm.step(Inputs(t=d / 200.0, dist_mm=d, yaw=0.0, lane={'status': 'NONE'}, obstacle={'m7_exit': 'A'}))
+        modes.append((cmd.lane or {}).get('mode'))
+        if cmd.lane.get('mode') == 'heading':
+            assert cmd.lane['yaw_ref'] < 0.0
+        d += 20.0
+    assert modes[0] == 'right_only' and 'heading' in modes
+    assert fsm.m2m is not None

@@ -185,6 +185,7 @@ DEFAULT_PARAMS = {
     'fork_normal_after_mm': 300.0,
     'fork_normal_after_dist_mm': 700.0,   #   도면 위치가 없으면 갈림길 시작부터 이 거리 뒤
     'm2_merge': True,
+    'm2_merge_plain': False,           # 11/20 yubin: m2_plain_lane에서도 합류 강제 S자 (params.yaml에서 켬). sim_1: 직선 그대로 가 합류 사선 바깥선을 넘음
     'm2_merge_before_end_mm': 500.0,   # 섬 왼쪽 끝(m2_island_end)보다 이만큼 앞에서 시작 (자기 차로 안에서 먼저 안쪽으로)
     'm2_merge_from_tip_mm': 1245.0,    # 도면 위치가 없을 때: M2 시작(섬 앞 끝 근처)부터 이만큼 가서 시작 (섬 길이 1745 - 500)
     'm2_merge_len_mm': 1100.0,
@@ -1102,6 +1103,9 @@ class MissionFSM:
             if (db >= self.p['fork_len_mm'] + self.fork_adj_mm) if end is None else end:
                 self._next(inp, f'fork {self.fork_choice} done')
                 return Command('lane', self._lane(self.p['base_speed']))
+            merge_cmd = self._m2_merge(inp, db)      # m2_merge_plain일 때만 (섬 끝 500 mm 앞에서 S자 시작, M2_EXIT까지 이어짐)
+            if merge_cmd is not None:
+                return merge_cmd
             if self.p.get('m2_island_ref', True) and self.fork_choice in ('A', 'B'):
                 mode = 'right_only' if self.fork_choice == 'A' else 'left_only'
                 # 11/20 yubin: 선을 놓치면 정지(15초 Time-out -> M2 실패) 대신 갈래 직선 방향 유지 (lost_never_stop)
@@ -1182,7 +1186,7 @@ class MissionFSM:
     def _m2_merge(self, inp, db: Optional[float] = None) -> Optional[Command]:
         """A/B 뒤 합류: 도면 규격으로 강제 S자 (m2_merge 설명). 하는 중이면 명령, 아니면 None."""
         p = self.p
-        if p.get('m2_plain_lane', True):
+        if p.get('m2_plain_lane', True) and not p.get('m2_merge_plain', False):
             return None                                  # 11/18: 일반 차선만 (합류 강제 S자 안 씀)
         if not p.get('m2_merge', True) or inp.yaw is None or self.fork_choice not in ('A', 'B'):
             return None
