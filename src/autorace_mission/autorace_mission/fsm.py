@@ -531,7 +531,9 @@ class MissionFSM:
             self.m2x_extra = (max(0.0, me - inp.route_s) if me is not None and inp.route_s is not None
                               else dflt)
             dev = self.p.get('m2_route_max_dev_mm', 0.0)
-            if dev > 0 and abs(self.m2x_extra - dflt) > dev and why not in ('manual', 'init'):
+            if self.fork_choice == 'A' and not self.p.get('m2_fork_adj_a', True):
+                self.m2x_extra = dflt   # 11/20 yubin: A는 도면 위치가 앞서 남은 거리 ~0 -> 코너를 x 1.9에서 꺾어 안쪽 밟음 (B 1.6~1.75)
+            elif dev > 0 and abs(self.m2x_extra - dflt) > dev and why not in ('manual', 'init'):
                 # 11/19: 도면 위치가 틀리면 합류 끝까지 거리를 도면 규격으로 (M2 끝을 거리로 잡았을 때와 같은 기준)
                 self.log.append(f'M2_EXIT corner start: route extra {self.m2x_extra:.0f}mm ignored -> {dflt:.0f}mm')
                 self.m2x_extra = dflt

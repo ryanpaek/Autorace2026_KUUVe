@@ -377,3 +377,13 @@ def test_m2_fork_a_ignores_tip_and_route_when_disabled():
                             obstacle={'m7_exit': choice, 'm7_to_tip_mm': -400.0}))
             d += 10.0
         assert abs(d - 10.0 - want) <= 30.0, (choice, d)
+
+
+def test_m2x_corner_start_a_uses_spec_extra_when_disabled():
+    """11/20 yubin: m2_fork_adj_a false면 A의 M2_EXIT 코너 시작은 도면 위치(앞섬) 대신 규격 거리(합류 끝까지 354 mm)"""
+    for choice, want in (('A', 354.0), ('B', 0.0)):
+        fsm = MissionFSM({'start_state': 'M2_FORK', 'm2_fork_adj_a': False,
+                          'route_points': {'m2_merge_end': 20272.0, 'm2_island_end': 19718.0}})
+        fsm.fork_choice = choice
+        fsm._goto('M2_EXIT', Inputs(t=1.0, dist_mm=2000.0, route_s=20300.0, yaw=0.0), 'fork done')
+        assert fsm.m2x_extra == pytest.approx(want), choice
