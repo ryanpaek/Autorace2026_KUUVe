@@ -156,6 +156,11 @@ DEFAULT_PARAMS = {
     # 11/18: M2 CSV 재생이 끝나면 그냥 일반 차선 주행. 한쪽 선 모드(left/right_only)·좁은 폭(460)·직선 방향 붙잡기·
     #   합류 강제 S자(m2_merge)를 전부 건너뜀. M2_EXIT의 좌하단 코너 미리보기는 그대로. false면 예전 동작
     'm2_plain_lane': True,
+    # 11/19: M2 CSV 재생 뒤 섬 기준 차선 (차선 노드 island_ref): A면 섬 왼쪽 변을 오른쪽 선으로(right_only),
+    #   B면 섬 오른쪽 변을 왼쪽 선으로(left_only), 바닥 글자(A/B = 차로 가운데)가 보이면 그 위치로 섬 변을 고름.
+    #   1119_09: 일반 차선이 섬 양쪽 변을 한 차로로 묶어 섬 위로 감. false = 예전 일반 차선
+    'm2_island_ref': True,
+    'm2_island_lane_width_mm': 520.0,   # 섬 변 ~ 차로 가운데 = 이 값의 반 (차로 500 + 선 20)
     'fork_normal': True,             # 11/16: 갈래 안(섬 앞 끝 + fork_normal_after_mm)부터 양쪽 선 보통 차선 모드
     'fork_normal_after_mm': 300.0,
     'fork_normal_after_dist_mm': 700.0,   #   도면 위치가 없으면 갈림길 시작부터 이 거리 뒤
@@ -990,6 +995,10 @@ class MissionFSM:
             if (db >= self.p['fork_len_mm'] + self.fork_adj_mm) if end is None else end:
                 self._next(inp, f'fork {self.fork_choice} done')
                 return Command('lane', self._lane(self.p['base_speed']))
+            if self.p.get('m2_island_ref', True) and self.fork_choice in ('A', 'B'):
+                mode = 'right_only' if self.fork_choice == 'A' else 'left_only'
+                return Command('lane', self._lane(self.p['approach_speed'], mode, island_ref=True,
+                                                  lane_width_mm=self.p.get('m2_island_lane_width_mm', 520.0)))
             return Command('lane', self._lane(self.p['approach_speed']))
         mode = 'left_only' if self.fork_choice == 'A' else 'right_only'
         if self.p.get('fork_normal', True):
