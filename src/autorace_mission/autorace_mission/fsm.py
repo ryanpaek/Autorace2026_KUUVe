@@ -1199,9 +1199,9 @@ class MissionFSM:
             m['y'] = m['side'] * p['m2_merge_shift_mm'] + moved
             self.log.append(f'M2 merge side fixed by floor letter {ff}')
         if m is None:
-            start = self._past(inp, 'm2_island_end', -p['m2_merge_before_end_mm'])
-            if start is None:
-                start = db is not None and db >= p['m2_merge_from_tip_mm'] + getattr(self, 'fork_adj_mm', 0.0)
+            # 11/20 yubin: 도면 위치가 2 m 넘게 뒤처지면(sim_1 052614) S자가 섬 끝을 지나서야 시작 -> 거리 기준과 먼저 오는 쪽 (M2 끝 판정과 같은 방식)
+            by_dist = db is not None and db >= p['m2_merge_from_tip_mm'] + getattr(self, 'fork_adj_mm', 0.0)
+            start = bool(self._past(inp, 'm2_island_end', -p['m2_merge_before_end_mm'])) or by_dist
             if not start:
                 return None
             ax = getattr(self, 'axis_yaw', None)

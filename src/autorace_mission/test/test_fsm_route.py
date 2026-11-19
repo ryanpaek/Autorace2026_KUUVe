@@ -328,3 +328,16 @@ def test_m2_merge_plain_runs_s_curve_after_island_ref():
         d += 20.0
     assert modes[0] == 'right_only' and 'heading' in modes
     assert fsm.m2m is not None
+
+
+def test_m2_merge_starts_by_distance_when_route_lags():
+    """11/20 yubin sim_1 052614: 도면 위치가 2.2 m 뒤처져 S자가 섬 끝 뒤에 시작 -> M2 시작부터 1245 mm면 시작"""
+    fsm = _m2_fsm(m2_merge_plain=True, route_points={'m7_island_tip': 17973.0, 'm2_island_end': 19718.0,
+                                                     'm2_merge_end': 20272.0})
+    fsm.fork_choice, fsm.axis_yaw = 'A', 0.0
+    d = 0.0
+    while getattr(fsm, 'm2m', None) is None and d < 3000.0:
+        fsm.step(Inputs(t=d / 200.0, dist_mm=d, route_s=17000.0 + d, yaw=0.0, lane={'status': 'NONE'},
+                        obstacle={'m7_exit': 'A'}))
+        d += 20.0
+    assert fsm.m2m is not None and 1245.0 <= d <= 1400.0
