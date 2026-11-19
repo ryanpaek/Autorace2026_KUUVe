@@ -1598,7 +1598,6 @@ class LaneFollower:
 
         out = LaneOutput()
         out.debug['bev'] = bev_lane
-        out.debug['white_bridge'] = bridge_px or None
         det = detect_lanes(bev_lane, cfg, p, self.mode, self.mid_ema, self.last_side,
                            self.last_lr)
         n_lab, lab_full = cv2.connectedComponents((bev_lane > 0).astype(np.uint8), connectivity=8)
@@ -1616,6 +1615,7 @@ class LaneFollower:
         left = track_line(bev_lane, det.left_x0, cfg, p) if det.left_x0 is not None else None
         right = track_line(bev_lane, det.right_x0, cfg, p) if det.right_x0 is not None else None
         out.debug['left'], out.debug['right'] = left, right
+        out.debug['white_bridge'] = bridge_px or None
         for i, tr in enumerate((left, right)):
             if tr is not None and int((~np.isnan(tr[:, 0])).sum()) >= 2:
                 self.prev_tracks[i], self.prev_tracks_age[i] = tr, 0
