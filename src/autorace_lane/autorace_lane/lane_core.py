@@ -191,7 +191,8 @@ class LaneParams:
     #   그 갈래 바깥선(B면 맨 오른쪽)이 보이면 거기서 차로 폭(0.8~1.25배) 안쪽에 있는 선을 섬 변으로 고른다. false = 예전
     island_ref: bool = False
     island_letter_frames: int = 8
-    island_no_circle: bool = True          # left_only/right_only에서 원 맞추기 대신 다항식 (섬 꼬리 꺾임)          # 그 갈래 바닥 글자를 본 뒤 이 프레임 동안 글자 위치로 섬 변을 고름 (글자 = 차로 가운데)
+    island_no_circle: bool = True
+    island_outer_frac: float = 0.25        # 섬 기준 모드: 고른 선이 차 중심보다 이 비율 x 폭 넘게 바깥이면 바깥선          # left_only/right_only에서 원 맞추기 대신 다항식 (섬 꼬리 꺾임)          # 그 갈래 바닥 글자를 본 뒤 이 프레임 동안 글자 위치로 섬 변을 고름 (글자 = 차로 가운데)
     continuity_lambda: float = 3.0    # 쌍 점수 = |폭-예상| + lambda*|중점-직전 중점|
     side_deadband_mm: float = 40.0    # 한쪽 선이 중심 근처일 때 좌/우 판정 유지 폭
     side_track_mm: float = 300.0      # 한쪽 선만 보일 때, 직전 시작점에서 이 안이면 같은 선으로 본다 (차로 폭의 절반 남짓)
@@ -548,7 +549,15 @@ def detect_lanes(bev: np.ndarray, cfg: BevConfig, p: LaneParams, mode: str,
             if pick is None:
                 expect = vc - exp_w / 2.0 if mode == 'left_only' else vc + exp_w / 2.0
                 pick = min(xs, key=lambda x: abs(x - expect))
-            if mode == 'left_only':
+            # 11/20 시뮬(섬 꼬리 근처): 섬 변이 화면에서 사라지면 바깥선 하나만 남아 그 선(B면 차 오른쪽)을 섬 변으로 잡고
+            #   차로 폭 반만큼 더 바깥으로 꺾음(오프셋 -523 mm, κ -1.8) -> 이탈. 차 중심보다 island_outer_frac x 폭 넘게
+            #   바깥쪽에 있는 선은 그 갈래 바깥선으로 보고 반대쪽 선으로 씀
+            far = p.island_outer_frac * exp_w
+            if mode == 'left_only' and pick > vc + far:
+                det.right_x0, det.status = pick, 'R'
+            elif mode == 'right_only' and pick < vc - far:
+                det.left_x0, det.status = pick, 'L'
+            elif mode == 'left_only':
                 det.left_x0, det.status = pick, 'L'
             else:
                 det.right_x0, det.status = pick, 'R'
