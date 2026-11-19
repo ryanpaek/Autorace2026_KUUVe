@@ -56,20 +56,32 @@
     obs_confirm_frames: 3
     obs_confirm_tol: 0.10
     reverse_confirm_frames: 3
-    # 11/19 실차 '앞·옆 다 막혔다고 영원히 서 있음(틈 있는데)': 정해진 자리 녹화 경로가 양쪽 다 닿으면 (연속 3스캔 확인 뒤)
-    #   조금 더 가서(최대 20 cm) / 물러나서(최대 50 cm) 녹화 경로나 만든 S자(25~60°, 반경 0.53 x 1.2)로 갈 길을 찾음.
-    #   로그 '막힘 -> 다른 길: ...' / '다른 길도 없음'. 끄기: ros2 param set /avoid_node rescue false
-    rescue: true
-    rescue_r_scale: 1.2
-    rescue_deg_min: 25.0
-    rescue_deg_max: 60.0
-    rescue_deg_step: 5.0
-    rescue_margin: 0.04          #   만든 S자 검사 여유 (녹화 경로는 hit_margin 0.03)
-    rescue_island_margin: 0.08   #   섬(도면 위치)은 위치 추정 오차만큼 더 넓게
-    rescue_fwd_max: 0.20
-    rescue_back: true            #   앞으로 갈 길이 없을 때만 물러나서 찾음 (false = 후진 안 함)
-    rescue_back_max: 0.50
-    rescue_step: 0.05
-    rescue_back_step: 0.10
-    rescue_tail: 0.15            #   도착 뒤 이만큼 더 가도 안 닿아야
-    rescue_period_s: 0.5
+    # 11/19 실차 '앞·옆 막혔다고 60초 서 있음(틈은 있음)': 막힘(녹화 경로 양쪽 다 닿음)이 연속 3스캔이면 차로 가운데 따라 앞뒤로 움직여
+    #   앞 장애물까지 라이다 거리를 blocked_align_mm에 맞춘 뒤 녹화 경로를 무조건 재생. 1차선 -> right csv, 3차선 -> left csv 고정.
+    #   2차선은 틈 검사(앞 장애물 빼고 옆 차로 물체만, 차체 + blocked_gap_margin) 통과한 쪽 -> 출구 쪽 -> 앞이 더 빈 쪽 -> choose_tie_side.
+    #   ★ 녹화 경로 기하 (가운데·반듯): 400 mm면 앞 장애물 모서리와 왼쪽 -1.0 cm(겹침) / 오른쪽 +0.4 cm, 440 mm면 +2.3 / +3.1 cm
+    #   로그: '막힘 (...) -> 앞 장애물 N mm를 400 mm로 전진/후진', '맞춤 끝: ... -> 무조건 재생 ...'. 끄기: blocked_align false
+    blocked_align: true
+    blocked_align_mm: 400.0      # ★ 실차 주행 뒤 정함
+    blocked_align_tol_mm: 15.0
+    blocked_align_speed: 0.10
+    blocked_align_max_m: 0.60
+    blocked_gap_margin: 0.0
+    blocked_align_max: 3         # M7 한 번에 최대 (재생이 안전 정지로 끊겨 같은 자리 반복 방지)
+    # 11/19 bag 보고서: 두 차로 앞 여유가 비슷하면(30 cm 안) 출구 쪽, 모르면 정한 쪽 (66 mm 차이로 동전 던지기 하던 것)
+    choose_tie_m: 0.30
+    choose_tie_side: 'A'
+    beside_blocks: false         # 옆에 붙은 장애물(gap < 0)을 막힘으로: 시뮬레이션에서 정상 변경까지 막아 끔 (보고서 ①)
+    # 11/19 M2: 섬 앞 2.5 m 안에서 갈림길 표지가 보이는데 아직 A/B 모르면 0.12 m/s / M2 시작 자리에서 모르면 최대 2초 서서 기다림 /
+    #   라이다 표지판 막대(연속 3스캔, 둘레 15 cm 빈, ±30 cm 안)로 섬 앞 꼭짓점 고침 (표지판과 거리 지킴)
+    sign_slow: true
+    sign_slow_speed: 0.12
+    sign_slow_zone_m: 2.5
+    m2_wait_sign_s: 2.0
+    sign_anchor: true
+    sign_tip_offset: 0.0         # 꼭짓점 = 표지판 막대 + 이만큼 (막대가 꼭짓점보다 뒤에 서 있으면 음수)
+    # 11/19 M7 없이 M2로 시작(obstacle_node가 M2만 모드로 켬): 표지판 찾는 범위·한도, 가까우면 녹화 시작 자리까지 후진
+    m2only_anchor_max: 1.0
+    m2only_anchor_range: 2.5
+    m2only_anchor_wait_s: 0.6
+    m2only_backup_max: 1.0

@@ -833,3 +833,74 @@ def test_live_lane_texts():
                          'lane_why': {'0': '지금 앞 0.40m', '1': '갈 수 있음 앞 9.90m'}})
     assert '목표 1차선(왼쪽, A)' in link.target_text() and '갈 수 있음' in link.target_text()
     assert '지금 2차선' in link.now_text() and '회피 노드' in link.now_text()
+
+
+# ── 11/19 bag 보고서 4차: m2_1-B 재생(1차선에서 시작, 갈래 B)인데 'M7 끝: 1차선(A)'로 보고 -> FSM이 A로 바꿈 ──
+def test_m2_replay_end_lane_is_branch_not_start_lane():
+    link = M7Link()
+    drive(link, 13500.0, 13700.0)
+    link.on_avoid_active(True, 0.0)
+    # 재생 중 RUN 상태: 지금 차로는 시작 차로(1)로 남아 있지만 end_lane = 갈래 B(-1)
+    link.on_avoid_state({'state': 'RUN', 'target': -1, 'now_lane': 1, 'end_lane': -1})
+    link.on_avoid_done(True)
+    r = link.pop_report()
+    assert r['lane'] == 3 and r['fork'] == 'B', r
+    assert link.state()['m7_exit'] == 'B'
+
+
+def test_done_before_final_state_is_corrected_by_done_state():
+    """/avoid/done을 마지막 /avoid/state(DONE)보다 먼저 처리해도, 마지막 상태가 오면 끝 차로를 고쳐 다시 보고"""
+    link = M7Link()
+    drive(link, 13500.0, 13700.0)
+    link.on_avoid_active(True, 0.0)
+    link.on_avoid_state({'state': 'RUN', 'target': 1, 'now_lane': 1})          # 예전 노드처럼 end_lane 없음 (재생 직전 값)
+    link.on_avoid_done(True)
+    first = link.pop_report()
+    assert first['fork'] == 'A'                                                # 오래된 값으로 먼저 보고됨
+    link.on_avoid_state({'state': 'DONE', 'target': -1, 'now_lane': -1, 'end_lane': -1})
+    r = link.pop_report()
+    assert r is not None and r['lane'] == 3 and r['fork'] == 'B'
+    assert link.state()['m7_exit'] == 'B'
+    link.on_avoid_state({'state': 'DONE', 'target': -1, 'now_lane': -1, 'end_lane': -1})
+    assert link.pop_report() is None                                           # 같으면 다시 안 보냄
+
+
+# ── 11/19: M7을 건너뛰고 M2로 시작 -> 'M7은 2차선에서 끝남' 보고 + 회피 노드 M2만 모드 ──
+def test_m2_only_start_when_m7_skipped():
+    link = M7Link()
+    link.update(0.0, {'state': 'M3_PEDESTRIAN', 'dist_mm': 0.0}, {})
+    acts = link.update(0.1, {'state': 'M2_FORK', 'dist_mm': 0.0, 'fork_choice': None}, {})
+    assert ('enable_m2', 0) in acts
+    r = link.pop_report()
+    assert r['lane'] == 2 and r['fork'] is None and r['by'] == 'm2_start'
+    assert link.state()['m2_replay_active'] is True and link.state()['m7_exit'] is None
+    acts = link.update(0.2, {'state': 'M2_FORK', 'dist_mm': 0.0, 'fork_choice': 'B'}, {})
+    assert ('fork', 'B') in acts                                   # M2만일 때도 표지 방향을 회피 노드에 넘김
+    link.on_avoid_active(True, 0.3)
+    link.on_avoid_state({'state': 'RUN', 'target': -1, 'now_lane': 0, 'end_lane': -1})
+    link.on_avoid_done(True)
+    r = link.pop_report()
+    assert r['lane'] == 3 and r['fork'] == 'B'
+    st = link.state()
+    assert st['m2_replay_done'] and not st['m2_replay_active'] and st['m7_exit'] == 'B'
+    assert link.update(0.5, {'state': 'M2_FORK', 'dist_mm': 0.0}, {}) == []   # 다시 켜지 않음
+
+
+def test_m2_after_m7_is_not_m2_only():
+    link = M7Link()
+    link.update(0.0, mission(13000.0), {})
+    acts = link.update(0.1, {'state': 'M2_FORK', 'dist_mm': 0.0}, {})
+    assert not any(a[0] == 'enable_m2' for a in acts)
+    link2 = M7Link()                                   # obstacle_node가 M2 중에 다시 켜짐 (M7 끝 차로는 이미 있음)
+    acts = link2.update(0.0, {'state': 'M2_FORK', 'dist_mm': 0.0, 'm7_exit_lane': 3}, {})
+    assert not any(a[0] == 'enable_m2' for a in acts)
+    link3 = M7Link(M7LinkParams(m2only_enable=False))
+    assert link3.update(0.0, {'state': 'M2_FORK', 'dist_mm': 0.0}, {}) == []
+
+
+def test_m2_only_aborts_when_fsm_leaves_m2():
+    link = M7Link()
+    link.update(0.0, {'state': 'M2_FORK', 'dist_mm': 0.0}, {})
+    link.on_avoid_active(True, 0.1)
+    acts = link.update(0.2, {'state': 'M8_CONES', 'dist_mm': 0.0}, {})
+    assert ('disable',) in acts and not link.state()['m2_replay_active']

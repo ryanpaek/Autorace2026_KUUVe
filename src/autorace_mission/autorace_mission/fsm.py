@@ -1013,6 +1013,13 @@ class MissionFSM:
     def _s_M2_FORK(self, inp):
         """A(왼쪽) / B(오른쪽): 한쪽 경계선만 따라가는 차선 모드로 분기."""
         self._remember_fork(inp)
+        # 11/19 실차 요청: M7을 건너뛰고 M2로 시작하면 obstacle_node가 회피 노드를 'M2만' 모드로 켜 갈림길 녹화를 재생한다
+        #   (예전엔 차선 주행으로 직진 -> 표지판에 박음). 그동안은 회피 노드 명령, 노드가 끊기면 정지. 끝나면 m7_exit = 들어간 갈래
+        ob = inp.obstacle or {}
+        if ob.get('m2_replay_hold'):
+            return Command('stop', self._lane(0.0), note='M2_FORK/hold (M2 replay node lost)')
+        if ob.get('m2_replay_active'):
+            return Command('obstacle', self._lane(self.p['approach_speed']), note='M2_FORK/replay (M7 skipped)')
         self._watch_floor_letter(inp)
         ff = getattr(self, 'floor_fork', None)
         exit_lane = inp.obstacle.get('m7_exit')

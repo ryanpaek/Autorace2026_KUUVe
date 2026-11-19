@@ -98,12 +98,16 @@ def test_side_block_spike_does_not_back_up():
     assert st[-1][0] == 'EXEC'
 
 
-def test_side_block_persisting_three_scans_backs_up():
+def test_side_block_persisting_three_scans_acts():
+    """막힘이 연속 3스캔이어야 움직임 (11/19: 후진 대신 400 mm로 거리 맞춤 -> 재생, test_m7_blocked_align)"""
     m = _m(lane=1)
     front = _limo(0.47, 0.0)
     side = _limo(0.20, -0.52)
     st = _run(m, [front, front, front + side, front + side, front + side])
-    assert [s for s, _ in st][:4] == ['CRUISE'] * 4 and st[-1][0] == 'BACKUP', st
+    assert [s for s, _ in st][:4] == ['CRUISE'] * 4 and st[-1][0] == 'ADJUST', st
+    m2 = _m(lane=1, blocked_align=False)                  # 끄면 예전처럼 50 cm까지 후진
+    st = _run(m2, [front, front, front + side, front + side, front + side])
+    assert st[-1][0] == 'BACKUP', st
 
 
 def test_camera_lane_jump_keeps_confirmation():

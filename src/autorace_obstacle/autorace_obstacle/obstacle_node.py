@@ -167,8 +167,9 @@ class ObstacleNode(Node):
         # M7 연결
         self.create_subscription(Bool, '/avoid/active',
                                  lambda m: self.link.on_avoid_active(m.data, time.monotonic()), 10)
-        self.create_subscription(Bool, '/avoid/done', lambda m: self.link.on_avoid_done(m.data), 10)
+        # 11/19: /avoid/state를 먼저 만듦 -> 한 번에 같이 오면 마지막 상태(끝 차로)를 /avoid/done보다 먼저 처리 (rclpy는 만든 순서)
         self.create_subscription(String, '/avoid/state', self._on_avoid_state, 10)
+        self.create_subscription(Bool, '/avoid/done', lambda m: self.link.on_avoid_done(m.data), 10)
         self.create_subscription(String, '/perception/detections', self._on_detections, 10)  # M7 끄기 (off_mode: sign)
         self.enable_pub = self.create_publisher(Bool, '/avoid/enable', 10)
         self.fork_pub = self.create_publisher(String, '/fork_direction', 10)
@@ -262,6 +263,30 @@ class ObstacleNode(Node):
                 type=ParameterType.PARAMETER_INTEGER, integer_value=int(self.link.start_target or 0))),
             ParamMsg(name='start_y', value=ParameterValue(
                 type=ParameterType.PARAMETER_DOUBLE, double_value=float(self.link.start_y_m or 0.0)))]
+        req.parameters += self._m2only_params(False, 0)    # 지난 M2만 모드 값이 남지 않게 (파라미터는 노드에 남음)
+        self.param_cli.call_async(req).add_done_callback(
+            lambda _f: self.enable_pub.publish(Bool(data=True)))
+
+    @staticmethod
+    def _m2only_params(on: bool, lane_no: int):
+        """회피 노드(재생) M2만 모드 파라미터. 예전 avoid_node(legacy)에는 없는 이름이라 무시됨."""
+        return [ParamMsg(name='m2_test_start', value=ParameterValue(type=ParameterType.PARAMETER_BOOL, bool_value=bool(on))),
+                ParamMsg(name='start_lane_no', value=ParameterValue(
+                    type=ParameterType.PARAMETER_INTEGER, integer_value=int(lane_no)))]
+
+    def _enable_m2(self, k):
+        """M7 없이 M2: 회피 노드를 '지금 자리 = M2 녹화 시작 자리, k 차로'로 켬 (m2_test_start). 표지판 거리는 노드가 라이다로 맞춤."""
+        lane_no = {1: 1, 0: 2, -1: 3}.get(int(k), 2)
+        if not self.param_cli.service_is_ready():
+            self.get_logger().error('[M2] 회피 노드 파라미터 서비스 없음 -> M2만 모드로 못 켬 (차선 주행으로 감)')
+            return
+        req = SetParameters.Request()
+        req.parameters = [ParamMsg(name='start_heading_deg', value=ParameterValue(
+            type=ParameterType.PARAMETER_DOUBLE, double_value=0.0)),
+            ParamMsg(name='start_y', value=ParameterValue(type=ParameterType.PARAMETER_DOUBLE, double_value=0.0)),
+            ParamMsg(name='start_target', value=ParameterValue(type=ParameterType.PARAMETER_INTEGER, integer_value=0))]
+        req.parameters += self._m2only_params(True, lane_no)
+        self.get_logger().info(f'[M2] M7 없이 시작 -> 회피 노드 M2만 모드 ({lane_no}차선에서 갈림길 녹화 재생)')
         self.param_cli.call_async(req).add_done_callback(
             lambda _f: self.enable_pub.publish(Bool(data=True)))
 
@@ -381,6 +406,8 @@ class ObstacleNode(Node):
         for act in self.link.update(now, self.mission, self.lane):
             if act[0] == 'enable':
                 self._enable(act[1])
+            elif act[0] == 'enable_m2':
+                self._enable_m2(act[1])
             elif act[0] == 'disable':
                 self.enable_pub.publish(Bool(data=False))
             elif act[0] == 'fork':
