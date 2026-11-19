@@ -266,6 +266,12 @@ DEFAULT_PARAMS = {
     'm4_target_offset_mm': 0.0,
     'stop_on_green_arrival': True,  # 도착 때 녹색이어도 일단 서고 녹색 확인 후 출발 (안전 기본값)
     'green_go_delay_sec': 0.3,
+    # 11/20 캡틴 실차: 빨강·노랑에 정지선에서 선 뒤 초록이 확정돼도 출발 안 함.
+    #   원인(코드 추정, 실차 /lane/status 확인 전): 서 있는 동안 차선이 안 보이면 차선 노드 lost_frames가 계속 늘어
+    #   lost_hold_frames(30) 뒤 source=stop(속도 0). 정지·출발 모두 차선 모드 'normal'이라 초기화가 안 되고, 차가 안 움직이니 선도 다시 안 보임.
+    #   -> 신호등에서 '서 있다가' 출발할 때만 처음 이 거리 동안 차선 모드 'heading'(선 때 방향 유지 직진).
+    #      모드가 바뀌면 차선 노드가 초기화(lost_frames 0)되고, 끝나고 normal로 돌아갈 때 또 초기화. 0 = 끔(예전과 같음)
+    'm1_go_heading_mm': 300.0,
     # 도면 경로 지도 (track_route.yaml). mission_node가 points를 넣어 준다.
     # route_s가 들어오면 위의 *_len_mm 거리 대신 도면 위치로 구간을 넘긴다.
     'route_points': {},
@@ -1636,6 +1642,7 @@ class MissionFSM:
             if (self.stop.should_stop(inp) or unknown) and pass_green:
                 self._anchor(self.stop_line_name, self.stop, self.stop.remaining(inp))
                 self._sub('go', inp)
+                self.m1_go_heading = False       # 달리면서 통과: 차선이 살아 있으니 그대로 차선
                 self.log.append('M1 green at stop line -> pass')
             elif self.stop.should_stop(inp):
                 self._anchor(self.stop_line_name, self.stop, self.stop.remaining(inp))
@@ -1647,9 +1654,21 @@ class MissionFSM:
             if not (green and not red and t >= p['green_go_delay_sec']):
                 return Command('stop', self._lane(0.0))
             self._sub('go', inp)
+            # 11/20: 서 있다가 출발 -> 처음 m1_go_heading_mm는 선 때 방향 유지 (차선 노드 '선 놓침 정지' 풀기)
+            self.m1_go_yaw = inp.yaw
+            self.m1_go_heading = p.get('m1_go_heading_mm', 0.0) > 0.0
+            if self.m1_go_heading:
+                self.log.append(f'M1 go from stop -> heading {p["m1_go_heading_mm"]:.0f}mm')
         _, d = self._since(inp, sub=True)
         if d >= p['leave_mm']:
             self._next(inp, 'passed traffic light')
+        if getattr(self, 'm1_go_heading', False):
+            if d < p.get('m1_go_heading_mm', 0.0):
+                yaw0 = getattr(self, 'm1_go_yaw', None)
+                kw = {'yaw_ref': round(yaw0, 4)} if yaw0 is not None else {}
+                return Command('lane', self._lane(p['base_speed'], 'heading', **kw))
+            self.m1_go_heading = False
+            self.log.append('M1 go heading done -> lane')
         return Command('lane', self._lane(p['base_speed']))
 
     def _s_M4_PARKING(self, inp):
