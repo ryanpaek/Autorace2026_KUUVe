@@ -53,3 +53,15 @@ def test_island_ref_off_keeps_old_choice():
     o = lf.process_bev(_scene(cfg, [-300.0, 100.0, 620.0]), blank(cfg), speed=0.2)
     x0 = (o.debug['left'][0, 0] - cfg.vehicle_col) * cfg.mm_per_px_x
     assert abs(x0 + 300.0) < 30.0
+
+
+def test_only_far_side_outer_line_is_not_island_edge():
+    """11/20 yubin: A 끝 직선에서 섬 변이 화면 밖 -> 차 왼쪽 바깥선만 보임. 그걸 오른쪽 선으로 잡으면 왼쪽으로 나감 -> 선 없음"""
+    for mode, x in (('right_only', -260.0), ('left_only', 260.0)):
+        cfg, lf = _lf()
+        lf.mode = mode
+        o = lf.process_bev(_scene(cfg, [x]), blank(cfg), speed=0.2)
+        assert o.status == 'NONE'
+    cfg, lf = _lf()
+    lf.mode = 'right_only'
+    assert lf.process_bev(_scene(cfg, [260.0]), blank(cfg), speed=0.2).status == 'R'   # 맞는 쪽 선은 그대로

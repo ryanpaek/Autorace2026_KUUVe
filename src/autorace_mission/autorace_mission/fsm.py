@@ -1100,10 +1100,15 @@ class MissionFSM:
                 return Command('lane', self._lane(self.p['base_speed']))
             if self.p.get('m2_island_ref', True) and self.fork_choice in ('A', 'B'):
                 mode = 'right_only' if self.fork_choice == 'A' else 'left_only'
-                # 11/20 yubin: 선을 놓치면 정지(15초 Time-out -> M2 실패) 대신 직선 방향 유지 (lost_never_stop)
+                # 11/20 yubin: 선을 놓치면 정지(15초 Time-out -> M2 실패) 대신 갈래 직선 방향 유지 (lost_never_stop)
+                #   마지막 차선 방향은 원 맞춤이 틀어지면 수십 도 어긋남 -> 갈래 직선 방향(M7 축, 없으면 갈래 시작 방향)
+                kw = {}
+                ax = self.axis_yaw if getattr(self, 'axis_yaw', None) is not None else getattr(self, 'm2_yaw', None)
+                if ax is not None:
+                    kw['hold_axis_deg'] = round(math.degrees(math.atan2(math.sin(ax), math.cos(ax))), 1)
                 return Command('lane', self._lane(self.p['approach_speed'], mode, island_ref=True,
                                                   lane_width_mm=self.p.get('m2_island_lane_width_mm', 520.0),
-                                                  lost_never_stop=True))
+                                                  lost_never_stop=True, **kw))
             return Command('lane', self._lane(self.p['approach_speed'], lost_never_stop=True))
         mode = 'left_only' if self.fork_choice == 'A' else 'right_only'
         if self.p.get('fork_normal', True):
