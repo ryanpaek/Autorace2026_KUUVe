@@ -24,3 +24,50 @@ def test_lane_first_back_frames():
     assert r[5] is False
     assert r[6] is False and r[8] is False
     assert r[10] is True
+
+
+# --- 1번 코너 (M6 진입~지그재그 시작선) IMU 코너 미리보기 ---
+import math
+
+from autorace_mission.fsm import Inputs
+
+RP = {'c1_corner_start': 7930.0}
+
+
+def _c1(route_s=7000.0, yaw_m5=0.0, yaw_m6=0.0, why_m5='start', **p):
+    fsm = MissionFSM({'start_state': 'WAIT_START', 'route_points': RP, **p})
+    fsm._goto('M5_BUMP', Inputs(t=0.0, dist_mm=0.0, yaw=yaw_m5), why_m5)
+    fsm._goto('M6_ZIGZAG', Inputs(t=1.0, dist_mm=5000.0, yaw=yaw_m6, route_s=route_s), 'bump passed')
+    return fsm
+
+
+def test_c1_preview_before_corner_then_full_until_turned():
+    fsm = _c1()                                           # 코너 930 mm 앞에서 M6
+    k = fsm.m7_corner_k(5000.0, 0.0)
+    assert k[0] == 0.0 and k[-1] < -1.0                   # 아직 직선: 코너 시작부터만 곡률
+    k = fsm.m7_corner_k(6200.0, math.radians(-40.0))      # 돌기 시작 -> 다 돌 때까지 전부 코너 곡률
+    assert all(v < -1.0 for v in k)
+    assert fsm.m7_corner_k(6900.0, math.radians(-86.0)) is None   # 다 돎 -> 끝
+
+
+def test_c1_entered_mid_corner_uses_start_straight_axis():
+    fsm = _c1(route_s=8300.0, yaw_m6=math.radians(-50.0))  # M5가 길어 코너 도중에 M6
+    k = fsm.m7_corner_k(5000.0, math.radians(-50.0))       # 직선 기준 50° 돎 -> 남은 각만큼 계속
+    assert k is not None and all(v < -1.0 for v in k)
+    assert fsm.m7_corner_k(5400.0, math.radians(-86.0)) is None
+
+
+def test_c1_off_cases():
+    assert _c1(c1_corner_preview=False).m7c is None
+    fsm = MissionFSM({'start_state': 'WAIT_START'})        # 도면 위치 없음 -> 안 켬 (거리 추측 안 함)
+    fsm._goto('M5_BUMP', Inputs(t=0.0, dist_mm=0.0, yaw=0.0), 'start')
+    fsm._goto('M6_ZIGZAG', Inputs(t=1.0, dist_mm=5000.0, yaw=0.0), 'bump passed')
+    assert fsm.m7c is None
+    # 연습(M5 manual) + 이미 코너 안(300 mm 미만): 직선 방향을 모르니 안 켬
+    assert _c1(route_s=7800.0, why_m5='manual').m7c is None
+
+
+def test_c1_ends_at_zigzag_line():
+    fsm = _c1()
+    fsm.sub = 'zigzag'
+    assert fsm.m7_corner_k(6000.0, math.radians(-60.0)) is None
