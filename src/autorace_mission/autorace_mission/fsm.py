@@ -225,6 +225,7 @@ DEFAULT_PARAMS = {
     'c1_corner_preview': True,       # 11/19: 1번 코너(출발 직선 끝) IMU 코너 미리보기 (도면 c1_corner_start 필요). false = 예전
     'm1_corner_start_mm': 200.0,     # 도면 위치를 모를 때: M1 진입 -> 코너 시작 (도면: 끝선 -> 코너 280 mm, handover가 끝선 근처)
     'm1_corner_k_gain': 1.0,
+    'm1_corner_done_deg': 85.0,      # 11/19: 4번(M1) 코너 미리보기 끝 각도 (1~3번 m7_corner_done_deg와 따로)
     'm7_corner_k_gain': 1.0,
     'm1_corner_speed': 0.20,         # 코너 다 돌 때까지 속도
     # 코너(M8·M1 미리보기) 동안 차로 중심에서 바깥쪽으로 이만큼 (안쪽 선 밟던 것, 11/13). 차선이 보일 때만 효과 (target_offset_mm)
@@ -653,7 +654,9 @@ class MissionFSM:
             if since < start_mm - p.get('m2x_corner_gate_mm', 200.0):
                 turned = min(turned, math.radians(4.9))
         arc = r * math.pi / 2.0
-        if turned >= math.radians(p['m7_corner_done_deg']) or since > start_mm + arc + p['m7_corner_give_up_mm']:
+        # 11/19 실차: 1~3번은 출구에서 더 돌아 안쪽 -> 일찍 끝냄(m7_corner_done_deg), 4번(M1)은 덜 돌아 바깥 -> 따로
+        done = p.get('m1_corner_done_deg', p['m7_corner_done_deg']) if self.state == 'M1_TRAFFIC' else p['m7_corner_done_deg']
+        if turned >= math.radians(done) or since > start_mm + arc + p['m7_corner_give_up_mm']:
             self.m7c = None                              # 다 돎 (또는 너무 지나 IMU를 못 믿음) -> 끝
             self.log.append(f'{self.state[:2]} corner preview off (turned {math.degrees(turned):.0f} deg, {since:.0f}mm)')
             return None

@@ -146,6 +146,11 @@ mission_node:
     route_corner_window_mm: 3000.0         #   지금 s가 코너 끝에서 이 안일 때만
     route_corner_k_gain: 1.0               # 차선 노드에 주는 도면 코너 곡률 배율 (main의 축거 0.222·corner_kappa_gain 1.1과 겹쳐서 1.0. 필요하면 1.1)
     m7_corner_k_gain: 1.1                  # 11/19 1.0 -> 1.1 (lookahead 500·0.15 m/s와 같이, '코너 크게 돎'). M7 직전 코너 IMU 곡률 미리보기 배율
+    # 11/19 저녁 실차 (corner_fix 뒤): 1~3번 안쪽으로 조금 더 돌아 출구 직선에서 이탈, 4번 늦게·덜 돌아 바깥
+    m7_corner_lead_mm: 250.0               # 300 -> 250: 코너 곡률을 5 cm 일찍 넣음 (작을수록 일찍. 차선 노드가 미리보기 ~350 mm 앞 값을 씀)
+    m7_corner_done_deg: 80.0               # 85 -> 80: 1~3번 코너 미리보기를 5° 일찍 끝냄 (5 cm 일찍 시작한 만큼, R640에서 약 4.5°)
+    m1_corner_done_deg: 85.0               # 4번은 덜 돌았으니 85 그대로
+    m1_corner_k_gain: 1.1                  # 1.0 -> 1.1: 4번만 1.0이라 다른 코너(1.1)보다 덜 꺾음 -> 같게
     stop_pretrack: true                    # M6·M1 준비 전부터 횡단보도 정지선을 카메라로 따라감 (정지 1순위 = 카메라 선)
     stop_pretrack_mm: 1500.0               #   도면상 정지선이 이 거리 안일 때부터
 

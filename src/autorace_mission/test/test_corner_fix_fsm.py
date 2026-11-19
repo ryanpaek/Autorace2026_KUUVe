@@ -71,3 +71,23 @@ def test_c1_ends_at_zigzag_line():
     fsm = _c1()
     fsm.sub = 'zigzag'
     assert fsm.m7_corner_k(6000.0, math.radians(-60.0)) is None
+
+
+def test_lead_smaller_is_earlier():
+    first = {}
+    for lead in (300.0, 250.0):
+        k = _c1(m7_corner_lead_mm=lead).m7_corner_k(5000.0, 0.0)
+        first[lead] = next(i for i, v in enumerate(k) if v != 0.0)
+    assert first[250.0] <= first[300.0]
+    assert _c1(m7_corner_lead_mm=250.0).m7_corner_k(5000.0, 0.0) != _c1().m7_corner_k(5000.0, 0.0)
+
+
+def test_done_deg_m1_separate():
+    f = _c1(m7_corner_done_deg=80.0, m1_corner_done_deg=85.0)
+    assert f.m7_corner_k(6500.0, math.radians(-81.0)) is None          # 1~3번: 80°에서 끝
+    m1 = MissionFSM({'start_state': 'M8_CONES', 'm7_corner_done_deg': 80.0, 'm1_corner_done_deg': 85.0})
+    m1._goto('M1_TRAFFIC', Inputs(t=0.0, dist_mm=1000.0, yaw=0.0), 'cones done')
+    assert m1.m7c is not None
+    m1.m1fc = None                                                      # 강제 원호 말고 미리보기 끝 각도만 봄
+    assert m1.m7_corner_k(1600.0, math.radians(-81.0)) is not None      # 4번: 81°는 아직
+    assert m1.m7_corner_k(1700.0, math.radians(-86.0)) is None
