@@ -13,7 +13,13 @@
 - M7처럼 짧게 전진·후진을 반복하면 반대로 보이는 출발이 쌓여 축 방향이 뒤집힌다.
   축이 뒤집히면 그 뒤 모든 전진 출발이 후진(`imu_acc`)으로 판정된다 (`route.motion_sign`은 근거 중 하나라도 후진이면 후진).
 
-## 수정
+## 수정 (2차, 캡틴 결정)
+- **`reverse_from_accel: false` (코드 기본 + params.yaml)**: 후진 판단에서 가속도를 빼고 `/odom` 속도 부호(`twist.linear.x < 0`)로만 판단.
+  근거: 11/19 bag 보고서가 조종기 후진을 'odom이 -0.25 m/s보다 빠르게 뒤로'로 셌다 = 후진 때 odom이 음수를 낸다.
+  (11/17 주석의 '조종기 후진에도 속도 양수'와 다름 → 리모에서 한 번 확인할 것, 아래 실차 확인)
+- 나머지 판단(odom 위치 변화 방향, 우리 /cmd_vel < 0)은 그대로.
+
+## 수정 (1차, 켜 둘 때의 안전장치)
 - `AccelDirection(learn_once=True)`: 축 방향이 한 번 확정되면 다시 배우지 않는다. 반대로 보인 배움은 `n_ignored`로 세기만 함.
 - 파라미터 `mission_node.accel_learn_once` (코드 기본 true + params.yaml true). false면 예전 동작.
 - `motion_sign` 우선순위는 그대로 둠: 우리 명령이 전진이어도 조종기(RC)로 후진하면 가속도로 잡아야 해서 (기존 시험 SEQ의 의도).
@@ -30,5 +36,6 @@
   `test_learn_forever_flips_axis_old_behavior`(예전 동작이면 축이 뒤집힘을 재현).
 
 ## 실차 확인 (다음 판)
+- 조종기로 뒤로 끌 때와 우리 명령 후진 때 `ros2 topic echo /odom --field twist.twist.linear.x`가 음수인지. 양수면 reverse_from_accel true로 되돌림.
 - `/rosout`에 `가속도계 축 방향 배움`이 출발 때 1번만.
 - 전진 중 mission dir = +1 (bag에서 dir과 odom 속도 부호 불일치 비율 ≈ 0%).

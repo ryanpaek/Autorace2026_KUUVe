@@ -107,7 +107,9 @@ class MissionNode(Node):
         self.declare_parameter('route_signed_dist', True)
         # 11/17 조종기(RC) 후진: 드라이버가 위치·속도를 전진으로 내서 출발 순간 가속도 방향으로 후진을 잡는다 (motion_dir.py).
         # accel_sign: 0 = 가속도계 축 방향을 우리 /cmd_vel 출발로 배움 (2번 이상), 1 = +x가 앞, -1 = +x가 뒤
-        self.declare_parameter('reverse_from_accel', True)
+        # 11/19: 기본 끔. 후진은 /odom 속도 부호(twist.linear.x < 0)로 판단 (11/19 bag: 후진 때 odom -0.25 m/s 이하 확인).
+        #   가속도 판정은 M7 전후진에서 축 방향을 잘못 배워 전진을 후진으로 봄 (1119_08). true = 11/17 방식
+        self.declare_parameter('reverse_from_accel', False)
         self.declare_parameter('accel_sign', 0)
         # 11/19: 축 방향을 한 번 배우면 고정 (M7 전후진 중 다시 배워 방향이 뒤집히던 문제, 1119_08 bag). false = 예전처럼 계속 배움
         self.declare_parameter('accel_learn_once', True)
