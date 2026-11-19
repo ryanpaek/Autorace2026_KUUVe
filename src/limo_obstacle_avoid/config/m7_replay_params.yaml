@@ -63,7 +63,7 @@
     #   11/19 실차 '공간 있는데 전진·후진 반복': 400 mm 고정은 backup_if 460 안 + CSV가 앞 장애물 모서리와 -1.0 cm라 재생 정지 ->
     #   50 cm 후진 -> 다시 400 반복. 그래서 거리 찾기 + 맞춤 거리 >= backup_if + 20 mm
     blocked_align: true
-    blocked_align_mm: 540.0      # 틈을 못 찾을 때 = 녹화 CSV를 녹화한 거리 (앞 장애물 여유 왼 +10.6 / 오 +11.8 cm). 11/19 500 -> 540
+    blocked_align_mm: 520.0      # 틈을 못 찾을 때 무조건 재생 거리. 녹화 거리(540) 근처에서 이미 막혔으니 살짝 더 다가가서 (앞 장애물 여유 약 왼 +9 / 오 +10 cm)
     blocked_search_min_mm: 470.0
     blocked_search_max_mm: 650.0
     blocked_search_step_mm: 10.0
