@@ -511,6 +511,8 @@ class MissionFSM:
             self.m7c = (inp.yaw, inp.dist_mm, 'M7_OBSTACLE', start) if use else None
             # 3차선·갈림길 직선 방향 = 코너 진입 방향에서 90° 돈 방향 (M2·합류에서 선을 놓쳤을 때 붙잡을 방향)
             self.axis_yaw = (inp.yaw + self.p['m7_corner_dir'] * math.pi / 2.0) if use else None
+            # 11/20 yubin: 연습으로 M7부터면 차를 직선에 바로 놓음 -> M7 첫 yaw를 직선 방향으로 (없으면 M2·합류·M8이 재생 끝 방향(최대 20° 틀어짐)을 씀)
+            self.m7_placed = why in ('manual', 'init')
             self.m2m = None                          # 합류 강제 S자 (다음 판 위해 지움)
             self.floor_fork, self.floor_buf = None, []
             self.floor_blocked = False
@@ -981,6 +983,8 @@ class MissionFSM:
         갈림길 표지가 이 구간 끝에서 보일 수 있으니 여기서부터 미리 투표해 둔다.
         obstacle 노드는 /mission/state의 fork_choice를 보고 회피 마지막에 그쪽 차로로 들어가야 한다.
         """
+        if getattr(self, 'm7_placed', False) and inp.yaw is not None:
+            self.axis_yaw, self.m7_placed = inp.yaw, False
         self._remember_fork(inp)
         _, d = self._since(inp)
         done = inp.obstacle.get('m7_done', False)

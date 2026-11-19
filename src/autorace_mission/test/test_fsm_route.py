@@ -301,3 +301,15 @@ def test_m2_end_keeps_route_when_close():
         d += 10.0
     assert 1600.0 <= d <= 1700.0                      # 도면이 300 mm 앞서 있음 -> 도면대로 (700 안)
     assert not any('distance (route s off)' in m for m in fsm.log)
+
+
+def test_m7_practice_start_sets_axis_for_m2_hold():
+    """11/20 yubin: M7부터 연습 시작이면 M7 첫 yaw = 직선 방향 -> M2 섬 기준이 놓쳤을 때 그 방향 (재생 끝 방향 아님)"""
+    import math as _m
+    fsm = MissionFSM({'start_state': 'M7_OBSTACLE'})
+    fsm.step(Inputs(t=0.1, dist_mm=0.0, yaw=_m.radians(10.0)))
+    assert fsm.axis_yaw == pytest.approx(_m.radians(10.0))
+    fsm.fork_choice = 'A'
+    fsm._goto('M2_FORK', Inputs(t=5.0, dist_mm=4000.0, yaw=_m.radians(31.0)), 'obstacle zone done')
+    cmd = fsm.step(Inputs(t=5.1, dist_mm=4010.0, yaw=_m.radians(31.0), obstacle={'m7_exit': 'A'}))
+    assert cmd.lane['island_ref'] is True and cmd.lane['hold_axis_deg'] == pytest.approx(10.0)
