@@ -9,9 +9,11 @@
     robot_rear: 0.16
     robot_half_width: 0.115
     end_before: 1.0            # 섬 앞 끝 1.0 m 전에서 끝 -> FSM M2
-    # 정차 LIMO: 가로로 세움 (차로 방향 0.22, 폭 방향 0.32). 세로면 둘을 바꿀 것
-    obs_along: 0.22
-    obs_across: 0.32
+    # 정차 LIMO: 차로 방향으로 세움 (11/19 실차 영상·라이다 뒷면 폭 0.25). 가로로 세우면 0.22 / 0.32로 바꿀 것
+    obs_along: 0.32
+    obs_across: 0.22
+    corridor_y: 0.8            # 차로 좌표 |y| 0.8 넘는 물체(벽·사람) 버림 (노란선 0.78)
+    forget_n: 5                # 기억한 물체 자리를 라이다가 5바퀴(0.5 s) 연속 뚫고 보면 지움 (지나간 사람 등). 0 = 안 지움
     speed: 0.20
     offset: 0.50               # 옆 차로 정차 LIMO 중심에서 이만큼 옆으로 지나감
     change_len: 1.1            # 차로 변경 길이 (길 없을 때만 change_len_short 0.9 m, 75% 속도)

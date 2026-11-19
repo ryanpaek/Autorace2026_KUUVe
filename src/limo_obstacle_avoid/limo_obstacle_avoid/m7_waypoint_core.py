@@ -7,15 +7,20 @@ ROS 없음 (m7_waypoint_node가 입출력).
   1) 덩어리 나누기 → L자/한 변 맞추기(closeness) → 정차 LIMO 중심·방향 (차 기준)
      - 시야 끝(edge_deg 안)에 걸린 덩어리는 버림 (일부만 보여 중심이 틀어짐)
   2) 위치 보정 (지금 믿는 위치 = PoseFusion(odom 거리 + IMU yaw) ∘ offset)
-     - 방향: 긴 변 또는 뒷면이 보이는 LIMO 각도의 중앙값. 새 측정과 차이 psi_ok_deg 안이 psi_first_n번 연속이면 '방향 맞음'
+     - 방향: 긴 변 또는 뒷면이 보이는 LIMO 각도의 중앙값 (한 바퀴 값).
+       11/19 실차: 1.5 m 앞 LIMO 뒷면 한 바퀴 값이 정지 중에도 ±8° 튐 -> 최근 psi_win_s 동안 값(odom yaw 빼서 쌓음)의
+       중앙값으로만 고침. psi_min_n개 이상 모이고 그 psi_near_frac(80%)이 중앙값 ±psi_ok_deg 안이면 '방향 맞음'
      - 옆: '방향 맞음' 뒤에만, snap_range 안 LIMO의 '차로 격자 나머지' 중앙값으로 (막힘 y_unlock_s 넘으면 그냥 품)
   3) 기억: 차로 좌표 장애물 목록 (예상 배치 prior를 미리 넣을 수 있음, 보이면 덮어씀)
+     - 11/19 실차: 지나가는 사람·방향 흔들림으로 잘못 찍힌 점이 계속 남아 '길 없음'이 88 s 이어짐 ->
+       보여야 할 자리(시야 안, 가리는 것 없음)인데 forget_n 바퀴 연속 안 보이면 지움
      - 바로 옆(앞뒤 0.6 m) LIMO는 지금 라이다로 잰 차 기준 옆 거리로 차로를 다시 정함
   4) 계획: 차로 3개 × 5 cm 칸 DP. 차로 변경 change_len(1.1 m), 길 없을 때만 change_len_short(0.9 m, 느리게)
      - 1.5 m 안 LIMO가 차로 경계에 걸쳐 보이면 두 차로 다 막힘으로
   5) 따라가기: 계획 차로 높이 = 옆 차로 LIMO 중심 ± offset(0.5 m) (LIMO 기준 웨이포인트), pure pursuit
 안전
-  - 길 없음 → creep_v로 지금 차로 따라 접근 → 차 폭 안 앞 간격 creep_stop에서 정지
+  - 길 없음 → 지금 차로 막힘까지 짧은 차로 변경 앞부분만 남으면 wait_s 동안 서서 기다림(길이 열리면 옮길 자리)
+             → 그래도 막히면 creep_v로 지금 차로 따라 접근 → 차 폭 안 앞 간격 creep_stop에서 정지
   - 굴려 보기: 지금 자세로 roll_dist 굴려 정차 LIMO·노란선(차로 좌표)에 닿으면 정지
   - 후진: reverse_max > 0일 때만 (기본 0 = 후진 없음)
   - 노란선: /lane/status yellow_l/r_mm으로 m7_replay_core._exec_yellow_check와 같은 예측 → 반대로 최대 조향
@@ -48,24 +53,27 @@ class WaypointParams:
     start_lane_no: int = 0              # 1/2/3 (0 = start_lane)
     m2_test_start: bool = False         # 이 노드는 M2를 안 함 → 켜지면 바로 끝 (FSM 차선 주행)
     end_before: float = 1.0             # 섬 앞 끝 이만큼 전에서 끝 (M2는 FSM)
-    # 정차 LIMO 크기 (가로로 세움: 차로 방향 0.22, 폭 방향 0.32)
-    obs_along: float = 0.22
-    obs_across: float = 0.32
+    # 정차 LIMO 크기 (11/19 실차 영상·라이다: 차로 방향으로 세움 -> 차로 방향 0.32, 폭 방향 0.22. 뒷면 폭 0.25로 잼)
+    obs_along: float = 0.32
+    obs_across: float = 0.22
     # 라이다 처리
     cluster_gap: float = 0.08
     min_pts: int = 4
     max_range: float = 2.6
     edge_deg: float = 12.0              # 시야 끝 이만큼 안에 걸친 덩어리 버림
-    corridor_y: float = 1.0             # 차로 좌표 |y| 이보다 바깥(벽·사람) 버림
+    corridor_y: float = 0.8             # 차로 좌표 |y| 이보다 바깥(벽·사람) 버림 (노란선 0.78. 11/19 1.0이면 트랙 밖 물체가 바깥 차로를 막음)
     # 위치 보정
     psi_gain: float = 0.15
     psi_gain_start: float = 0.5
     psi_ok_deg: float = 3.0
-    psi_first_n: int = 3
+    psi_first_n: int = 3                # (호환: 안 씀)
+    psi_win_s: float = 1.5              # 방향 값 모으는 시간
+    psi_min_n: int = 5                  # 이만큼 모여야 고침
+    psi_near_frac: float = 0.8          # 모인 값의 이 비율 이상이 중앙값 ±psi_ok_deg 안이어야 '방향 맞음'
     psi_max_jump_deg: float = 20.0
     y_gain: float = 0.4
     snap_range: float = 1.3
-    snap_max: float = 0.2
+    snap_max: float = 0.15              # 차로 격자 나머지가 이보다 크면 안 씀. 11/19 시뮬: 0.2면 처음 옆 오차 0.25 m 넘을 때 한 차로 틀리게 붙어 노란선 밖 (wide 3/12)
     y_unlock_s: float = 3.0
     # 기억
     prior_xy: List[float] = field(default_factory=list)   # 예상 배치 [x1, y1, x2, y2, ...] (켜는 점 기준, m)
@@ -73,6 +81,8 @@ class WaypointParams:
     match_dy: float = 0.25
     side_fix_dx: float = 0.6
     near_range: float = 1.5
+    forget_n: int = 5                   # 보여야 할 자리인데 이만큼 연속 안 보이면 기억에서 지움 (0 = 안 지움)
+    forget_gap: float = 0.25            # 그 방향 점이 모두 기억 위치보다 이만큼 넘게 멀면 '뚫림'
     # 계획
     change_len: float = 1.1
     change_len_short: float = 0.9
@@ -89,6 +99,8 @@ class WaypointParams:
     # 안전
     creep_v: float = 0.10
     creep_stop: float = 0.30
+    wait_s: float = 6.0                 # 길 없음: 지금 차로 막힘까지 '짧은 차로 변경 앞부분(0.6 x change_len_short)' 만큼 남으면
+                                        #   이 시간 동안 서서 기다림 (그 뒤 길이 열려도 옮길 자리를 남김). 지나면 예전처럼 creep
     safety_stop: float = 0.06
     rollout: bool = True
     roll_dist: float = 1.0
@@ -268,6 +280,7 @@ class M7Waypoint:
         self.blocked = False
         self.blocked_t = 0.0
         self.blocked_sum = 0.0
+        self.wait_t = 0.0
         self.creep = False
         self.danger = False
         self.danger_t = 0.0
@@ -275,7 +288,9 @@ class M7Waypoint:
         self.n_rev = 0
         self.psi_n = 0
         self.psi_ok = 0
+        self.psi_buf: List[Tuple[float, float]] = []
         self.y_unlocked = False
+        self.n_forgot = 0
         self.front_gap = math.inf
         self.dets = []
         self.first_block: Dict[int, Optional[float]] = {}
@@ -344,11 +359,24 @@ class M7Waypoint:
             psi_m = -median([d[2] for d in goods])
             dpsi = wrap(psi_m - epsi)
             if abs(dpsi) < math.radians(p.psi_max_jump_deg):
-                g = p.psi_gain_start if self.psi_ok < p.psi_first_n else p.psi_gain
+                # odom yaw 기준 '차로 방향 - odom yaw' 로 쌓아 차가 돌아도 같은 값끼리 비교
+                self.psi_buf.append((t, wrap(psi_m - self.fu.yaw)))
+        self.psi_buf = [q for q in self.psi_buf if t - q[0] <= p.psi_win_s]
+        if len(self.psi_buf) >= p.psi_min_n:
+            vals = [q[1] for q in self.psi_buf]
+            ref = vals[-1]
+            vals = [ref + wrap(v - ref) for v in vals]
+            med = median(vals)
+            near = sum(1 for v in vals if abs(v - med) < math.radians(p.psi_ok_deg))
+            dpsi = wrap(med + self.fu.yaw - epsi)
+            if near >= p.psi_near_frac * len(vals):
+                g = p.psi_gain_start if self.psi_ok < 3 else p.psi_gain
                 self._shift(ddpsi=g * dpsi)
                 self.psi_n += 1
-                self.psi_ok = self.psi_ok + 1 if abs(dpsi) < math.radians(p.psi_ok_deg) else 0
-        if self.psi_ok >= p.psi_first_n or self.blocked_sum > p.y_unlock_s:
+                self.psi_ok += 1
+            else:
+                self.psi_ok = 0
+        if self.psi_ok >= 3 or self.blocked_sum > p.y_unlock_s:
             self.y_unlocked = True
         ex, ey, epsi = self.pose()
 
@@ -387,8 +415,39 @@ class M7Waypoint:
                 m['n'] += 1
             else:
                 self.mem.append({'x': ox, 'y': oy, 'n': 1, 'seen': t, 'prior': False})
+        self._forget(t, pts, a_min, a_max)
         self.mem = [q for q in self.mem if q.get('prior') or q['n'] >= 2 or t - q['seen'] < 0.25]
         self._replan(t)
+
+    def _forget(self, t, pts, a_min, a_max):
+        """기억한 물체 자리를 라이다가 '뚫고' 지나가면(그 방향 점이 모두 물체보다 forget_gap 넘게 멀거나 없음) miss +1.
+        forget_n 바퀴 연속이면 지움. 그 방향에 물체 근처나 앞쪽 점이 하나라도 있으면(보임·가림) miss 0."""
+        p = self.p
+        if p.forget_n <= 0 or not pts:
+            return
+        ex, ey, epsi = self.pose()
+        c, s = math.cos(epsi), math.sin(epsi)
+        edge = math.radians(p.edge_deg)
+        keep = []
+        for q in self.mem:
+            dx, dy = q['x'] - ex, q['y'] - ey
+            rx, ry = dx * c + dy * s - p.lidar_x, -dx * s + dy * c
+            rng, brg = math.hypot(rx, ry), math.atan2(ry, rx)
+            if rx < 0.25 or not (0.3 < rng < p.max_range - 0.3) or not (a_min + edge < brg < a_max - edge):
+                keep.append(q)
+                continue
+            hw = math.atan2(0.10, rng)             # 물체 가운데 ±10 cm 방향만
+            rays = [math.hypot(x - p.lidar_x, y) for x, y, a in pts if abs(wrap(math.atan2(y, x - p.lidar_x) - brg)) < hw]
+            if any(r < rng + p.forget_gap for r in rays):
+                q['miss'] = 0
+                keep.append(q)
+                continue
+            q['miss'] = q.get('miss', 0) + 1
+            if q['miss'] >= p.forget_n:
+                self.n_forgot += 1
+                continue
+            keep.append(q)
+        self.mem = keep
 
     # ---------- 계획 ----------
     def _plan(self, obs, x0, lane0, target, fixed: Optional[Trans]):
@@ -685,15 +744,22 @@ class M7Waypoint:
             self.hold = None
         # 길 없음 → 천천히 다가감
         self.creep = False
+        waiting = False
         if self.blocked:
             self.blocked_sum += dt
-            if self.front_gap > p.creep_stop:
+            room = self.first_block.get(self.lane)
+            if (room is not None and room <= 0.6 * p.change_len_short + 0.05 and self.wait_t < p.wait_s):
+                waiting = True
+                self.wait_t += dt
+                v = 0.0
+            elif self.front_gap > p.creep_stop:
                 v, self.creep, self.blocked_t = p.creep_v, True, 0.0
             else:
                 v = 0.0
                 self.blocked_t += dt
         else:
             self.blocked_t = 0.0
+            self.wait_t = 0.0
         if self.danger and not self.blocked:
             v = 0.0
             self.danger_t += dt
@@ -736,7 +802,9 @@ class M7Waypoint:
         if self.front_gap < p.safety_stop and v > 0:
             v = 0.0
             self.stop_why = f'차 앞 {100 * self.front_gap:.0f} cm'
-        why = ('길 없음 -> 천천히 접근' if self.creep else '길 없음 -> 정지' if self.blocked else
+        why = ('길 없음 -> 천천히 접근' if self.creep else
+               f'길 없음 -> 옮길 자리 남기고 기다림 ({self.wait_t:.0f}/{p.wait_s:.0f} s)' if waiting else
+               '길 없음 -> 정지' if self.blocked else
                '굴려 보니 닿음 -> 정지' if self.danger else '계획 따라감')
         return self._out(v, max(-p.max_curv, min(p.max_curv, kc)), why)
 
@@ -760,5 +828,6 @@ class M7Waypoint:
                 'first_block_mm': {str(k): (None if v is None else round(1000 * v)) for k, v in self.first_block.items()},
                 'mem': [[round(m['x'], 2), round(m['y'], 2), m['n'], bool(m.get('prior'))] for m in self.mem],
                 'hold': None if self.hold is None else self.hold[0], 'psi_ok': self.psi_ok, 'y_unlocked': self.y_unlocked, 'n_rev': self.n_rev,
+                'n_forgot': self.n_forgot,
                 'yellow': self.yg, 'eyg_hits': self.eyg_hits, 'why': self.why, 'stop': self.stop_why,
                 'lane_why': {'reason': self.why}}
