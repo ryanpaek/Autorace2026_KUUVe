@@ -140,17 +140,33 @@ class ReplayParams:
     choose_tie_m: float = 0.30
     choose_tie_side: str = 'A'          # A = 왼쪽(+1) / B = 오른쪽(-1)
     # 11/19 실차 요청 '앞·옆 막혔다고 60초 서 있음 (틈은 있음)': 막힘(녹화 경로가 양쪽 다 닿음)이 연속 reverse_confirm_frames 스캔이면
-    #   차로 가운데를 따라 앞뒤로 움직여 앞 장애물까지 라이다 거리를 blocked_align_mm에 맞춘 뒤, 그 자리에서 녹화 경로를 무조건 재생.
-    #   방향: 1차선(+1)이면 오른쪽(right csv), 3차선(-1)이면 왼쪽(left csv) 고정. 2차선은 '틈 검사'(피하는 앞 장애물은 빼고,
-    #   옆 차로 물체만 차체 + blocked_gap_margin으로)를 통과한 쪽, 둘 다/둘 다 아니면 출구 쪽 -> 앞이 더 빈 쪽 -> choose_tie_side.
-    #   ★ 녹화 경로 기하: 반듯하게 가운데서 400 mm 시작이면 앞 장애물 모서리와 왼쪽 -1.0 cm(겹침) / 오른쪽 +0.4 cm (460 mm면 +3.7/+5.0)
+    #   1) 앞 장애물까지 라이다 거리 blocked_search_min_mm ~ blocked_search_max_mm 중 녹화 CSV가 차체 + blocked_gap_margin(타이트)로
+    #      실제로 지나가는 거리를 찾아(지금 거리에서 가까운 것부터) 차로 가운데 따라 앞뒤로 맞추고 그 자리에서 재생
+    #   2) 그런 거리가 없거나 blocked_search_tries번째부터는 앞 장애물만 보고 blocked_align_mm에 맞춘 뒤 무조건 재생
+    #   방향: 바깥 차로면 늘 가운데 쪽(+1 왼쪽 바깥 -> right csv, -1 오른쪽 바깥 -> left csv), 바깥으로는 절대 안 감.
+    #   가운데 차로는 틈 통과한 쪽 -> 출구 쪽 -> 앞이 더 빈 쪽 -> choose_tie_side, 다시 막혀 또 하면 반대쪽.
+    #   11/19 실차 '공간 있는데 전진·후진 반복': 고정 400 mm는 (1) backup_if_mm 460 안이라 재생이 끊기면 50 cm로 후진 -> 다시 400으로 전진,
+    #   (2) 녹화 CSV가 400 mm면 앞 장애물 모서리와 왼쪽 -1.0 cm(겹침)라 재생 중 안전 정지 -> 반복. 그래서 거리 찾기 + 맞춤 거리 >= backup_if_mm
     blocked_align: bool = True
-    blocked_align_mm: float = 400.0     # ★ 맞출 거리 (라이다 -> 앞 장애물 앞면). 실차 주행 뒤 정함
+    blocked_align_mm: float = 500.0     # 틈을 못 찾을 때 맞출 거리 (backup_if_mm + 20 mm보다 작으면 그 값). 녹화 CSV 여유 왼 +7.2 / 오 +8.3 cm
+    blocked_search_min_mm: float = 470.0
+    blocked_search_max_mm: float = 650.0
+    blocked_search_step_mm: float = 10.0
+    blocked_search_tries: int = 3       # 이만큼 한 뒤부터는 거리 찾기 없이 blocked_align_mm로 바로
     blocked_align_tol_mm: float = 15.0
     blocked_align_speed: float = 0.10
     blocked_align_max_m: float = 0.60   # 한 번에 앞뒤로 최대 이만큼만 움직임
     blocked_gap_margin: float = 0.0     # 틈 검사 차체 여유 (0 = 차체 크기 그대로, 타이트)
-    blocked_align_max: int = 3          # M7 한 번에 이만큼까지 (재생이 안전 정지로 끊겨 다시 막히는 반복 방지). 넘으면 예전처럼 서서 봄
+    blocked_align_max: int = 0          # M7 한 번에 최대 횟수 (0 = 제한 없음: 서 있지 않고 계속 다시 함)
+    # 11/19 실차 요청: 섬 앞 가운데 차로에서 옮길 곳 없음 -> 서 있지 말고 출구 쪽(모르면 이 쪽) 녹화 CSV를 바로 재생
+    island_force_side: str = 'B'
+    # 11/19 실차 요청: 차로 따라가다 안전 정지(차 바로 앞 물체)가 stall_s 넘게 이어지면 stall_back_m 물러난 뒤 옆 차로 CSV 재생
+    #   (점이 적은 가는 물체는 '장애물'로 확정이 안 돼 차로 변경 판단이 시작되지 않고 안전 정지만 계속되던 것)
+    stall_s: float = 2.0
+    stall_back_m: float = 0.25
+    # 11/19 실차 요청: 후진(BACKUP·거리 맞춤) 중 뒤 라이다에 물체(안전 정지)가 rear_block_s 넘게 -> 후진 그만, 차선 잡고 전진 쪽으로 판단
+    #   (다음 재생 전까지 후진하는 동작은 안 함. 앞 장애물 회피는 전진하며 트리거가 알아서)
+    rear_block_s: float = 1.0
     # 정렬
     # 11/17 실차 요청: 재생 전후 '앞뒤로 움직이며 가운데 맞추기'가 너무 쉽게 걸림 -> 가운데 맞추기는 빼고 차선 주행을 100% 믿음.
     #   (장애물이 backup_if_mm보다 가까울 때 후진은 그대로 함)
@@ -247,6 +263,27 @@ def mirror(segs: List[Path]) -> List[Path]:
     return [Path(list(g.x), [-y for y in g.y], [-h for h in g.h], g.dir) for g in segs]
 
 
+def path_ok(segs: List[Path], max_dy: float = 1.3, min_dx: float = 0.3, max_dx: float = 3.5) -> Tuple[bool, str]:
+    """녹화 경로가 말이 되나 (11/19: m2_1-A.csv가 odom 튐으로 '뒤로 2.4 m, 옆 7.7 m' 4점짜리였는데 그대로 재생됨).
+    전진 구간: 앞으로 min_dx~max_dx, 옆으로 시작점에서 max_dy 안, 뒤로 5 cm 넘게 가지 않음."""
+    fw = [g for g in segs if g.dir > 0]
+    if not fw:
+        return False, '전진 구간 없음'
+    x0, y0 = segs[0].x[0], segs[0].y[0]
+    xs = [x for g in fw for x in g.x]
+    ys = [y for g in segs for y in g.y]
+    dx = xs[-1] - x0
+    if not (min_dx <= dx <= max_dx):
+        return False, f'앞으로 {dx:+.2f} m (정상 {min_dx}~{max_dx})'
+    if max(abs(y - y0) for y in ys) > max_dy:
+        return False, f'옆으로 {max(abs(y - y0) for y in ys):.2f} m (> {max_dy})'
+    for g in fw:
+        for i in range(1, len(g.x)):
+            if g.x[i] < max(g.x[:i]) - 0.05:
+                return False, '전진 구간에서 뒤로 감'
+    return True, ''
+
+
 def load_change(path_file: Optional[str], other_file: Optional[str], direction: int,
                 lane_width: float) -> Tuple[List[Path], str]:
     """녹화 경로 읽기. 없으면 반대쪽 녹화의 거울상, 그것도 없으면 기본 S자. (구간들, 출처 설명)"""
@@ -260,7 +297,7 @@ def load_change(path_file: Optional[str], other_file: Optional[str], direction: 
                 segs, _ = load_segments(f, 'odom')
             except (OSError, ValueError):
                 continue
-        if segs and sum(g.length for g in segs) > 0.2:
+        if segs and sum(g.length for g in segs) > 0.2 and path_ok(segs)[0]:
             return (mirror(segs) if mir else segs), (f'{f} 거울상' if mir else f)
     return default_change(direction, lane_width), '기본 S자 (녹화 파일 없음)'
 
@@ -276,7 +313,7 @@ def m2_name(k: int, fork: str) -> str:
 def load_m2(dirpath: str, mirror_ok: bool = True) -> Tuple[Dict[Tuple[int, str], List[Path]], Dict[Tuple[int, str], str]]:
     """M2 녹화 6개 읽기. 반환 ({(차로 k, 'A'|'B'): 구간들}, {(k, f): 출처 설명}). 없는 건 대칭 파일 거울상."""
     import os
-    got, src = {}, {}
+    got, src, bad = {}, {}, {}
     for k in (1, 0, -1):
         for f in ('A', 'B'):
             fn = os.path.join(dirpath, m2_name(k, f)) if dirpath else ''
@@ -288,6 +325,10 @@ def load_m2(dirpath: str, mirror_ok: bool = True) -> Tuple[Dict[Tuple[int, str],
                 except (OSError, ValueError):
                     continue
                 if segs and sum(g.length for g in segs) > 0.1:
+                    ok, why = path_ok(segs)
+                    if not ok:                      # 망가진 녹화 -> 안 씀 (아래에서 대칭 파일 거울상으로 채움)
+                        bad[(k, f)] = f'{m2_name(k, f)} 망가짐({why})'
+                        break
                     got[(k, f)] = segs
                     src[(k, f)] = f'{m2_name(k, f)} [{mode}]'
                     break
@@ -297,7 +338,7 @@ def load_m2(dirpath: str, mirror_ok: bool = True) -> Tuple[Dict[Tuple[int, str],
                 mk, mf = -k, ('B' if f == 'A' else 'A')
                 if (k, f) not in got and (mk, mf) in src and not src[(mk, mf)].endswith('거울상'):
                     got[(k, f)] = mirror(got[(mk, mf)])
-                    src[(k, f)] = f'{m2_name(mk, mf)} 거울상'
+                    src[(k, f)] = f'{m2_name(mk, mf)} 거울상' + (f' ({bad[(k, f)]})' if (k, f) in bad else '')
     return got, src
 
 
@@ -423,6 +464,11 @@ class M7Replay:
         self.scan_seq = 0                                # 받은 스캔 수 (연속 조건 세기)
         self.persist: Dict[str, Tuple[int, int]] = {}    # 조건 이름 -> (처음 참인 스캔, 마지막 참인 스캔)
         self.adjust: Optional[dict] = None               # 막힘 -> 거리 맞추는 중 (blocked_align)
+        self.rev_blocked = False                         # 후진 중 뒤가 막혀 그만둠 -> 다음 재생 전까지 후진 안 함
+        self.rear_t0: Optional[float] = None
+        self.stall_t0: Optional[float] = None
+        self.stall_exec: Optional[int] = None             # 안전 정지로 물러난 뒤 재생할 쪽
+        self.align_flip = False
         self.sign_seen_t: Optional[float] = None         # 카메라로 갈림길 표지를 마지막으로 본 시각
         self.sign_x_hist: List[float] = []               # 라이다 표지판 막대 x (스캔별, 차로 좌표)
         self.sign_anchored: Optional[float] = None       # 표지판으로 고친 섬 앞 꼭짓점 x
@@ -747,6 +793,9 @@ class M7Replay:
         self.persist = {}
         self.adjust = None
         self.n_align = 0
+        self.rev_blocked = False
+        self.rear_t0 = self.stall_t0 = self.stall_exec = None
+        self.align_flip = False
         self.sign_seen_t = None
         self.sign_x_hist = []
         self.sign_anchored = None
@@ -870,65 +919,78 @@ class M7Replay:
         return None
 
     # ---------- 막힘 -> 거리 맞추고 무조건 재생 (blocked_align) ----------
-    def _gap_check(self, d: int, x0: float) -> Optional[Tuple[float, float]]:
-        """틈 검사: 녹화 경로(x0에 붙임)가 옆 차로 물체에 닿나. 피하려는 앞 장애물(지금 차로 앞)은 빼고, 차체 + blocked_gap_margin."""
+    def _align_cap_ok(self) -> bool:
+        mx = int(self.p.blocked_align_max)
+        return mx <= 0 or getattr(self, 'n_align', 0) < mx
+
+    def _side_order(self, cur: int) -> List[int]:
+        """재생할 쪽 후보 순서. 바깥 차로는 가운데 쪽 하나뿐 (바깥으로는 절대 안 감).
+        가운데는 출구 쪽 -> 앞이 더 빈 쪽 -> choose_tie_side, 이번 막힘에서 또 하는 거면 반대쪽 먼저."""
+        p = self.p
+        if cur != 0:
+            return [-1 if cur > 0 else 1]
+        if self.exit_pref is not None:
+            first = 1 if self.exit_pref > 0 else -1
+        else:
+            fl = self.obs.get(1)
+            fr = self.obs.get(-1)
+            fl = math.inf if fl is None else fl
+            fr = math.inf if fr is None else fr
+            first = (1 if fl > fr else -1) if (fl != fr and abs(fl - fr) >= p.choose_tie_m) else self._tie_side()
+        if getattr(self, 'align_flip', False):
+            first = -first
+        return [first, -first]
+
+    def _blocked_plan(self, g: float, xo: float) -> Tuple[int, float, str]:
+        """막힘: (쪽 d, 맞출 거리 m, 이유). 거리 찾기(틈 통과) -> 없으면 blocked_align_mm."""
         p = self.p
         x, _, _ = self.pose()
-        yc = self.center(self.lane)
-        pts = [(lx, ly) for lx, ly, _, _ in self.pts if not (abs(ly - yc) <= p.corridor_half and lx >= x)]
-        return self._segs_hit(self._anchored(d, x0), pts, p.blocked_gap_margin)
-
-    def _blocked_side(self, x0: float) -> Tuple[int, str]:
-        """맞춘 자리에서 재생할 쪽. 1차선 -> 오른쪽, 3차선 -> 왼쪽 고정. 2차선은 틈 검사 -> 출구 -> 앞 여유 -> 정한 쪽."""
-        p = self.p
         cur = self.lane
-        res = {}
-        for d in (+1, -1):
-            if abs(cur + d) <= p.num_side_lanes:
-                h = self._gap_check(d, x0)
-                res[d] = '틈 통과' if h is None else f'틈 미달({h[0] - x0:+.2f} m 물체)'
-        txt = ', '.join(f'{"왼쪽" if d > 0 else "오른쪽"} {v}' for d, v in res.items())
-        if cur != 0:
-            d = -1 if cur > 0 else 1
-            return d, f'{2 - cur}차선이라 {"왼쪽(left csv)" if d > 0 else "오른쪽(right csv)"} 고정 [{txt}]'
-        ok = [d for d, v in res.items() if v == '틈 통과']
-        pref = None if self.exit_pref is None else (1 if self.exit_pref > 0 else -1)
-        if len(ok) == 1:
-            return ok[0], f'틈 통과한 쪽 [{txt}]'
-        if pref is not None:
-            return pref, f'출구 {self._exit_name()} 쪽 [{txt}]'
-        fl = self.obs.get(1)
-        fr = self.obs.get(-1)
-        fl = math.inf if fl is None else fl
-        fr = math.inf if fr is None else fr
-        if fl != fr and abs(fl - fr) >= p.choose_tie_m:
-            d = 1 if fl > fr else -1
-            return d, f'앞이 더 빈 쪽 [{txt}]'
-        return self._tie_side(), f'정한 쪽({p.choose_tie_side}) [{txt}]'
+        sides = self._side_order(cur)
+        pts = [(lx, ly) for lx, ly, _, _ in self.pts]
+        fallback = max(p.blocked_align_mm, p.backup_if_mm + 20.0) / 1000.0
+        if getattr(self, 'n_align', 0) < max(0, int(p.blocked_search_tries)):
+            lo, hi, st = p.blocked_search_min_mm / 1000.0, p.blocked_search_max_mm / 1000.0, max(0.005, p.blocked_search_step_mm / 1000.0)
+            dists = [lo + i * st for i in range(int((hi - lo) / st + 1e-6) + 1)]
+            dists.sort(key=lambda dd: abs(dd - g))                 # 지금 거리에서 가까운 것부터 (덜 움직임)
+            for dd in dists:
+                for d in sides:
+                    x0 = xo - p.lidar_x - dd
+                    if self._segs_hit(self._anchored(d, x0), pts, p.blocked_gap_margin) is None:
+                        return d, dd, f'틈 통과 거리 {1000 * dd:.0f} mm'
+            why = f'{1000 * lo:.0f}~{1000 * hi:.0f} mm에 틈 통과 거리 없음 -> 앞 장애물만 보고 {1000 * fallback:.0f} mm'
+        else:
+            why = f'{p.blocked_search_tries}번째부터 거리 찾기 없이 앞 장애물만 보고 {1000 * fallback:.0f} mm'
+        return sides[0], fallback, why
 
     def _begin_adjust(self, x: float, g: float, why: str):
-        """막힘: 앞 장애물까지 blocked_align_mm가 되게 차로 가운데 따라 앞(+)/뒤(-)로."""
+        """막힘: 정한 거리가 되게 차로 가운데 따라 앞(+)/뒤(-)로 -> 그 자리에서 정한 쪽 녹화 CSV 재생."""
         p = self.p
-        want = p.blocked_align_mm / 1000.0
+        xo = self.obs.get(self.lane)
+        d, want, how = self._blocked_plan(g, xo)
         mv = max(-p.blocked_align_max_m, min(p.blocked_align_max_m, g - want))
+        if mv < 0 and getattr(self, 'rev_blocked', False):
+            mv = 0.0                                     # 뒤가 막혀 있음 -> 후진 없이 지금 자리에서
+            how += ' (뒤 막힘: 지금 자리에서)'
         yc = self.center(self.lane)
         n = 31
-        d = 1 if mv >= 0 else -1
-        line = Path([x + mv * i / (n - 1) for i in range(n)], [yc] * n, [0.0] * n, d)
+        dr = 1 if mv >= 0 else -1
+        line = Path([x + mv * i / (n - 1) for i in range(n)], [yc] * n, [0.0] * n, dr)
         self.adjust = {'track': Track([line], p, p.blocked_align_speed, p.blocked_align_speed, p.backup_k_e, p.backup_k_psi),
-                       'dir': d, 'stopping': False, 'x0': x, 'want': want}
+                       'dir': dr, 'stopping': False, 'x0': x, 'want': g - mv, 'd': d, 'how': how,
+                       'first': abs(mv) <= p.blocked_align_tol_mm / 1000.0}
         self.n_align = getattr(self, 'n_align', 0) + 1
         self.state = 'ADJUST'
         self.blocked_since = None
         self.persist.clear()
-        self.events.append(f'[x={x:.2f}] 막힘 ({why}) -> 앞 장애물 {1000 * g:.0f} mm를 {p.blocked_align_mm:.0f} mm로 '
-                           f'{"전진" if d > 0 else "후진"} {100 * abs(mv):.0f} cm 맞추고 재생 ({self.n_align}/{p.blocked_align_max})')
+        side = 'left csv' if d > 0 else 'right csv'
+        self.events.append(f'[x={x:.2f}] 막힘 ({why}) -> {how}: 앞 {1000 * g:.0f} -> {1000 * (g - mv):.0f} mm '
+                           f'({"전진" if dr > 0 else "후진"} {100 * abs(mv):.0f} cm) 뒤 {side} ({self.n_align}번째)')
 
     def _adjust_step(self, t, x, y, psi, still):
         p = self.p
         a = self.adjust
         g = self.gap(self.lane)
-        tol = p.blocked_align_tol_mm / 1000.0
         brake = p.brake_k * p.blocked_align_speed
         if g is None and not a['stopping']:
             self.events.append(f'[x={x:.2f}] 맞추는 중 앞 장애물이 안 보임 -> 다시 판단')
@@ -936,23 +998,22 @@ class M7Replay:
             self.state = 'CRUISE'
             return 0.0, 0.0
         # 처음부터 허용 오차 안이면 안 움직임. 움직이면 정지 명령 뒤 밀림(brake_k x 속도)만큼 일찍 섬
-        reached = (g is not None and (abs(g - a['want']) <= tol if a.get('first', True) else
-                                      (a['dir'] > 0 and g <= a['want'] + brake) or (a['dir'] < 0 and g >= a['want'] - brake)))
-        a['first'] = False
-        if reached or a['track'].done or a['stopping']:
+        reached = a['first'] or (g is not None and ((a['dir'] > 0 and g <= a['want'] + brake)
+                                                   or (a['dir'] < 0 and g >= a['want'] - brake)))
+        if reached or a['track'].done or a['stopping'] or a.get('give_up'):
             if a['stopping'] is False:
                 a['stopping'] = t
-            if not (still or t - a['stopping'] >= p.still_max_s):
+            if not (still or t - a['stopping'] >= p.still_max_s or a.get('give_up')):
                 return 0.0, 0.0
             self.adjust = None
             xo = self.obs.get(self.lane)
-            if xo is None:
-                self.state = 'CRUISE'
-                return 0.0, 0.0
-            d, why = self._blocked_side(x)
-            self.events.append(f'[x={x:.2f}] 맞춤 끝: 앞 {1000 * (xo - x - p.lidar_x):.0f} mm, 옆 '
-                               f'{100 * (y - self.center(self.lane)):+.1f} cm, 방향 {math.degrees(psi):+.1f}° -> 무조건 재생 {why}')
-            self._begin_exec(d, xo, t, '거리 맞춘 뒤 무조건: ' + why)
+            d = a['d']
+            gg = None if xo is None else xo - x - p.lidar_x
+            self.events.append(f'[x={x:.2f}] 맞춤 끝: 앞 {"?" if gg is None else f"{1000 * gg:.0f}"} mm, 옆 '
+                               f'{100 * (y - self.center(self.lane)):+.1f} cm, 방향 {math.degrees(psi):+.1f}° '
+                               f'-> 무조건 {"left" if d > 0 else "right"} csv ({a["how"]})')
+            self.align_flip = not getattr(self, 'align_flip', False)    # 또 막혀 다시 하면 (가운데 차로) 반대쪽 먼저
+            self._begin_exec(d, None, t, '거리 맞춘 뒤 무조건: ' + a['how'], x0=x)
             return self.track.step(x, y, psi, t, still)
         v, k = a['track'].step(x, y, psi, t, still)
         if v < 0:
@@ -988,6 +1049,7 @@ class M7Replay:
         """반환 (v, 곡률). 상태 IDLE/DONE이면 (0, 0)."""
         v, k = self._step(t)
         v, k = self._safety(v, k)
+        self._stall_rules(t, v)
         if self.stop_why and self.state == 'EXEC':
             if self.safety_since is None:
                 self.safety_since = t
@@ -1006,6 +1068,45 @@ class M7Replay:
             self.safety_since = None
         self.last_v = v
         return v, k
+
+    def _stall_rules(self, t: float, v: float):
+        """안전 정지가 이어질 때 서 있지 않기 (11/19 실차 요청).
+        - 후진(BACKUP·ADJUST) 중 뒤에 물체 rear_block_s -> 후진 그만. 다음 재생 전까지 후진 안 함, 차선 잡고 전진 쪽으로 판단
+        - 차로 따라가기(CRUISE) 중 앞에 물체 stall_s -> stall_back_m 물러난 뒤 옆 차로 CSV (뒤도 막혔으면 그 자리에서)"""
+        p = self.p
+        why = self.stop_why or ''
+        x, y, _ = self.pose()
+        if self.state in ('BACKUP', 'ADJUST') and why.startswith('뒤'):
+            if self.rear_t0 is None:
+                self.rear_t0 = t
+            elif t - self.rear_t0 >= p.rear_block_s:
+                self.rear_t0 = None
+                self.rev_blocked = True
+                self.events.append(f'[x={x:.2f}] 후진 중 {why} {p.rear_block_s:.1f}초 -> 후진 그만, 차선 잡고 전진 쪽으로 다시 판단')
+                if self.state == 'ADJUST' and self.adjust is not None:
+                    self.adjust['give_up'] = True        # 지금 자리에서 정한 쪽 CSV
+                else:
+                    self.backup = None
+                    self.state = 'CRUISE'
+                    self.stall_exec = None
+            return
+        self.rear_t0 = None
+        if self.state == 'CRUISE' and why.startswith('앞') and v == 0.0:
+            if self.stall_t0 is None:
+                self.stall_t0 = t
+            elif t - self.stall_t0 >= p.stall_s:
+                self.stall_t0 = None
+                d = self._side_order(self.lane)[0]
+                self.events.append(f'[x={x:.2f}] 차로 따라가다 안전 정지({why}) {p.stall_s:.0f}초 -> '
+                                   + (f'{100 * p.stall_back_m:.0f} cm 물러난 뒤 ' if not self.rev_blocked else '')
+                                   + f'{"left" if d > 0 else "right"} csv')
+                if self.rev_blocked or p.stall_back_m <= 0:
+                    self._begin_exec(d, None, t, '안전 정지 이어짐 -> 옆 차로', x0=x)
+                else:
+                    self._begin_backup(x, None, to_x=x - p.stall_back_m, max_m=p.stall_back_m)
+                    self.stall_exec = d
+        else:
+            self.stall_t0 = None
 
     def _still(self, t) -> bool:
         return self.fu.is_still(self.fu.t_odom if self.fu.t_odom is not None else t)
@@ -1056,10 +1157,11 @@ class M7Replay:
             return min(p.speed, p.sign_slow_speed)
         return p.speed
 
-    def _begin_exec(self, d: int, xo: Optional[float], t, why: str):
+    def _begin_exec(self, d: int, xo: Optional[float], t, why: str, x0: Optional[float] = None):
         p = self.p
         x, y, psi = self.pose()
-        x0 = self._x0(xo)
+        x0 = self._x0(xo) if x0 is None else x0
+        self.rev_blocked = False                 # 새 재생 -> 후진 막힘 표시 풀기
         segs = self._anchored(d, x0)
         if not p.replay_reverse:
             segs = [g for g in segs if g.dir > 0] or segs           # 녹화 안 후진 구간 빼기 (전진만)
@@ -1296,8 +1398,13 @@ class M7Replay:
             r = self._try_m2_backup(x, '섬 앞 가운데 차로에서 옮길 곳 없음')
             if r is not None:
                 return r
-            self.why = '섬 앞 가운데 차로: 옮길 곳 없음 -> 정지'
-            return 0.0, 0.0
+            # 11/19 실차 요청: 서 있지 말고 출구 쪽(모르면 island_force_side) 녹화 CSV를 바로 재생
+            d = (1 if self.exit_pref > 0 else -1) if self.exit_pref is not None else \
+                (1 if str(p.island_force_side).strip().upper() == 'A' else -1)
+            self._begin_exec(d, None, t, f'섬 앞 가운데 차로: 옮길 곳 없음({why}) -> 그래도 '
+                                         f'{"출구 " + self._exit_name() if self.exit_pref is not None else p.island_force_side} 쪽 '
+                                         f'{"left" if d > 0 else "right"} csv', x0=x)
+            return self.track.step(x, y, psi, t, still)
         v_now = self._cruise_speed(t)
         # 미리 계산 (조향에는 안 씀): 지금 차로 앞 장애물과 그때 빠질 차로
         if p.plan_ahead and t - self.plan_t >= p.plan_period_s:
@@ -1312,7 +1419,8 @@ class M7Replay:
                              'start_in_mm': round(1000 * max(0.0, g0 - p.trigger_mm / 1000.0)), 'why': why0}
         # 4. 앞 장애물
         g = self.gap(self.lane)
-        if g is not None and p.backup_if_mm > 0 and g < p.backup_if_mm / 1000.0:
+        if (g is not None and p.backup_if_mm > 0 and g < p.backup_if_mm / 1000.0
+                and not getattr(self, 'rev_blocked', False)):
             # 차로 변경을 못 했는데(막힘·재생 중단) 장애물이 너무 가까움 -> 차로 가운데 맞추며 후진 -> 다시 판단
             self._begin_backup(x, g)
             return 0.0, 0.0
@@ -1324,13 +1432,11 @@ class M7Replay:
             if g <= p.trigger_mm / 1000.0 + lead:
                 d, why = self.choose(self.lane, self.obs[self.lane])
                 to_b = (p.backup_to_mm or p.trigger_mm) / 1000.0
-                if (d is None and p.blocked_align and getattr(self, 'n_align', 0) < p.blocked_align_max
-                        and self._persist('blocked', True)):
-                    # 막힘이 연속 reverse_confirm_frames 스캔 -> 앞 장애물까지 blocked_align_mm로 맞추고 무조건 재생
+                if d is None and p.blocked_align and self._align_cap_ok() and self._persist('blocked', True):
+                    # 막힘이 연속 reverse_confirm_frames 스캔 -> 틈 통과 거리(없으면 blocked_align_mm)로 맞추고 무조건 재생
                     self._begin_adjust(x, g, why)
                     return 0.0, 0.0
-                if self._persist('blocked_backup', d is None and not (p.blocked_align and getattr(self, 'n_align', 0)
-                                                                      < p.blocked_align_max)
+                if self._persist('blocked_backup', d is None and not (p.blocked_align and self._align_cap_ok())
                                  and p.backup_when_blocked and p.backup_if_mm > 0 and g < to_b - 0.02):
                     # 46~50 cm인데 지금 자세로는 경로가 닿음 -> 50 cm까지 물러나 가운데 맞추고 다시
                     #   (경로 검사는 이번 스캔 라이다 점이라 연속 reverse_confirm_frames 스캔 막혀야 후진. 그동안은 아래에서 정지)
@@ -1454,6 +1560,10 @@ class M7Replay:
                                    f'옆 {100 * (y - self.center(self.lane)):+.1f} cm, 방향 {math.degrees(psi):+.1f}°, 카메라로 맞춘 틱 {b.get("cam", 0)} -> 다시 판단')
                 self.backup = None
                 self.state = 'CRUISE'
+                if getattr(self, 'stall_exec', None) is not None:      # 안전 정지 이어져 물러남 -> 옆 차로 CSV
+                    d, self.stall_exec = self.stall_exec, None
+                    self._begin_exec(d, None, t, '안전 정지 이어져 물러난 뒤 옆 차로', x0=x)
+                    return self.track.step(x, y, psi, t, still)
             return 0.0, 0.0
         v, k = b['track'].step(x, y, psi, t, still)
         kc = self._backup_lane_kappa(t) if v < 0 else None
