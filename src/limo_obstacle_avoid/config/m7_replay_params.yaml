@@ -2,7 +2,7 @@
 # 항목 설명: limo_obstacle_avoid/m7_replay_core.py ReplayParams. 실행 중 바꾸기: ros2 param set /avoid_node trigger_mm 560.0
 /**:
   ros__parameters:
-    trigger_mm: 540.0          # ★ 녹화할 때 라이다 중심 -> 앞 장애물 거리 (녹화한 자리와 같게). 11/17 546 -> 540
+    trigger_mm: 590.0          # ★ 회피 시작 거리 (라이다 중심 -> 앞 장애물). 11/19 540 -> 590 실차 요청 (+5 cm, 녹화 CSV 여유 왼 +10.6 -> 약 +14 cm). 11/17 546 -> 540
     latency_s: 0.15            # 판단~반응 지연 (속도 x 지연만큼 일찍 판단)
     brake_k: 0.13              # 정지 명령 후 밀림 = 0.13 x 속도 (calib 4번)
     speed: 0.17                # 차로 따라 직진 (11/17 밤 0.20 -> 0.17: 차로 바꾼 뒤 차선 빨리 잡게. 재생 속도 exec_speed는 녹화와 같게 0.20)
@@ -56,18 +56,27 @@
     obs_confirm_frames: 3
     obs_confirm_tol: 0.10
     reverse_confirm_frames: 3
-    # 11/19 실차 '앞·옆 막혔다고 60초 서 있음(틈은 있음)': 막힘(녹화 경로 양쪽 다 닿음)이 연속 3스캔이면 차로 가운데 따라 앞뒤로 움직여
-    #   앞 장애물까지 라이다 거리를 blocked_align_mm에 맞춘 뒤 녹화 경로를 무조건 재생. 1차선 -> right csv, 3차선 -> left csv 고정.
-    #   2차선은 틈 검사(앞 장애물 빼고 옆 차로 물체만, 차체 + blocked_gap_margin) 통과한 쪽 -> 출구 쪽 -> 앞이 더 빈 쪽 -> choose_tie_side.
-    #   ★ 녹화 경로 기하 (가운데·반듯): 400 mm면 앞 장애물 모서리와 왼쪽 -1.0 cm(겹침) / 오른쪽 +0.4 cm, 440 mm면 +2.3 / +3.1 cm
-    #   로그: '막힘 (...) -> 앞 장애물 N mm를 400 mm로 전진/후진', '맞춤 끝: ... -> 무조건 재생 ...'. 끄기: blocked_align false
+    # 11/19 실차 '앞·옆 막혔다고 60초 서 있음(틈은 있음)': 막힘(녹화 경로 양쪽 다 닿음)이 연속 3스캔이면
+    #   앞 장애물까지 470~650 mm 중 녹화 CSV가 차체 그대로(blocked_gap_margin 0) 지나가는 거리를 찾아(지금 거리에서 가까운 것부터)
+    #   앞뒤로 맞추고 그 자리에서 재생. 없거나 3번째부터는 앞 장애물만 보고 blocked_align_mm(500)에서 무조건 재생. 횟수 제한 없음.
+    #   바깥 차로는 늘 가운데 쪽 CSV(왼쪽 바깥 +1 -> right csv / 오른쪽 바깥 -1 -> left csv), 바깥으로는 절대 안 감.
+    #   11/19 실차 '공간 있는데 전진·후진 반복': 400 mm 고정은 backup_if 460 안 + CSV가 앞 장애물 모서리와 -1.0 cm라 재생 정지 ->
+    #   50 cm 후진 -> 다시 400 반복. 그래서 거리 찾기 + 맞춤 거리 >= backup_if + 20 mm
     blocked_align: true
-    blocked_align_mm: 400.0      # ★ 실차 주행 뒤 정함
+    blocked_align_mm: 500.0      # 틈을 못 찾을 때 (녹화 CSV 앞 장애물 여유 왼 +7.2 / 오 +8.3 cm)
+    blocked_search_min_mm: 470.0
+    blocked_search_max_mm: 650.0
+    blocked_search_step_mm: 10.0
+    blocked_search_tries: 3
     blocked_align_tol_mm: 15.0
     blocked_align_speed: 0.10
     blocked_align_max_m: 0.60
     blocked_gap_margin: 0.0
-    blocked_align_max: 3         # M7 한 번에 최대 (재생이 안전 정지로 끊겨 같은 자리 반복 방지)
+    blocked_align_max: 0         # 0 = 제한 없음 (서 있지 않음)
+    island_force_side: 'B'       # 섬 앞 가운데 차로에서 옮길 곳 없으면 출구 쪽, 모르면 이 쪽 CSV 바로
+    stall_s: 2.0                 # 차로 따라가다 안전 정지가 이만큼 이어지면 stall_back_m 물러나 옆 차로 CSV
+    stall_back_m: 0.25
+    rear_block_s: 1.0            # 후진 중 뒤 라이다에 물체가 이만큼 -> 후진 그만, 전진 쪽으로 판단
     # 11/19 bag 보고서: 두 차로 앞 여유가 비슷하면(30 cm 안) 출구 쪽, 모르면 정한 쪽 (66 mm 차이로 동전 던지기 하던 것)
     choose_tie_m: 0.30
     choose_tie_side: 'A'
