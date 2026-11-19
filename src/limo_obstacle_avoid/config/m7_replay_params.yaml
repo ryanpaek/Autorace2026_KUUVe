@@ -30,7 +30,7 @@
     m2_test_start: false       # 시험용: 켜지는 자리를 곧바로 M2 시작 지점으로 (M7 건너뛰고 갈림길만)
     start_lane_no: 0           # 시험용: 켤 때 차로 번호 1/2/3 (0 = 2차선 가정, 카메라 차로 번호로 고쳐짐)
     backup_if_mm: 460.0        # 11/18 시험: 앞 장애물이 46 cm보다 가까우면 후진 (녹화 경로가 여유 3 cm로 통과하는 최소 거리). 11/17 350
-    backup_to_mm: 500.0        #   50 cm까지 후진 (차선 노드로 가운데 맞추며) -> 그 자리에서 바로 재생
+    backup_to_mm: 540.0        #   11/19 500 -> 540 (녹화 거리): 500은 밀림으로 485~500에 서서 '460~500 + 닿음 -> 후진' 경계에 걸려 반복. 차선 노드로 가운데 맞추며
     exec_from_here: true       # 11/18 시험: 54~46 cm 사이면 녹화 경로를 지금 위치에 붙여 바로 재생
     backup_when_blocked: true  #   46~50 cm인데 지금 자세로 경로가 닿으면 50 cm까지 후진
     backup_lane_center: true   #   후진 중 가운데 맞추기를 차선 노드 offset/heading으로 (안 보이면 위치 추정)
@@ -63,7 +63,7 @@
     #   11/19 실차 '공간 있는데 전진·후진 반복': 400 mm 고정은 backup_if 460 안 + CSV가 앞 장애물 모서리와 -1.0 cm라 재생 정지 ->
     #   50 cm 후진 -> 다시 400 반복. 그래서 거리 찾기 + 맞춤 거리 >= backup_if + 20 mm
     blocked_align: true
-    blocked_align_mm: 500.0      # 틈을 못 찾을 때 (녹화 CSV 앞 장애물 여유 왼 +7.2 / 오 +8.3 cm)
+    blocked_align_mm: 540.0      # 틈을 못 찾을 때 = 녹화 CSV를 녹화한 거리 (앞 장애물 여유 왼 +10.6 / 오 +11.8 cm). 11/19 500 -> 540
     blocked_search_min_mm: 470.0
     blocked_search_max_mm: 650.0
     blocked_search_step_mm: 10.0
