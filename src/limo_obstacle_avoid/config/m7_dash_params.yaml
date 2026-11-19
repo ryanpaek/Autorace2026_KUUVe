@@ -1,0 +1,15 @@
+# M7 점선 기준 회피 (m7_dash_node, 11/19 실험·단독). 실행 중 바꾸기: ros2 param set /m7_dash_node <이름> <값> (다음 enable 때 반영)
+m7_dash_node:
+  ros__parameters:
+    cmd_topic: /cmd_vel          # 합칠 때 /obstacle/cmd_vel
+    speed: 0.20
+    tight_speed: 0.14            # 연속 회피 빈 칸이 짧을 때
+    clear: 0.04                  # 장애물 옆 여유 (시뮬 최소 간격 4~5 cm). 0.03은 세로 배치에서 앞 정지 늘어남
+    clear_x: 0.03
+    hold_rear: 0.05
+    shift_len: 0.70
+    lookahead: 0.35
+    end_x: 4.6                   # 시작선부터 끝까지 (m) — 표지판 앞 거리 실측해서 맞출 것
+    yellow_r_y: -0.52            # 오른쪽 노란선 안쪽 모서리 (점선 기준) — 실측
+    white_v_min: 180             # params.yaml lane_node와 같은 값
+    white_s_max: 60
