@@ -228,6 +228,7 @@ DEFAULT_PARAMS = {
     'm1_corner_done_deg': 85.0,      # 11/19: 4번(M1) 코너 미리보기 끝 각도 (1~3번 m7_corner_done_deg와 따로)
     'm7_corner_k_gain': 1.0,
     'm1_corner_speed': 0.20,         # 코너 다 돌 때까지 속도
+    'm1_inner_after_mm': 0.0,        # 11/19: 4번 코너 끝 뒤 이만큼은 안쪽 선만 (위쪽 출발 차로 선 착각 방지). 0 = 예전
     # 코너(M8·M1 미리보기) 동안 차로 중심에서 바깥쪽으로 이만큼 (안쪽 선 밟던 것, 11/13). 차선이 보일 때만 효과 (target_offset_mm)
     'corner_outward_mm': 30.0,
     'm8_hold_speed': 0.15,           # 위 한쪽 선 모드 동안 속도 (M7 직전 코너처럼 코너에서 직진하지 않게 천천히)
@@ -610,6 +611,7 @@ class MissionFSM:
                     start = self.p['m1_corner_start_mm']
                 self.m7c = (yaw0, inp.dist_mm, 'M1_TRAFFIC', start)
                 self.m1_inner_on = False
+                self.m1_done_at = None
                 self.m1fc = None
                 self._m1_arc_hold, self._m1_under_logged = 0, False
                 if self.p.get('m1_force_corner', True):
@@ -1541,6 +1543,7 @@ class MissionFSM:
             m['done'] = True
             self.m7c = None
             self.log.append(f'M1 forced corner done (turned {math.degrees(turned):.0f} deg, off {err:.0f}mm) -> lane')
+            self.m1_done_at = inp.dist_mm
             return None
         tx, ty = self._m1_path(m['s'] + p['m1_force_ld_mm'], m['xs'], R, d)
         yaw_ref = m['axis'] + math.atan2(ty - m['y'], tx - m['x'])
@@ -1580,11 +1583,12 @@ class MissionFSM:
             return fc
         c = getattr(self, 'm7c', None)
         if c is None or c[2] != 'M1_TRAFFIC':
-            return self._lane(speed)
+            return self._m1_after(inp, speed)
         k = self.m7_corner_k(inp.dist_mm, inp.yaw) or []
         if getattr(self, 'm7c', None) is None:            # 방금 다 돎
             self.log.append('M1 corner done')
-            return self._lane(speed)
+            self.m1_done_at = inp.dist_mm
+            return self._m1_after(inp, speed)
         n = int(self.p.get('m8_inner_ahead_mm', 600.0) / 100.0) + 1
         near = [v for v in k[:n] if abs(v) > 0.1]
         if near and not getattr(self, 'm1_inner_on', False):
@@ -1595,6 +1599,14 @@ class MissionFSM:
             mode = 'right_only' if self.p['m7_corner_dir'] < 0 else 'left_only'
             return self._lane(v, mode, **self._corner_outward())
         return self._lane(v)
+
+    def _m1_after(self, inp, speed: float) -> dict:
+        """11/19 실차: 4번 코너 출구 바로 위(왼쪽)에 출발 차로가 붙어 있어, 코너가 끝나자마자 양쪽 선 모드로 돌아가면
+        아직 비스듬히 보이는 그 차로 선을 내 왼쪽 선으로 잡고 올라감 -> 코너 끝 뒤 m1_inner_after_mm 동안은 안쪽(오른쪽) 선만."""
+        at = getattr(self, 'm1_done_at', None)
+        if at is not None and inp.dist_mm - at < self.p.get('m1_inner_after_mm', 0.0):
+            return self._lane(speed, 'right_only' if self.p['m7_corner_dir'] < 0 else 'left_only')
+        return self._lane(speed)
 
     def _m8_speed(self, base: float) -> float:
         """한쪽 선 모드(합류 ~ 코너) 동안은 m8_hold_speed 로 천천히"""

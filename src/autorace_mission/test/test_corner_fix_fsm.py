@@ -91,3 +91,18 @@ def test_done_deg_m1_separate():
     m1.m1fc = None                                                      # 강제 원호 말고 미리보기 끝 각도만 봄
     assert m1.m7_corner_k(1600.0, math.radians(-81.0)) is not None      # 4번: 81°는 아직
     assert m1.m7_corner_k(1700.0, math.radians(-86.0)) is None
+
+
+def test_m1_inner_line_kept_after_corner():
+    def run(after):
+        f = MissionFSM({'start_state': 'M8_CONES', 'm1_inner_after_mm': after, 'm1_force_corner': False})
+        f._goto('M1_TRAFFIC', Inputs(t=0.0, dist_mm=1000.0, yaw=0.0), 'cones done')
+        modes = []
+        for d, deg in ((1500.0, -40.0), (2200.0, -86.0), (2500.0, -90.0), (2800.0, -90.0)):
+            modes.append(f._m1_lane(Inputs(t=0.0, dist_mm=d, yaw=math.radians(deg)), 0.2).get('mode'))
+        return modes
+    m = run(500.0)
+    assert m[0] == 'right_only'                     # 코너 중 안쪽 선
+    assert m[1] == 'right_only' and m[2] == 'right_only'   # 코너 끝(2200) 뒤 500 mm 안: 안쪽 선 유지
+    assert m[3] in (None, 'normal')                 # 500 mm 지나면 양쪽 선
+    assert run(0.0)[1] in (None, 'normal')          # 0 = 예전 (끝나자마자 양쪽 선)
