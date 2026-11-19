@@ -166,11 +166,6 @@ class LaneParams:
     yellow_h_max: int = 40
     yellow_s_min: int = 80
     yellow_v_min: int = 80
-    # 11/19: 갈림길 섬 기준 (left_only/right_only에서만). A(왼쪽 갈래)면 섬 왼쪽 변 = 내 차로 오른쪽 선(right_only),
-    #   B면 섬 오른쪽 변 = 왼쪽 선(left_only). 차가 섬 변 위에 걸쳐 있으면 가장 가까운 선이 섬 반대쪽 변이 됨(1119_09 133~136 s) ->
-    #   그 갈래 바깥선(B면 맨 오른쪽)이 보이면 거기서 차로 폭(0.8~1.25배) 안쪽에 있는 선을 섬 변으로 고른다. false = 예전
-    island_ref: bool = False
-    island_letter_frames: int = 8          # 그 갈래 바닥 글자를 본 뒤 이 프레임 동안 글자 위치로 섬 변을 고름 (글자 = 차로 가운데)
     # 마스크 전처리
     suppress_transverse: bool = True  # 가로로 긴 선(정지선·시작선)을 차선 마스크에서 제거
     max_run_mm: float = 150.0         # 이보다 긴 가로 연속 화소는 차선이 아니라고 본다
@@ -181,6 +176,11 @@ class LaneParams:
     min_peak: int = 20                # 후보 열이 밴드 안에서 가져야 할 최소 화소 수
     pair_min_ratio: float = 0.6       # 쌍 폭 하한 (예상 폭 대비). 노면 마름모와 짝을 막음
     pair_max_ratio: float = 1.35
+    # 11/19: 갈림길 섬 기준 (left_only/right_only에서만). A(왼쪽 갈래)면 섬 왼쪽 변 = 내 차로 오른쪽 선(right_only),
+    #   B면 섬 오른쪽 변 = 왼쪽 선(left_only). 차가 섬 변 위에 걸쳐 있으면 가장 가까운 선이 섬 반대쪽 변이 됨(1119_09 133~136 s) ->
+    #   그 갈래 바깥선(B면 맨 오른쪽)이 보이면 거기서 차로 폭(0.8~1.25배) 안쪽에 있는 선을 섬 변으로 고른다. false = 예전
+    island_ref: bool = False
+    island_letter_frames: int = 8          # 그 갈래 바닥 글자를 본 뒤 이 프레임 동안 글자 위치로 섬 변을 고름 (글자 = 차로 가운데)
     continuity_lambda: float = 3.0    # 쌍 점수 = |폭-예상| + lambda*|중점-직전 중점|
     side_deadband_mm: float = 40.0    # 한쪽 선이 중심 근처일 때 좌/우 판정 유지 폭
     side_track_mm: float = 300.0      # 한쪽 선만 보일 때, 직전 시작점에서 이 안이면 같은 선으로 본다 (차로 폭의 절반 남짓)
@@ -1533,12 +1533,12 @@ class LaneFollower:
         self.last_side = None
         self.last_lr = (None, None)          # 직전 프레임 좌/우 선 시작점 (BEV 열)
         self.prev_line_masks = (None, None)  # 직전 프레임 좌/우 선 화소 (BEV, 조금 부풀림)
-        self._letter_seen = None             # 11/19 섬 기준: (글자, 차 기준 옆 mm, 본 프레임 번호)
-        self._frame_n = 0
         self.prev_target_x = None
         self.reject_count = 0
         self.lost_frames = 0
         self.kappa_cmd = 0.0
+        self._letter_seen = None             # 11/19 섬 기준: (글자, 차 기준 옆 mm, 본 프레임 번호)
+        self._frame_n = 0
         self.in_corner_ld = False
         self.in_corner_spd = False
         self.last_good_kappa = 0.0
