@@ -222,7 +222,8 @@ def test_plan_ahead_before_trigger():
     m = _cruising()
     pts = [(1.5 + 0.01 * i, -0.10 + 0.02 * j) for i in range(3) for j in range(11)]     # 2차선 1.5 m 앞
     pts += [(1.3 + 0.01 * i, 0.52 - 0.10 + 0.02 * j) for i in range(3) for j in range(11)]   # 1차선도 막힘
-    m.on_scan_points(0.0, pts)
+    for _ in range(3):                                      # 11/19: 장애물은 연속 3스캔 확인
+        m.on_scan_points(0.0, pts)
     v, k = m.step(1.0)
     assert m.state == 'CRUISE' and v > 0                    # 아직 재생 안 함
     assert m.plan['obstacle_mm'] is not None and 1300 < m.plan['obstacle_mm'] < 1500
@@ -259,13 +260,15 @@ def test_no_reverse_starts_replay_without_align_even_off_center():
     m._shift(ddy=0.06, ddpsi=_m.radians(5.0))
     assert not m.aligned()
     pts = [(0.10 + 0.88 + 0.01 * i, -0.10 + 0.02 * j) for i in range(3) for j in range(11)]   # 라이다 880 mm 앞 2차선
-    m.on_scan_points(0.0, pts)
+    for _ in range(3):                                      # 11/19: 장애물은 연속 3스캔 확인
+        m.on_scan_points(0.0, pts)
     v, k = m.step(1.0)
     assert m.state == 'EXEC' and v > 0
     old = _cruising()
     old.p.no_reverse, old.p.align_before = False, True
     old._shift(ddy=0.06, ddpsi=_m.radians(5.0))
-    old.on_scan_points(0.0, pts)
+    for _ in range(3):
+        old.on_scan_points(0.0, pts)
     old.step(1.0)
     assert old.state == 'STOP'                              # 예전: 서서 가운데 맞추기로
 
@@ -277,7 +280,8 @@ def test_no_reverse_never_backs_off_when_blocked():
     pts = []
     for yc in (0.0, 0.52, -0.52):
         pts += [(0.10 + 0.80 + 0.01 * i, yc - 0.10 + 0.02 * j) for i in range(3) for j in range(11)]
-    m.on_scan_points(0.0, pts)
+    for _ in range(3):                                      # 11/19: 장애물은 연속 3스캔 확인
+        m.on_scan_points(0.0, pts)
     for i in range(80):                                     # 8초
         v, k = m.step(1.0 + 0.1 * i)
         assert v >= 0.0 and m.state != 'ALIGN'

@@ -95,11 +95,38 @@ class ReplayParams:
     obs_min_pts: int = 3                # 가장 가까운 점 앞 obs_bin 안에 이만큼 있어야 장애물 (잡음 제외)
     obs_bin: float = 0.10
     look_max: float = 2.5               # 앞 이만큼까지 봄
+    # 11/19 실차 '앞에 장애물이 없는데 후진': 라이다 점이 한 스캔만 튀어도 그 스캔으로 '46 cm 앞 장애물' -> 바로 후진했다.
+    #   차로 장애물 앞면은 연속 obs_confirm_frames 스캔 동안 같은 자리(차로 좌표 ± obs_confirm_tol)에 보여야 판단(트리거·후진·
+    #   차로 고르기)에 씀. 진짜 장애물은 2.5 m 앞부터 계속 보이므로 트리거가 늦어지지 않음. 차체 바로 앞 안전 정지는 그대로 한 스캔
+    obs_confirm_frames: int = 3         # 1 = 예전 (한 스캔으로 바로)
+    obs_confirm_tol: float = 0.10
+    # 라이다 점으로 정하는 후진(지금 자세로 막힘·출구 쪽·M2 시작 자리)은 그 조건이 연속 이만큼 스캔 그대로여야 함. 그동안은 정지만
+    reverse_confirm_frames: int = 3     # 1 = 예전
     track_half: float = 0.80            # |y| 이보다 바깥 점은 트랙 밖 (무시)
     # 차로 고르기
     hit_margin: float = 0.03            # 차로 고를 때 녹화 경로를 굴려 보며 차체 + 이만큼 안에 라이다 점이 없어야 그쪽으로 감
     exit_prefer_m: float = 1.6          # 섬까지 이만큼 안이면 출구 쪽 차로를 먼저 고름
     blocked_wait_s: float = 3.0         # 갈 곳 없을 때 기다리는 시간 (그 뒤엔 가장 멀리 빈 쪽)
+    # 11/19 실차 '앞·옆 다 막혔다고 보고 영원히 서 있음(실제로는 빠질 틈 있음)': 녹화 경로 하나를 정해진 자리(장애물 - trigger)에
+    #   붙여 본 것만으로 '옆 막힘'을 정했다. 막힘이 연속 reverse_confirm_frames 스캔이면 다른 길을 찾는다 (찾는 순서):
+    #   1) 그 자리 ~ rescue_fwd_max 더 간 자리에서: 녹화 경로 / 만든 S자(회전반경 = 최소 x rescue_r_scale, 꺾는 각 작은 것부터)
+    #   2) 1이 다 막히고 rescue_back이면: 차로 따라 rescue_step씩 rescue_back_max까지 물러난 자리에서 같은 길
+    #   길은 차체 + rescue_margin(만든 S자) / hit_margin(녹화)으로 지금 라이다 점·섬에 안 닿고, 도착 뒤 rescue_tail 더 가도 안 닿아야.
+    #   다 막혔으면 예전처럼 서서 rescue_period_s마다 다시 찾음.
+    rescue: bool = True
+    rescue_r_scale: float = 1.2
+    rescue_deg_min: float = 25.0
+    rescue_deg_max: float = 60.0
+    rescue_deg_step: float = 5.0
+    rescue_margin: float = 0.04
+    rescue_island_margin: float = 0.08  # 섬(라이다에 안 보여 도면 위치로만 앎)은 위치 추정 앞뒤 오차만큼 더 넓게
+    rescue_fwd_max: float = 0.20
+    rescue_back: bool = True
+    rescue_back_max: float = 0.50
+    rescue_step: float = 0.05          # 앞으로 더 가 볼 간격
+    rescue_back_step: float = 0.10     # 물러나 볼 간격
+    rescue_tail: float = 0.15
+    rescue_period_s: float = 0.5
     # 정렬
     # 11/17 실차 요청: 재생 전후 '앞뒤로 움직이며 가운데 맞추기'가 너무 쉽게 걸림 -> 가운데 맞추기는 빼고 차선 주행을 100% 믿음.
     #   (장애물이 backup_if_mm보다 가까울 때 후진은 그대로 함)
@@ -366,7 +393,11 @@ class M7Replay:
         self.align = None
         self.after_align = False
         self.pending = None           # 정렬 뒤 실행할 동작 (방향, 장애물 x)
-        self.obs: Dict[int, Optional[float]] = {}
+        self.obs: Dict[int, Optional[float]] = {}        # 확정된 차로 장애물 앞면 x (obs_confirm_frames 스캔 연속)
+        self.obs_raw: Dict[int, Optional[float]] = {}    # 이번 스캔만 본 것 (status·로그용)
+        self.front_hist: List[Dict[int, List[float]]] = []   # 최근 스캔별 차로 장애물 앞면들
+        self.scan_seq = 0                                # 받은 스캔 수 (연속 조건 세기)
+        self.persist: Dict[str, Tuple[int, int]] = {}    # 조건 이름 -> (처음 참인 스캔, 마지막 참인 스캔)
         self.pts: List[Tuple[float, float]] = []
         self.sign_pts: list = []          # 표지판으로 보고 뺀 점 (안전 정지에만 씀)
         self.m2_backed = False
@@ -481,7 +512,37 @@ class M7Replay:
             self.events.append(f'[x={x:.2f}] 섬 앞 표지판으로 보고 장애물에서 뺌 ({len(self.sign_pts)}점, 꼭짓점 기준 '
                                f'{100 * (sx - self.p.section_length):+.0f} cm)')
         self.pts = loc
-        self.obs = self._lane_obstacles(loc, x + self.p.lidar_x - 0.05)           # 앞 (라이다 앞)
+        fronts = self._lane_fronts(loc, x + self.p.lidar_x - 0.05)                # 앞 (라이다 앞)
+        self.scan_seq += 1
+        n = max(1, int(self.p.obs_confirm_frames))
+        self.front_hist = (self.front_hist + [fronts])[-n:]
+        self.obs_raw = {k: (f[0] if f else None) for k, f in fronts.items()}
+        self.obs = self._confirmed(n)
+
+    def _confirmed(self, n: int) -> Dict[int, Optional[float]]:
+        """차로마다: 이번 스캔 앞면들 중 앞선 n-1 스캔 모두에 ± obs_confirm_tol 안 짝이 있는 가장 가까운 것 (없으면 None).
+        차로 좌표(odom+IMU)로 비교하므로 차가 움직여도 서 있는 장애물은 같은 자리. 한 스캔만 튄 점은 짝이 없어 버려짐."""
+        hist = self.front_hist
+        last = hist[-1] if hist else {}
+        if len(hist) < n:
+            return {k: None for k in last}
+        tol = self.p.obs_confirm_tol
+        out = {}
+        for k, fs in last.items():
+            out[k] = next((f for f in fs if all(any(abs(f - g) <= tol for g in h.get(k, ())) for h in hist[-n:-1])),
+                          None)
+        return out
+
+    def _persist(self, key: str, cond: bool) -> bool:
+        """cond가 연속 reverse_confirm_frames 스캔 동안 참이었나 (스캔 하나라도 거짓이거나 빠지면 처음부터)."""
+        if not cond:
+            self.persist.pop(key, None)
+            return False
+        first, last = self.persist.get(key, (self.scan_seq, self.scan_seq))
+        if last < self.scan_seq - 1:                 # 사이 스캔에서 참이 아니었음 (확인 안 됨) -> 다시
+            first = self.scan_seq
+        self.persist[key] = (first, self.scan_seq)
+        return self.scan_seq - first + 1 >= max(1, int(self.p.reverse_confirm_frames))
 
     def _split_sign(self, loc):
         """섬 앞 꼭짓점 근처의 작은 덩어리 = 갈림길 표지판 -> (나머지 점, 표지판 점)"""
@@ -512,20 +573,27 @@ class M7Replay:
         ids = set(map(id, sign))
         return [q for q in loc if id(q) not in ids], sign
 
-    def _lane_obstacles(self, loc, x_min) -> Dict[int, Optional[float]]:
+    def _lane_fronts(self, loc, x_min) -> Dict[int, List[float]]:
+        """차로마다 장애물 앞면 x 목록 (가까운 순). 앞면 = 그 점부터 obs_bin 안에 점이 obs_min_pts 이상.
+        첫 번째가 예전 '가장 가까운 장애물'과 같음. 한 앞면을 찾으면 obs_bin 뒤부터 다음 앞면을 찾음."""
         p = self.p
         out = {}
         for k in range(-p.num_side_lanes, p.num_side_lanes + 1):
             yc = self.center(k)
             xs = sorted(lx for lx, ly, _, _ in loc if abs(ly - yc) <= p.corridor_half
                         and x_min <= lx <= x_min + p.look_max)
-            near = None
+            fr: List[float] = []
             for i, xv in enumerate(xs):
+                if fr and xv <= fr[-1] + p.obs_bin:
+                    continue
                 if sum(1 for xw in xs[i:i + 40] if xw - xv <= p.obs_bin) >= p.obs_min_pts:
-                    near = xv
-                    break
-            out[k] = near
+                    fr.append(xv)
+            out[k] = fr
         return out
+
+    def _lane_obstacles(self, loc, x_min) -> Dict[int, Optional[float]]:
+        """차로마다 가장 가까운 장애물 앞면 (한 스캔). 확인 없이 쓰는 곳용."""
+        return {k: (f[0] if f else None) for k, f in self._lane_fronts(loc, x_min).items()}
 
     def on_lane(self, lane: dict, t: Optional[float] = None):
         """차선 노드 /lane/status: 양쪽 선이 보이면 옆 위치·방향 보정, 차로 번호 확인. CRUISE 조향에도 씀 (cruise_lane)."""
@@ -554,6 +622,12 @@ class M7Replay:
                     self.events.append(f'카메라 차로 번호 {cand} -> 차로 {k} => {cand}로 고침')
                     self.lane = self.target = cand
                     self.cam_ids.clear()
+                    # 차로 번호가 통째로 (cand - k)만큼 밀림 -> 차로별 장애물 기록도 같은 만큼 밀어 둠 (x는 그대로라 확인 이어감)
+                    sh, n_ = cand - k, p.num_side_lanes
+                    self.front_hist = [{kk + sh: v for kk, v in h.items() if abs(kk + sh) <= n_} for h in self.front_hist]
+                    self.obs = {kk + sh: v for kk, v in self.obs.items() if abs(kk + sh) <= n_}
+                    self.obs_raw = {kk + sh: v for kk, v in self.obs_raw.items() if abs(kk + sh) <= n_}
+                    self.persist.clear()
                     x, y, psi = self.pose()
                     k = cand
                     break
@@ -596,6 +670,13 @@ class M7Replay:
         self.m2_backed = False
         self._sign_logged = False
         self.cam_ids.clear()
+        self.front_hist = []
+        self.obs, self.obs_raw = {}, {}
+        self.persist = {}
+        self.rescue_t = -1e9
+        self.rescue_phase = 'fwd'
+        self.n_rescue = 0
+        self._rescue_none_logged = False
         self.events.append(f'시작: 차로 {self.lane}, 섬까지 {p.section_length:.2f} m, 출구 {self._exit_name()}')
 
     def stop(self):
@@ -671,20 +752,31 @@ class M7Replay:
 
     def path_hit(self, d: int, x0: float) -> Optional[Tuple[float, float]]:
         """녹화 경로를 (x0, 지금 차로 중심)에 붙여 굴려 봤을 때 차체(+여유)에 라이다 점이 들어오면 그 점 (x, y). 없으면 None."""
+        return self._sweep_hit(self._anchored(d, x0), self.p.hit_margin)
+
+    def _sweep_hit(self, segs: List[Path], m: float, step: int = 3, end: bool = False,
+                   isl_m: float = 0.0) -> Optional[Tuple[float, float]]:
+        """구간들을 따라 차체(+여유 m)를 굴려 라이다 점·섬(+여유 isl_m)에 닿는 첫 점 (x, y). 없으면 None. end: 구간 끝 자세도 꼭 봄"""
         p = self.p
-        segs = self._anchored(d, x0)
-        m = p.hit_margin
         pts = [(lx, ly) for lx, ly, _, _ in self.pts]
+        if pts and segs:
+            # 경로 둘레(차 대각선 + 여유) 밖 점은 미리 뺌 (속도만, 결과 같음)
+            r = math.hypot(max(p.robot_front, p.robot_rear), p.robot_half_width) + m + 0.01
+            xs = [v for g in segs for v in g.x]
+            ys = [v for g in segs for v in g.y]
+            x_lo, x_hi, y_lo, y_hi = min(xs) - r, max(xs) + r, min(ys) - r, max(ys) + r
+            pts = [q for q in pts if x_lo <= q[0] <= x_hi and y_lo <= q[1] <= y_hi]
         isl_half = p.island_half_width
         for g in segs:
-            for i in range(0, len(g), 3):
+            n = len(g)
+            for i in list(range(0, n, step)) + ([n - 1] if end and n and (n - 1) % step else []):
                 cx, cy, h = g.x[i], g.y[i], g.h[i]
                 c, s_ = math.cos(h), math.sin(h)
                 # 섬은 바닥 선(라이다에 안 보임) -> 도면 위치로: 섬 앞 끝(section_length)부터 가운데 차로 폭
                 for a_, b_ in ((p.robot_front, p.robot_half_width), (p.robot_front, -p.robot_half_width),
                                (-p.robot_rear, p.robot_half_width), (-p.robot_rear, -p.robot_half_width)):
                     qx, qy = cx + c * a_ - s_ * b_, cy + s_ * a_ + c * b_
-                    if qx >= p.section_length and abs(qy) < isl_half:
+                    if qx >= p.section_length - isl_m and abs(qy) < isl_half + isl_m:
                         return qx, qy
                 for lx, ly in pts:
                     dx, dy = lx - cx, ly - cy
@@ -693,6 +785,221 @@ class M7Replay:
                     if -p.robot_rear - m <= a <= p.robot_front + m and abs(b) <= p.robot_half_width + m:
                         return lx, ly
         return None
+
+    # ---------- 막혔을 때 다른 길 찾기 (rescue) ----------
+    @staticmethod
+    def _line(x0: float, x1: float, y: float, direction: int = 1) -> Path:
+        """차로 방향 직선 (x0 -> x1, 옆 y)."""
+        n = max(2, int(abs(x1 - x0) / 0.02) + 1)
+        return Path([x0 + (x1 - x0) * i / (n - 1) for i in range(n)], [y] * n, [0.0] * n, direction)
+
+    @staticmethod
+    def _ray(x: float, y: float, h: float, dist: float, direction: int = 1) -> Path:
+        """(x, y)에서 차 방향 h 그대로 dist만큼 앞(direction +1)·뒤(-1)로 가는 직선."""
+        n = max(2, int(dist / 0.02) + 1)
+        c, s_ = math.cos(h), math.sin(h)
+        return Path([x + direction * dist * c * i / (n - 1) for i in range(n)],
+                    [y + direction * dist * s_ * i / (n - 1) for i in range(n)], [h] * n, direction)
+
+    @staticmethod
+    def _arc_d(r: float, pa: float, pb: float) -> Tuple[float, float]:
+        """반경 r로 차 방향 pa -> pb 돌 때 (앞 dx, 옆 dy)."""
+        sg = 1.0 if pb >= pa else -1.0
+        return sg * r * (math.sin(pb) - math.sin(pa)), -sg * r * (math.cos(pb) - math.cos(pa))
+
+    def _s_curve(self, x0: float, y0: float, h0: float, y1: float, deg: float, r: float,
+                 tail: float) -> Optional[Tuple[Path, float]]:
+        """지금 자세 (x0, y0, 차 방향 h0)에서 (?, y1, 차로 방향 0)까지: 반경 r로 ±deg까지 틀고 - 직선 - 반경 r로 폄 + tail 직선.
+        옆 거리가 모자라면 각을 줄여 직선 0으로 맞춤. 안 되면 None. 반환 (경로, 실제 각 deg)."""
+        Y = y1 - y0
+        sg = 1.0 if Y >= 0 else -1.0
+        if abs(Y) < 0.01 and abs(h0) < math.radians(2.0):
+            return None                                       # 옮길 게 없음 (차로 안)
+
+        def miss(th):                                          # 직선 길이 x sin(각) (음수면 너무 많이 옮김)
+            pm = sg * th
+            return Y - self._arc_d(r, h0, pm)[1] - self._arc_d(r, pm, 0.0)[1]
+
+        th = math.radians(deg)
+        if sg * miss(th) < 0:                                  # 이 각이면 넘침 -> 직선 없이 맞는 각 (반으로 나눠 찾기)
+            lo, hi = math.radians(1.0), th
+            if sg * miss(lo) < 0:
+                return None
+            for _ in range(30):
+                mid = 0.5 * (lo + hi)
+                lo, hi = (mid, hi) if sg * miss(mid) >= 0 else (lo, mid)
+            th = lo
+        pm = sg * th
+        if abs(pm - h0) > math.radians(90.0):
+            return None
+        st = max(0.0, miss(th) / math.sin(pm)) if abs(math.sin(pm)) > 1e-6 else 0.0
+        xs, ys, hs = [x0], [y0], [h0]
+
+        def arc(pa, pb):
+            xa, ya = xs[-1], ys[-1]
+            sgn = 1.0 if pb >= pa else -1.0
+            n = max(1, int(r * abs(pb - pa) / 0.02))
+            for i in range(1, n + 1):
+                ph = pa + (pb - pa) * i / n
+                xs.append(xa + sgn * r * (math.sin(ph) - math.sin(pa)))
+                ys.append(ya - sgn * r * (math.cos(ph) - math.cos(pa)))
+                hs.append(ph)
+
+        arc(h0, pm)
+        xa, ya = xs[-1], ys[-1]
+        n = int(st / 0.02)
+        for i in range(1, n + 1):
+            d = st * i / n
+            xs.append(xa + d * math.cos(pm))
+            ys.append(ya + d * math.sin(pm))
+            hs.append(pm)
+        arc(pm, 0.0)
+        if abs(ys[-1] - y1) > 0.01:                           # 계산 확인 (안 맞으면 쓰지 않음)
+            return None
+        xe = xs[-1]
+        nt = max(1, int(tail / 0.02))
+        for i in range(1, nt + 1):
+            xs.append(xe + tail * i / nt)
+            ys.append(y1)
+            hs.append(0.0)
+        return Path(xs, ys, hs, 1), math.degrees(th)
+
+    @staticmethod
+    def _join(a: Path, b: Path) -> Path:
+        """같은 방향 두 구간을 하나로 (사이 멈춤 없이)."""
+        return Path(list(a.x) + list(b.x[1:]), list(a.y) + list(b.y[1:]), list(a.h) + list(b.h[1:]), a.dir)
+
+    def _rescue_sides(self, cur: int) -> List[int]:
+        """찾을 쪽 순서: 출구를 알면 출구 쪽 먼저, 아니면 확정 장애물이 더 먼 쪽 먼저."""
+        n = self.p.num_side_lanes
+        sides = [d for d in (+1, -1) if abs(cur + d) <= n]
+        if self.exit_pref is not None and self.exit_pref != cur:
+            first = 1 if self.exit_pref > cur else -1
+            return sorted(sides, key=lambda d: d != first)
+        far = lambda d: self.obs.get(cur + d) if self.obs.get(cur + d) is not None else math.inf  # noqa: E731
+        return sorted(sides, key=lambda d: -far(d))
+
+    def _shifts(self, fwd: List[float], back: List[float]):
+        """찾을 시작 자리 (앞으로 가까운 것부터, 그다음 뒤로). 그 방향 직선이 막히면 그 방향 나머지는 건너뜀."""
+        self._shift_stop = None
+        for a in fwd:
+            if self._shift_stop == 'fwd':
+                break
+            yield a
+        self._shift_stop = None
+        for a in back:
+            if self._shift_stop == 'back':
+                break
+            yield a
+
+    def rescue_search(self, allow_back: bool, fwd: bool = True) -> Optional[dict]:
+        """막혔을 때 갈 길: {'d', 'shift'(+앞 / -뒤 m), 'shape', 'segs'(재생할 구간들), 'why'} 또는 None. 위 rescue 설명 순서.
+        길은 지금 실제 자세(x, y, 차 방향)에서 시작 (차로와 틀어져 있어도 그대로 굴려 봄). 녹화 경로는 차로와 5° 안일 때만."""
+        p = self.p
+        x, y, psi = self.pose()
+        cur = self.lane
+        R = p.rescue_r_scale / MAX_CURV                       # 최소 회전반경(0.53 m, calib 3번) x 배율
+        degs, dg = [], p.rescue_deg_min
+        while dg <= p.rescue_deg_max + 1e-6:
+            degs.append(dg)
+            dg += p.rescue_deg_step
+        rec_ok = abs(psi) <= math.radians(5.0)
+        step = max(0.01, p.rescue_step)
+        fwds = [round(i * step, 3) for i in range(int(p.rescue_fwd_max / step + 1e-6) + 1)] if fwd else []
+        bstep = max(0.01, p.rescue_back_step)
+        back = ([-round(i * bstep, 3) for i in range(1, int(p.rescue_back_max / bstep + 1e-6) + 1)]
+                if allow_back else [])
+        for a in self._shifts(fwds, back):
+            lead = None
+            xs0, ys0 = x, y
+            if abs(a) > 0.005:
+                lead = self._ray(x, y, psi, abs(a), 1 if a > 0 else -1)
+                if self._sweep_hit([lead], p.rescue_margin, step=2, end=True, isl_m=p.rescue_island_margin) is not None:
+                    self._shift_stop = 'fwd' if a > 0 else 'back'   # 그쪽으로 더 가면 닿음 -> 그 방향 나머지는 안 봄
+                    continue
+                xs0, ys0 = lead.x[-1], lead.y[-1]
+            for d in self._rescue_sides(cur):
+                y1 = self.center(cur + d)
+                cands = []
+                if rec_ok:
+                    rec = self._anchored(d, xs0)
+                    tail = self._line(rec[-1].x[-1], rec[-1].x[-1] + p.rescue_tail, y1)
+                    hit = (self._sweep_hit(rec, p.hit_margin, isl_m=p.rescue_island_margin)
+                           or self._sweep_hit([tail], p.hit_margin, end=True, isl_m=p.rescue_island_margin))
+                    cands.append(('녹화', rec, hit))
+                seen = set()
+                for dg in degs:
+                    got = self._s_curve(xs0, ys0, psi, y1, dg, R, p.rescue_tail)
+                    if got is None:
+                        continue
+                    path, used = got
+                    key = round(used, 1)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    hit = self._sweep_hit([path], p.rescue_margin, step=2, end=True, isl_m=p.rescue_island_margin)
+                    cands.append((f'S자 {used:.0f}°', [path], hit))
+                for shape, segs, hit in cands:
+                    if hit is not None:
+                        continue
+                    segs = list(segs)
+                    if lead is not None and a > 0:
+                        segs = [self._join(lead, segs[0])] + segs[1:]
+                    elif lead is not None:
+                        segs = [lead] + segs
+                    how = ('그 자리' if abs(a) <= 0.005 else f'{100 * a:.0f} cm 더 가서' if a > 0 else f'{-100 * a:.0f} cm 물러나서')
+                    return {'d': d, 'shift': a, 'shape': shape, 'segs': segs,
+                            'why': f'다른 길: {how} {shape}로 차로 {cur + d}'}
+        return None
+
+    def _begin_rescue(self, r: dict, t: float):
+        p = self.p
+        x, y, psi = self.pose()
+        segs = r['segs']
+        if not p.replay_reverse and any(g.dir < 0 for g in segs) and r['shift'] >= 0:
+            segs = [g for g in segs if g.dir > 0] or segs
+        self.track = Track(segs, p, p.exec_speed, p.exec_rev_speed)
+        self.target = self.lane + r['d']
+        self.cam_ids.clear()
+        self.state = 'EXEC'
+        self.n_exec += 1
+        self.n_rescue = getattr(self, 'n_rescue', 0) + 1
+        self.why = r['why']
+        self.blocked_since = None
+        self.persist.clear()
+        self.events.append(f'[x={x:.2f}] 막힘 -> {r["why"]} (옆 오차 {100 * (y - self.center(self.lane)):+.1f} cm, '
+                           f'방향 {math.degrees(psi):+.1f}°)')
+
+    def _try_rescue(self, t: float) -> Optional[Tuple[float, float]]:
+        """막힘이 연속 reverse_confirm_frames 스캔이면 (rescue_period_s마다) 다른 길을 찾아 바로 시작. 시작했으면 그 틱 명령.
+        한 틱이 길어지지 않게 '앞으로'와 '물러나서' 찾기는 다른 틱에 나눠 함 (서 있는 동안이라 늦어도 됨)."""
+        p = self.p
+        if not p.rescue or not self._persist('rescue', True):
+            return None
+        phase = getattr(self, 'rescue_phase', 'fwd')
+        if phase == 'fwd' and t - getattr(self, 'rescue_t', -1e9) < p.rescue_period_s:
+            return None
+        if phase == 'fwd':
+            self.rescue_t = t
+            r = self.rescue_search(allow_back=False)
+            if r is None and p.rescue_back:
+                self.rescue_phase = 'back'                  # 다음 틱에 물러나서 찾기
+                return None
+        else:
+            self.rescue_phase = 'fwd'
+            r = self.rescue_search(allow_back=True, fwd=False)
+        if r is None:
+            if not getattr(self, '_rescue_none_logged', False):
+                self._rescue_none_logged = True
+                x, _, _ = self.pose()
+                self.events.append(f'[x={x:.2f}] 다른 길도 없음 (앞 {100 * p.rescue_fwd_max:.0f} cm ~ 뒤 '
+                                   f'{100 * p.rescue_back_max if p.rescue_back else 0:.0f} cm, 녹화·S자 '
+                                   f'{p.rescue_deg_min:.0f}~{p.rescue_deg_max:.0f}°) -> 서서 {p.rescue_period_s:.1f}초마다 다시')
+            return None
+        self._rescue_none_logged = False
+        self._begin_rescue(r, t)
+        x, y, psi = self.pose()
+        return self.track.step(x, y, psi, t, self._still(t))
 
     def check_paths(self, obs_len: float = 0.32, obs_half_w: float = 0.115) -> Dict[int, bool]:
         """녹화 경로가 '피하려는 장애물'(지금 차로, 라이다 trigger_mm 앞 정차 LIMO)을 스스로 비켜 가나. {+1: 왼쪽 됨, -1: 오른쪽 됨}.
@@ -949,9 +1256,10 @@ class M7Replay:
             if x >= x_m2 - p.speed * p.latency_s:
                 key0 = (self.lane, fork or p.m2_fork_default)
                 hit = self.m2_hit(key0, max(x_m2, x)) if key0 in self.m2 else None
-                if (hit is not None and p.m2_backup and not self.m2_backed and key0 in self.m2
-                        and x > x_m2 + 0.03 and x - x_m2 <= p.m2_backup_max
-                        and self.m2_hit(key0, x_m2) is None):
+                if self._persist('m2_backup', hit is not None and p.m2_backup and not self.m2_backed and key0 in self.m2
+                                 and x > x_m2 + 0.03 and x - x_m2 <= p.m2_backup_max
+                                 and self.m2_hit(key0, x_m2) is None):
+                    # 라이다 점 하나 튄 것으로 후진하지 않게 연속 reverse_confirm_frames 스캔 확인 (그동안은 아래처럼 장애물 먼저)
                     return self._begin_m2_backup(x, x_m2, f'M2 녹화 길이 지금 자리에선 물체에 닿음 ({hit[0] - x:+.2f} m)')
                 if hit is not None and not getattr(self, '_m2_hit_logged', False):
                     self._m2_hit_logged = True
@@ -985,6 +1293,9 @@ class M7Replay:
             r = self._try_m2_backup(x, '섬 앞 가운데 차로에서 옮길 곳 없음')
             if r is not None:
                 return r
+            r = self._try_rescue(t)
+            if r is not None:
+                return r
             self.why = '섬 앞 가운데 차로: 옮길 곳 없음 -> 정지'
             return 0.0, 0.0
         v_now = p.speed
@@ -1013,8 +1324,17 @@ class M7Replay:
             if g <= p.trigger_mm / 1000.0 + lead:
                 d, why = self.choose(self.lane, self.obs[self.lane])
                 to_b = (p.backup_to_mm or p.trigger_mm) / 1000.0
-                if d is None and p.backup_when_blocked and p.backup_if_mm > 0 and g < to_b - 0.02:
+                if d is not None:
+                    self.persist.pop('rescue', None)
+                    self._rescue_none_logged = False
+                else:
+                    r = self._try_rescue(t)                  # 녹화 경로가 양쪽 다 닿음 -> (막힘 연속 확인 뒤) 다른 길
+                    if r is not None:
+                        return r
+                if self._persist('blocked_backup', d is None and p.backup_when_blocked and p.backup_if_mm > 0
+                                 and g < to_b - 0.02):
                     # 46~50 cm인데 지금 자세로는 경로가 닿음 -> 50 cm까지 물러나 가운데 맞추고 다시
+                    #   (경로 검사는 이번 스캔 라이다 점이라 연속 reverse_confirm_frames 스캔 막혀야 후진. 그동안은 아래에서 정지)
                     self.events.append(f'[x={x:.2f}] 앞 {1000 * g:.0f} mm, 지금 자세로는 막힘 ({why}) -> 후진')
                     self._begin_backup(x, g)
                     return 0.0, 0.0
@@ -1036,8 +1356,14 @@ class M7Replay:
                     self.why = why + (' (물러나 봐도 막힘: 정지 유지)' if self.backed_off
                                       else ' (서서 다시 봄)' if p.no_reverse else '')
                     return 0.0, 0.0
-                if (getattr(self, 'pref_needs_backup', False) and p.backup_when_blocked and p.backup_if_mm > 0
-                        and g < to_b - 0.02 and not getattr(self, 'backed_for_pref', False)):
+                pref_back = (getattr(self, 'pref_needs_backup', False) and p.backup_when_blocked and p.backup_if_mm > 0
+                             and g < to_b - 0.02 and not getattr(self, 'backed_for_pref', False))
+                if pref_back and not self._persist('pref_backup', True):
+                    self.why = f'출구 {self._exit_name()} 쪽 막힘 확인 중 (후진 전 연속 {p.reverse_confirm_frames}스캔)'
+                    return 0.0, 0.0                  # 확인될 때까지 서서 봄 (반대쪽으로 바로 가지 않음)
+                if not pref_back:
+                    self.persist.pop('pref_backup', None)
+                if pref_back:
                     self.backed_for_pref = True
                     self.events.append(f'[x={x:.2f}] 출구 {self._exit_name()} 쪽은 지금 자리에선 닿음 -> 후진해서 출구 쪽으로')
                     self._begin_backup(x, g)
@@ -1084,6 +1410,8 @@ class M7Replay:
         if key not in self.m2 or not (x_m2 + 0.03 < x <= x_m2 + p.m2_late_max + p.m2_backup_max):
             return None
         if self.m2_hit(key, x_m2) is not None:
+            return None
+        if not self._persist('m2_try', True):         # 막힘(라이다 점)이 연속 reverse_confirm_frames 스캔일 때만 후진, 그동안 정지
             return None
         return self._begin_m2_backup(x, x_m2, why)
 
@@ -1227,6 +1555,9 @@ class M7Replay:
                 'steer': self.steer_src if self.state == 'CRUISE' else self.state.lower(), 'plan': self.plan,
                 'gaps_mm': {str(k): (None if self.gap(k) is None else round(1000 * self.gap(k))) for k in self.obs},
                 'why': self.why, 'stop': self.stop_why, 'n_exec': self.n_exec, 'cam_fix_n': self.cam_n,
+                'n_rescue': getattr(self, 'n_rescue', 0),
+                'gaps_raw_mm': {str(k): (None if v is None else round(1000 * (v - x - self.p.lidar_x)))
+                                for k, v in self.obs_raw.items()},
                 'acc_dir': self.acc.state(),
                 'backup': None if not getattr(self, 'backup', None) else round(self.backup['x0'] - x, 2),
                 'align': None if not self.align else f'{self.align["leg"]}{self.align["cycle"]}',

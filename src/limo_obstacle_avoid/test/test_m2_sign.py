@@ -34,7 +34,9 @@ def _scan_world(m, pts):
     """차로 좌표 점 -> 차 기준 점으로 넣기"""
     x, y, psi = m.pose()
     c, s = math.cos(psi), math.sin(psi)
-    m.on_scan_points(0.0, [(c * (px - x) + s * (py - y), -s * (px - x) + c * (py - y)) for px, py in pts])
+    car = [(c * (px - x) + s * (py - y), -s * (px - x) + c * (py - y)) for px, py in pts]
+    for _ in range(max(1, m.p.obs_confirm_frames)):      # 서 있는 물체는 스캔마다 보임 (11/19: 연속 3스캔 확인)
+        m.on_scan_points(0.0, car)
 
 
 def _pole(xc, yc=0.0):
@@ -93,9 +95,13 @@ def test_late_m2_backs_up_to_start_when_path_hits_now():
         if hit_now:
             break
     assert hit_now, '시험 배치를 못 찾음'
-    m.pts = [(a, b, 0.0, 0.0) for a, b in hit_now]
-    m.sign_pts = []
-    m.step(1.0)
+    for i in range(m.p.reverse_confirm_frames):          # 11/19: 후진은 연속 3스캔 같은 판단일 때만
+        m.pts = [(a, b, 0.0, 0.0) for a, b in hit_now]
+        m.sign_pts = []
+        m.scan_seq += 1
+        m.step(1.0 + 0.01 * i)
+        if i < m.p.reverse_confirm_frames - 1:
+            assert m.state != 'BACKUP'
     assert m.state == 'BACKUP' and m.backup['to_x'] == x_m2
     # 후진해서 시작 자리에 오면 녹화대로 시작
     m.offset = (x_m2, 0.0, 0.0)
