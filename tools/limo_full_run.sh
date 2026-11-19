@@ -45,10 +45,17 @@ case "$(ros2 pkg prefix autorace_bringup)" in "$WS"/install/*) ;; *) die "autora
 
 # ------------------------------------------------------------ 3. 정리
 say 3/6 "남은 노드 정리"
-ps -eo pid,cmd | grep -E "ackermann|limo|obstacle_node|parking_node|lane_node|detector_node|mission_node|class_command|fork_node|avoid_node|ydlidar|orbbec|component_container|rosbag|exposure" \
-  | grep -v -E "grep|limo_full_run" | awk '{print $1}' | xargs -r kill -9 2>/dev/null
-ros2 daemon stop >/dev/null 2>&1; ros2 daemon start >/dev/null 2>&1; sleep 2
-n=$(ros2 node list 2>/dev/null | wc -l); [ "$n" -eq 0 ] || { ros2 node list; die "노드가 남아 있음 (다른 터미널 launch 끄기)"; }
+# 팀 노드 전부(launch 파일의 executable) + 차체·라이다·카메라 + 예전 launch
+PAT="ros2 launch|ackermann|limo_base|ydlidar|orbbec|component_container|rosbag|avoid_node|chime_node|class_command|debug_view|detector_node|exposure_node|fork_node|lane_node|m7_dash_node|m7_replay_node|m7_waypoint_node|mission_node|obstacle_node|parking_node|sys_monitor|yellow_side|$WS/install"
+ps -eo pid,cmd | grep -E "$PAT" | grep -v -E "grep|limo_full_run" | awk '{print $1}' | xargs -r kill -9 2>/dev/null
+sleep 1
+ros2 daemon stop >/dev/null 2>&1; ros2 daemon start >/dev/null 2>&1; sleep 3
+n=$(ros2 node list 2>/dev/null | wc -l)
+if [ "$n" -ne 0 ]; then
+  ros2 node list
+  echo "  위 노드가 아직 보임 -> 프로세스 찾기:"; ps -eo pid,cmd | grep -E "$(ros2 node list | sed 's#^/##' | paste -sd'|')" | grep -v grep | head
+  die "노드가 남아 있음. 다른 터미널(다른 사람 노트북의 ros2 포함) 끄기. 같은 와이파이의 다른 팀이면 'export ROS_DOMAIN_ID=<우리 번호>'"
+fi
 
 # ------------------------------------------------------------ 4. launch
 say 4/6 "전체 launch (m7_impl:=$IMPL)  로그: $LOG"
@@ -60,8 +67,7 @@ cleanup() {
   timeout 5 ros2 topic pub --once /mission/estop std_msgs/msg/Bool "{data: true}" >/dev/null 2>&1
   [ -n "${BPID:-}" ] && kill -INT "$BPID" 2>/dev/null && wait "$BPID" 2>/dev/null
   kill -INT "$LPID" 2>/dev/null; sleep 3; kill -9 "$LPID" 2>/dev/null
-  ps -eo pid,cmd | grep -E "ackermann|obstacle_node|parking_node|lane_node|detector_node|mission_node|class_command|fork_node|avoid_node|ydlidar|component_container" \
-    | grep -v grep | awk '{print $1}' | xargs -r kill -9 2>/dev/null
+  ps -eo pid,cmd | grep -E "$PAT" | grep -v -E "grep|limo_full_run" | awk '{print $1}' | xargs -r kill -9 2>/dev/null
   echo "  bag: $BAGDIR/$NAME   launch 로그: $LOG"
   echo "  노트북으로: scp -r wego@$(hostname -I | awk '{print $1}'):~/bags/$NAME C:\\Users\\shpae\\Downloads\\"
   exit 0
