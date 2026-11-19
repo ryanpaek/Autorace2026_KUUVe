@@ -191,6 +191,7 @@ class LaneParams:
     #   그 갈래 바깥선(B면 맨 오른쪽)이 보이면 거기서 차로 폭(0.8~1.25배) 안쪽에 있는 선을 섬 변으로 고른다. false = 예전
     island_ref: bool = False
     island_max_deg: float = 35.0           # 11/20 yubin: 섬 기준에서 이보다 기운 선은 섬 변 아님 (섬 앞·뒤 사선 약 46°, 바깥선을 비스듬히 본 것)
+    island_wrong_side_mm: float = 130.0    # 11/20 yubin: 섬 변이 차 기준점에서 반대편(A=왼쪽, B=오른쪽)으로 이보다 멀면 섬 변 아님 (섬 변에 걸친 차는 ~100)
     island_letter_frames: int = 8          # 그 갈래 바닥 글자를 본 뒤 이 프레임 동안 글자 위치로 섬 변을 고름 (글자 = 차로 가운데)
     continuity_lambda: float = 3.0    # 쌍 점수 = |폭-예상| + lambda*|중점-직전 중점|
     side_deadband_mm: float = 40.0    # 한쪽 선이 중심 근처일 때 좌/우 판정 유지 폭
@@ -549,9 +550,6 @@ def detect_lanes(bev: np.ndarray, cfg: BevConfig, p: LaneParams, mode: str,
             if pick is None:
                 expect = vc - exp_w / 2.0 if mode == 'left_only' else vc + exp_w / 2.0
                 pick = min(xs, key=lambda x: abs(x - expect))
-                # 11/20 yubin: 섬 변이 화면 밖이면 반대편 바깥선만 남음 (A 끝 직선: 차 왼쪽 선을 R로 잡아 왼쪽으로 나감) -> 선 없음
-                if (pick - vc) * (1.0 if mode == 'right_only' else -1.0) < -0.25 * exp_w:
-                    return det
             if mode == 'left_only':
                 det.left_x0, det.status = pick, 'L'
             else:
@@ -643,19 +641,20 @@ def detect_lanes(bev: np.ndarray, cfg: BevConfig, p: LaneParams, mode: str,
 # ---------------------------------------------------------------------------
 # 슬라이딩 윈도우 추적
 # ---------------------------------------------------------------------------
-def track_angle_deg(tr: Optional[np.ndarray], cfg: BevConfig) -> Optional[float]:
-    """track_line 결과의 기울기 (차 앞 방향 기준, 오른쪽 +, 도). 점이 3개 미만이면 None."""
+def track_fit(tr: Optional[np.ndarray], cfg: BevConfig) -> Optional[Tuple[float, float]]:
+    """track_line 결과를 직선으로 맞춤: (기울기 도, 차 기준점 옆으로 잰 선까지 수직 거리 mm). 오른쪽 +. 점 3개 미만이면 None."""
     if tr is None:
         return None
     ok = ~np.isnan(tr[:, 0])
     if int(ok.sum()) < 3:
         return None
-    fwd = -tr[ok, 1] * cfg.mm_per_px_y
-    lat = tr[ok, 0] * cfg.mm_per_px_x
+    fwd = cfg.ref_to_bev_bottom_mm + (cfg.bev_h - 1 - tr[ok, 1]) * cfg.mm_per_px_y
+    lat = (tr[ok, 0] - cfg.vehicle_col) * cfg.mm_per_px_x
     if float(fwd.max() - fwd.min()) < 1e-6:
-        return 90.0
-    slope = float(np.polyfit(fwd, lat, 1)[0])
-    return math.degrees(math.atan(slope))
+        return 90.0, float(lat.mean())
+    slope, icpt = (float(v) for v in np.polyfit(fwd, lat, 1))
+    a = math.atan(slope)
+    return math.degrees(a), icpt * math.cos(a)
 
 
 def track_line(bev: np.ndarray, x0: float, cfg: BevConfig,
@@ -1745,10 +1744,12 @@ class LaneFollower:
         self.prev_line_masks = (self._line_mask(lab_full, left), self._line_mask(lab_full, right))
 
         if p.island_ref and self.mode in ('left_only', 'right_only') and det.status in ('L', 'R'):
-            ang = track_angle_deg(left if det.status == 'L' else right, cfg)
-            out.debug['island_deg'] = ang
-            if ang is not None and abs(ang) > p.island_max_deg:
-                # 11/20 yubin: M2 재생 직후 섬 앞 사선(약 46°)을 섬 변으로 따라가 바깥으로 나감 -> 선 없음으로 (lost_never_stop: 직선 유지)
+            fit = track_fit(left if det.status == 'L' else right, cfg)
+            out.debug['island_fit'] = fit
+            side = 1.0 if self.mode == 'right_only' else -1.0
+            # 11/20 yubin: 섬 변이 아닌 선은 선 없음으로 (lost_never_stop: 갈래 직선 방향 유지)
+            #   - 크게 기운 선: 섬 앞 사선(약 46°)  - 차 반대편 선: 섬 변이 화면 밖이거나 재생 끝에 비스듬해 바깥선이 차 앞을 가로지름
+            if fit is not None and (abs(fit[0]) > p.island_max_deg or fit[1] * side < -p.island_wrong_side_mm):
                 det.status, det.left_x0, det.right_x0 = 'NONE', None, None
                 out.status = 'NONE'
                 left = right = None

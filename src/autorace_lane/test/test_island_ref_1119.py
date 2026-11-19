@@ -65,3 +65,15 @@ def test_only_far_side_outer_line_is_not_island_edge():
     cfg, lf = _lf()
     lf.mode = 'right_only'
     assert lf.process_bev(_scene(cfg, [260.0]), blank(cfg), speed=0.2).status == 'R'   # 맞는 쪽 선은 그대로
+
+
+def test_outer_line_crossing_ahead_is_not_island_edge():
+    """11/20 yubin sim_1 042914: A 재생 끝에 차가 바깥쪽으로 21° -> 왼쪽 바깥선이 차 앞 가운데를 지나 오른쪽으로 뻗음. 섬 변 아님"""
+    import math
+    cfg, lf = _lf()
+    lf.mode = 'right_only'
+    ys = np.linspace(0, 3000, 50)
+    img = blank(cfg)
+    t = math.tan(math.radians(21.0))
+    draw_polyline_mm(img, cfg, -250.0 / math.cos(math.radians(21.0)) + ys * t, ys)
+    assert lf.process_bev(img, blank(cfg), speed=0.2).status == 'NONE'
