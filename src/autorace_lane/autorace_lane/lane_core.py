@@ -190,7 +190,8 @@ class LaneParams:
     #   B면 섬 오른쪽 변 = 왼쪽 선(left_only). 차가 섬 변 위에 걸쳐 있으면 가장 가까운 선이 섬 반대쪽 변이 됨(1119_09 133~136 s) ->
     #   그 갈래 바깥선(B면 맨 오른쪽)이 보이면 거기서 차로 폭(0.8~1.25배) 안쪽에 있는 선을 섬 변으로 고른다. false = 예전
     island_ref: bool = False
-    island_letter_frames: int = 8          # 그 갈래 바닥 글자를 본 뒤 이 프레임 동안 글자 위치로 섬 변을 고름 (글자 = 차로 가운데)
+    island_letter_frames: int = 8
+    island_no_circle: bool = True          # left_only/right_only에서 원 맞추기 대신 다항식 (섬 꼬리 꺾임)          # 그 갈래 바닥 글자를 본 뒤 이 프레임 동안 글자 위치로 섬 변을 고름 (글자 = 차로 가운데)
     continuity_lambda: float = 3.0    # 쌍 점수 = |폭-예상| + lambda*|중점-직전 중점|
     side_deadband_mm: float = 40.0    # 한쪽 선이 중심 근처일 때 좌/우 판정 유지 폭
     side_track_mm: float = 300.0      # 한쪽 선만 보일 때, 직전 시작점에서 이 안이면 같은 선으로 본다 (차로 폭의 절반 남짓)
@@ -1727,8 +1728,11 @@ class LaneFollower:
         fit_order = self.fit_order_override or (1 if self.mode == 'zigzag' else p.fit_order)
         cl = None
         if det.status != 'NONE':
+            # 11/20 시뮬(M2 B 갈래): 섬 꼬리(뾰족한 끝)에서 섬 변이 꺾여 원 맞추기가 중심선을 반대쪽에 만듦
+            #   (오프셋 +30 <-> +350 mm 번갈아) -> 섬 기준 한쪽 선 모드에선 원 맞추기 안 씀 (island_no_circle)
+            no_circ = self.mode == 'zigzag' or (p.island_no_circle and p.island_ref and self.mode in ('left_only', 'right_only'))
             cl = build_centerline(left, right, det, cfg, p, fit_order,
-                                  use_circle=(self.mode != 'zigzag'), mask=bev_lane)
+                                  use_circle=not no_circ, mask=bev_lane)
         out.debug['centerline'] = cl
 
         # 연속성 상태 갱신
