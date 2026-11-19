@@ -362,6 +362,10 @@ class LaneParams:
     curve_kappa_gain: float = 0.0
     yellow_guard_look_mm: float = 600.0   # 노란 실선까지 거리를 잴 때 이 앞까지만 (400으로 줄이면 M7 1차로 시뮬레이션 흔들림 37 -> 89 mm)
     yellow_guard_min_urg: float = 0.35    # 지킴이 걸리는 순간 최소 세기 (0이면 margin에서 0부터 hard까지 서서히)
+    # 11/19 corner_fix (실험, 기본 꺼짐 = 기존 동작). 05·06·08판 분석: 코너 중 조향이 풀리거나 뒤집혀 실패
+    keep_kappa_on_heading_switch: bool = False  # normal<->heading 전환 때 조향 명령·코너 판단을 0으로 지우지 않음 (4번 강제 원호 깜빡임)
+    corner_lock: bool = False          # 코너 미리보기 중 |도면 곡률| >= corner_ld_on 이면 기존 섞기 결과에 '덜 꺾기 하한'만 건다
+    corner_lock_corr_max: float = 0.3  #   코너 방향으로 최소 |도면 곡률| - 이 값 (1/m). 더 꺾는 쪽(바깥 밀림 보정)은 기존 그대로
 
     @classmethod
     def from_dict(cls, d: dict) -> 'LaneParams':
@@ -1046,6 +1050,13 @@ def direct_target(left_pix, right_pix, status: str, half_mm: float, lookahead_mm
     return tgt, low, c
 
 
+def corner_lock_kappa(k: float, k_ff: float, corr_max: float) -> float:
+    """corner_fix 코너 고정: 코너 방향으로 최소 |k_ff| - corr_max 는 꺾게 한다.
+    덜 꺾거나 반대로 꺾는 것(L/R 헷갈림)만 막고, 더 꺾는 쪽은 k 그대로 (kappa_max 클램프는 뒤에서)."""
+    floor = abs(k_ff) - corr_max
+    return max(k, floor) if k_ff > 0 else min(k, -floor)
+
+
 def pp_kappa_with_latency(tgt, kappa_cmd_left: float, speed: float, latency_sec: float) -> float:
     """목표점(x 오른쪽+, y 전방+, mm)으로 가는 Pure Pursuit 곡률 (1/m, 오른쪽 +).
 
@@ -1569,8 +1580,16 @@ class LaneFollower:
         if mode not in MODES:
             raise ValueError(f'unknown lane mode: {mode}')
         if mode != self.mode:
+            # 코너 도중(미리보기 앞 창에 코너 곡률)일 때만. 코너 끝·합류 S자 등 다른 전환은 기존처럼 0부터
+            keep = (self.p.keep_kappa_on_heading_switch and {mode, self.mode} == {'normal', 'heading'}
+                    and bool(self.route_corner and self.route_k
+                             and max(abs(k) for k in self.route_k) >= self.p.corner_ld_on))
+            saved = (self.kappa_cmd, self.in_corner_spd, self.in_corner_ld)
             self.mode = mode
             self.reset()
+            if keep:
+                # 강제 원호(heading)와 차선(normal)이 코너 중에 오갈 때 조향이 0부터 다시 오르며 풀리던 것
+                self.kappa_cmd, self.in_corner_spd, self.in_corner_ld = saved
         self.fit_order_override = fit_order
         if mode == 'heading':
             self.yaw_ref = yaw_ref if yaw_ref is not None else yaw
@@ -1850,6 +1869,7 @@ class LaneFollower:
                 kappa_raw = self.last_good_kappa * (p.lost_decay ** self.lost_frames)
         # 도면 곡률 미리 넣기
         k_ff = self._route_kappa(p.route_ff_preview_mm + speed * p.latency_comp_sec * 1000.0)
+        corner_locked = False
         if k_ff is not None and self.route_corner and source in ('lane', 'memory') and (abs(k_ff) > 1e-6 or not p.route_corner_zero_lane):
             # 11/12 밤 실차: M7 직전 코너(미션 노드가 IMU로 '아직 코너 중')에서 차선 노드가 선을 '보고' 있는데도 직진했다.
             #   이 코너에서는 선이 잘 보여도 코너 곡률을 route_corner_weight 만큼 섞고, 도면과 다르다고 버리지 않는다
@@ -1859,6 +1879,11 @@ class LaneFollower:
             # 11/12 밤: 코너에서 바깥으로 밀려 선을 밟고 놓침 -> 차선이 코너 방향으로 더 크게 꺾으라고 하면 그 값을 그대로 (적어도 코너 곡률, 필요하면 더)
             if k_lane * k_ff > 0 and abs(k_lane) > abs(kappa_raw):
                 kappa_raw = k_lane
+            if p.corner_lock and abs(k_ff) >= p.corner_ld_on:
+                # corner_fix: L/R 헷갈림으로 코너 중 조향이 풀리거나 뒤집히지 않게 '덜 꺾기 하한'만. 아래 코너 배율도 안 곱함
+                #   (선 보일 때 1.2배·놓쳤을 때(route) 1배로 조향이 출렁이던 것)
+                kappa_raw = corner_lock_kappa(kappa_raw, k_ff, p.corner_lock_corr_max)
+                corner_locked = True
         elif k_ff is not None and (p.route_ff_weight > 0.0 or p.route_ff_weight_lost > 0.0):
             out.ff_kappa = k_ff
             w = 0.0
@@ -1876,7 +1901,7 @@ class LaneFollower:
         gain = p.corner_kappa_gain
         if self.in_corner_spd and p.curve_kappa_gain > 0.0:
             gain = p.curve_kappa_gain                              # 11/19: 커브(일반 주행·코너 미리보기)에서만 더 크게. 지그재그 등은 그대로
-        if (gain != 1.0 and source in ('lane', 'memory') and kappa_raw is not None
+        if (gain != 1.0 and not corner_locked and source in ('lane', 'memory') and kappa_raw is not None
                 and abs(kappa_raw) > p.corner_gain_from):
             kappa_raw = kappa_raw * gain                           # 커브: 조금 더 크게 (위 corner_kappa_gain 설명)
 

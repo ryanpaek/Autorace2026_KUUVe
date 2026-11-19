@@ -166,6 +166,7 @@ DEFAULT_PARAMS = {
     'm1_lane_min_hold': 6,           #   한 번 원호로 바꾸면 최소 이만큼 틱(20 Hz) 원호 유지 (왔다갔다 방지)
     'lane_first': True,              # 11/16: 강제 경로(합류 S자·라바콘 뒤 원호)는 선을 놓쳤을 때만, 선이 보이면 차선 주행
     'lane_first_lost_frames': 5,     #   이만큼 연속으로 선을 놓쳐야 강제 경로로
+    'm1_lane_back_frames': 1,        # corner_fix (실험): 4번(M1) 강제 원호 중 선이 이만큼 연속 보여야 차선으로 복귀. 1 = 기존 동작
     # 11/18: M2 CSV 재생이 끝나면 그냥 일반 차선 주행. 한쪽 선 모드(left/right_only)·좁은 폭(460)·직선 방향 붙잡기·
     #   합류 강제 S자(m2_merge)를 전부 건너뜀. M2_EXIT의 좌하단 코너 미리보기는 그대로. false면 예전 동작
     'm2_plain_lane': True,
@@ -1122,7 +1123,7 @@ class MissionFSM:
             self.log.append(f'M2 end: route says {rem_r:.0f}mm left, distance says {rem_d:.0f}mm -> distance (route s off)')
         return rem_d <= 0.0
 
-    def _lane_first(self, inp) -> bool:
+    def _lane_first(self, inp, back_frames: int = 1) -> bool:
         """11/16: 선이 보이면 강제 경로(IMU heading) 대신 차선 주행 (lane_first).
 
         1116_01: 라바콘 뒤 코너·합류 S자에서 차선 노드가 선을 보고 있었는데도(L/R/BOTH) 강제 원호·S자를 따라가다
@@ -1131,8 +1132,16 @@ class MissionFSM:
             return False
         lane = inp.lane or {}
         good = lane.get('status') in ('BOTH', 'L', 'R') and not lane.get('low_conf')
-        self._lf_bad = 0 if good else getattr(self, '_lf_bad', 0) + 1
-        return self._lf_bad < self.p.get('lane_first_lost_frames', 5)
+        n_lost = self.p.get('lane_first_lost_frames', 5)
+        if good:
+            self._lf_good = getattr(self, '_lf_good', 0) + 1
+            if getattr(self, '_lf_bad', 0) >= n_lost and self._lf_good < back_frames:
+                return False                 # corner_fix: 강제 경로 중엔 선이 back_frames 연속 보여야 복귀 (깜빡임에 모드 전환 X)
+            self._lf_bad = 0
+        else:
+            self._lf_good = 0
+            self._lf_bad = getattr(self, '_lf_bad', 0) + 1
+        return self._lf_bad < n_lost
 
     def _m2_merge(self, inp, db: Optional[float] = None) -> Optional[Command]:
         """A/B 뒤 합류: 도면 규격으로 강제 S자 (m2_merge 설명). 하는 중이면 명령, 아니면 None."""
@@ -1514,7 +1523,8 @@ class MissionFSM:
         yaw_ref = m['axis'] + math.atan2(ty - m['y'], tx - m['x'])
         yaw_ref = math.atan2(math.sin(yaw_ref), math.cos(yaw_ref))
         v = min(speed, p.get('m1_corner_speed', speed)) if m['s'] >= m['xs'] - 300.0 else speed
-        if self._lane_first(inp) and not self._m1_lane_underturn(inp, m, R, d, arc_end):
+        if (self._lane_first(inp, int(self.p.get('m1_lane_back_frames', 1)))
+                and not self._m1_lane_underturn(inp, m, R, d, arc_end)):
             return self._lane(v)                      # 11/16: 선이 보이면 차선 주행 (원호 위치 계산은 계속)
         return self._lane(v, 'heading', yaw_ref=round(yaw_ref, 4))
 
